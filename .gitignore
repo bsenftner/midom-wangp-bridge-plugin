@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+worker_config.json
+worker_config.local.json
+internal-docs/
+
+# Local runtime config and generated files
+worker_config.json
+__pycache__/
+*.py[cod]
+.DS_Store

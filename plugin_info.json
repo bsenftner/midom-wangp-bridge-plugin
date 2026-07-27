@@ -1,0 +1,8 @@
+{
+  "name": "Midom-at-AWS-worker-bridge",
+  "author": "Method Intelligence, LLC",
+  "version": "0.3.0",
+  "description": "Connects a local WanGP workstation to Midom as a scoped project media worker for curated image, audio, music, video, and local media-processing jobs.",
+  "wan2gp_version": "",
+  "uninstallable": true
+}
