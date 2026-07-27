@@ -24,7 +24,7 @@ from shared.utils.plugins import WAN2GPPlugin
 
 
 PLUGIN_ID = "Midom-at-AWS-worker-bridge"
-PLUGIN_NAME = "Midom-at-AWS-worker-bridge"
+PLUGIN_NAME = "Midom Remote Worker"
 CONFIG_FILENAME = "worker_config.json"
 MAX_PROMPT_CHARS = 4000
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
@@ -461,8 +461,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.1.0"
-        self.description = "Connects WanGP to an AWS-hosted job broker."
+        self.version = "0.3.0"
+        self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
         self._active_job = None
@@ -510,7 +510,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self.request_component("state")
         self.add_tab(
             tab_id="aws_worker_bridge",
-            label="Midom AWS Worker",
+            label=PLUGIN_NAME,
             component_constructor=self.create_ui,
         )
 
@@ -3458,7 +3458,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def create_ui(self, api_session):
         config = self._load_config()
 
-        gr.Markdown("## Midom-at-AWS-worker-bridge")
+        gr.Markdown(f"## {PLUGIN_NAME}")
         gr.Markdown("Pair this local WanGP worker only with Midom projects you control. HTTPS is required except explicit local development modes.")
         gr.Markdown(
             "Local Media Processing is reported separately from AI generation. "

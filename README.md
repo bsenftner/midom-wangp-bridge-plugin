@@ -1,6 +1,6 @@
-# Midom WanGP Bridge Plugin
+# Midom Remote Worker
 
-`Midom-at-AWS-worker-bridge` connects a local WanGP installation to Midom as a project-scoped media generation worker.
+Midom Remote Worker connects a local WanGP installation to Midom as a project-scoped media generation worker. The plugin folder/repository slug is `Midom-at-AWS-worker-bridge`.
 
 WanGP provides local access to many open-source image, audio, music, and video models. Midom provides project organization, worker pairing, job queueing, file storage, provenance, and media-production workflows. This plugin is the bridge between them: it lets a local GPU workstation running WanGP claim Midom media jobs, run selected WanGP models, and upload the generated artifacts back to the correct Midom project.
 
@@ -60,7 +60,7 @@ The security boundary is Midom's server-side worker authorization and artifact v
    ```
 
 3. Start or restart WanGP.
-4. Open the WanGP UI and select the `Midom AWS Worker` plugin tab.
+4. Open the WanGP UI and select the `Midom Remote Worker` plugin tab.
 5. In Midom, create a project worker pairing code for the project you want this WanGP machine to serve.
 6. In the plugin tab, enter:
    - Midom API Base URL.
@@ -307,7 +307,7 @@ Some capabilities appear only when local runtime support is available:
 ## Basic Use
 
 1. Start WanGP on the GPU workstation.
-2. Open the `Midom AWS Worker` plugin tab.
+2. Open the `Midom Remote Worker` plugin tab.
 3. Pair the worker to a Midom project with a fresh Midom pairing code.
 4. Click Update Capabilities after changing local WanGP model configuration or installing new supported assets.
 5. Start the worker loop if it is not already running.
