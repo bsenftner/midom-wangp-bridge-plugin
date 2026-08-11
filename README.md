@@ -1,8 +1,8 @@
 # Midom Remote Worker
 
-Midom Remote Worker connects a local WanGP installation to Midom as a project-scoped media generation worker. The plugin folder/repository slug is `Midom-at-AWS-worker-bridge`.
+Midom Remote Worker connects a local WanGP installation to Midom as a project-scoped media worker. The plugin folder/repository slug is `Midom-at-AWS-worker-bridge`.
 
-WanGP provides local access to many open-source image, audio, music, and video models. Midom provides project organization, worker pairing, job queueing, file storage, provenance, and media-production workflows. This plugin is the bridge between them: it lets a local GPU workstation running WanGP claim Midom media jobs, run selected WanGP models, and upload the generated artifacts back to the correct Midom project.
+WanGP provides local access to many open-source image, audio, music, and video models. Midom provides project organization, worker pairing, job queueing, file storage, provenance, and media-production workflows. This plugin is the bridge between them: it lets a local workstation running WanGP claim Midom media jobs, run selected WanGP models or deterministic FFmpeg processing operations, and upload the completed artifacts back to the correct Midom project.
 
 The plugin intentionally exposes a curated model set instead of raw WanGP controls. Normal Midom users should not need to know WanGP prompt-type letters, local LoRA filenames, filesystem paths, sampler internals, or experimental model switches.
 
@@ -23,6 +23,7 @@ These Midom Blog posts show the kinds of organized media workflows this bridge i
 - Downloads only job-scoped inputs through Midom worker routes.
 - Validates each claimed job against a local model-specific contract before calling WanGP internals.
 - Runs generation through a background-safe WanGP session.
+- Runs selected deterministic FFmpeg media-processing jobs locally for paired Midom projects.
 - Uploads generated artifacts with SHA-256 metadata.
 - Reports progress, completion, failure, heartbeat, revocation, and disconnect status through Midom worker APIs.
 
@@ -45,6 +46,7 @@ This plugin owns:
 - Job polling and explicit claim.
 - Local input validation and WanGP settings mapping.
 - WanGP execution.
+- Local FFmpeg processing for supported non-AI media jobs.
 - Artifact discovery and upload.
 - Local stop/disconnect controls.
 
@@ -105,7 +107,7 @@ The current multi-project behavior is:
 
 If Midom revokes a worker token, the plugin removes that stale local pairing when it receives HTTP 401/403 for non-active pairing operations. A valid sibling pairing can continue running.
 
-## Supported Models
+## Supported AI Models And Local Processing
 
 The exact model list is reported to Midom at pairing and capability update time. Midom should show only models reported by the worker and allowed by Midom's server-side model policy.
 
@@ -277,6 +279,10 @@ Video output is MP4.
 
 ### Local Media Processing
 
+Local media-processing capabilities are reported separately from AI generation. These jobs still use the same Midom worker pairing, token, candidate polling, claim, input download, progress, artifact upload, complete, fail, disconnect, and revoke routes.
+
+These operations are deterministic FFmpeg work. They are not WanGP AI generation jobs, but they run inside the same local worker process so project-owned hardware can take work off the shared Midom server.
+
 `event_video_ffmpeg_processor`
 
 - Deterministic Video Collection Event processing, not AI generation.
@@ -290,6 +296,64 @@ Video output is MP4.
 - Applies local FFmpeg subprocess timeouts and cancellation handling so a stuck encode does not hold a claimed job indefinitely.
 
 Midom remains responsible for poster generation, captions, moderation, approval, publication, gallery visibility, and final artifact validation.
+
+`storyboard_ffmpeg_processor`
+
+- Durable Storyboard FFmpeg processing for paired Midom projects.
+- Used by Multi-Camera Storyboards and Media Storyboards when Midom routes eligible operations to a paired worker.
+- Lets card-level and assembly-level video work continue after a browser tab is closed or refreshed.
+- Produces exactly one H.264/AAC MP4 artifact per job.
+- Uses the existing claimed-job input download route and canonical `inputs[].input_id` values.
+- Validates downloaded input MIME types by input role before processing.
+- Reports progress while FFmpeg runs, applies subprocess timeouts, and terminates FFmpeg on cancellation.
+
+Currently advertised operation types include:
+
+- `multicam_card_pass_through_take`
+- `multicam_card_trim_take`
+- `multicam_card_overlay_take`
+- `multicam_final_assembly`
+- `multicam_optimize_video`
+- `optimize_video`
+- `replace_video_soundtrack`
+- `multicam_seekable_mp4`
+- `multicam_ai_video_take_prepare`
+- `mediastoryboard_card_pass_through_take`
+- `mediastoryboard_card_local_video_take`
+- `mediastoryboard_card_trim_take`
+- `mediastoryboard_card_edge_trim_take`
+
+Storyboard overlay support includes:
+
+- Static rectangle picture-in-picture overlays.
+- Animated and interpolated rectangle overlays.
+- Animated position, scale, and opacity.
+- Fixed-canvas animated scale handling for FFmpeg stability.
+- Base-video or overlay-video audio selection.
+- PNG and JPEG luminance mattes, where white reveals the overlay, black hides it, and gray partially reveals it.
+
+Storyboard final assembly support includes:
+
+- Ordered segment assembly.
+- Per-segment trims.
+- Normalization to one output size, frame rate, H.264 video, and AAC audio before concatenation.
+- Silent AAC audio fill for no-audio segments.
+- Web-ready MP4 output with `+faststart`.
+
+Storyboard optimization support includes:
+
+- H.264/AAC MP4 re-encode.
+- `yuv420p` output.
+- `+faststart`.
+- Optional proportional downscaling by `max_dimension`.
+- Configurable CRF, preset, and audio bitrate when sent by Midom.
+
+Storyboard soundtrack replacement support includes:
+
+- Replacing a video's audio with a separate AudioMass or soundtrack export.
+- Accepting either audio files or video containers with audio streams for `source_audio` and `soundtrack_audio`.
+- Mapping only the audio stream from video-container audio-role inputs.
+- Honoring video start offset, soundtrack start offset, requested duration, and optional head/tail silence.
 
 ## WanGP Asset Requirements
 
@@ -318,6 +382,8 @@ Some capabilities appear only when local runtime support is available:
 If the worker has been idle for a long time, the plugin gradually backs off polling. After long-idle standby, use the local Wake for Active Use button before expecting immediate job pickup.
 
 For live Video Collection Events, use Event Video Processing Keep Awake before the upload window starts. The 4h, 8h, and 12h keep-awake buttons are local-only controls that keep compatible Event Video Processing pairings out of long-idle standby so Midom can queue bursty event uploads to the local processor instead of immediately falling back to hosted processing. Disable it after the event window if normal idle standby behavior is preferred.
+
+For Storyboard FFmpeg work, Midom decides whether a job is eligible for a paired worker. If a compatible worker is available, Midom can route card rendering, overlay, trimming, final assembly, optimization, and soundtrack replacement jobs to this plugin; otherwise Midom can run its hosted fallback path.
 
 ## Troubleshooting
 
@@ -350,6 +416,21 @@ Jobs queue but do not start quickly:
 - Check whether the worker is running.
 - Check whether the worker is in long-idle standby and needs Wake for Active Use.
 - Check whether another paired project already owns the active local WanGP generation.
+- Check whether the pairing was created with the job family enabled. Midom may offer separate pairing choices for AI Media Generation, Event Video Processing, and Storyboard FFmpeg processing.
+
+Storyboard FFmpeg jobs run hosted instead of on the worker:
+
+- Restart WanGP after updating the plugin so the new capability report is loaded.
+- Create a fresh pairing if Midom still shows old capabilities for the worker.
+- Confirm the pairing allows the relevant local processing job type.
+- Confirm the plugin log reports `storyboard_ffmpeg_processor` capabilities.
+- Confirm the specific operation type is advertised by the worker and allowed by Midom.
+
+Storyboard matte overlays render as normal rectangles:
+
+- Confirm the job includes an `overlay_image` input with a matte/mask role, or a `processing.operation_payload.mask_dbfileid` / `mask_input_id` value matching the downloaded matte input.
+- Confirm the plugin log says `matte_detected=True` and `final_overlay_mode=luminance_matte`.
+- If a matte is provided but cannot be applied, the plugin should fail the job clearly instead of silently rendering an unmasked rectangle.
 
 ## Security Notes
 

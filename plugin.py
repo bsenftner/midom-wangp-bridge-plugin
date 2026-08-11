@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import json
+import math
 import mimetypes
 import queue
 import re
@@ -26,6 +27,7 @@ from shared.utils.plugins import WAN2GPPlugin
 PLUGIN_ID = "Midom-at-AWS-worker-bridge"
 PLUGIN_NAME = "Midom Remote Worker"
 CONFIG_FILENAME = "worker_config.json"
+LOCAL_WANGP_BUSY_MESSAGE = "Local WanGP is busy with another UI or Deepy generation; queued Midom jobs will wait."
 MAX_PROMPT_CHARS = 4000
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_AUDIO_BYTES = 52_428_800
@@ -46,6 +48,17 @@ EVENT_VIDEO_X264_BUFSIZE = "16M"
 EVENT_VIDEO_TIMEOUT_BASE_SECONDS = 120
 EVENT_VIDEO_TIMEOUT_MULTIPLIER = 12
 EVENT_VIDEO_TIMEOUT_MAX_SECONDS = 7200
+STORYBOARD_FFMPEG_PROCESSOR_ID = "storyboard_ffmpeg_processor"
+STORYBOARD_FFMPEG_PROCESSING_TASK = "storyboard_ffmpeg_processing"
+MAX_STORYBOARD_VIDEO_INPUT_BYTES = 1_073_741_824
+MAX_STORYBOARD_VIDEO_OUTPUT_BYTES = 536_870_912
+MAX_STORYBOARD_AUDIO_INPUT_BYTES = 104_857_600
+MAX_STORYBOARD_IMAGE_INPUT_BYTES = MAX_IMAGE_BYTES
+MAX_STORYBOARD_VIDEO_DURATION_SECONDS = 30 * 60
+STORYBOARD_TIMEOUT_BASE_SECONDS = 120
+STORYBOARD_TIMEOUT_MULTIPLIER = 12
+STORYBOARD_TIMEOUT_MAX_SECONDS = 7200
+STORYBOARD_OUTPUT_FPS = 30
 MAX_AUDIO_DURATION_SECONDS = 120
 DRAMABOX_MAX_DURATION_SECONDS = 120
 DRAMABOX_MAX_DIALOGUE_SPEAKERS = 8
@@ -99,6 +112,7 @@ JOB_KEEPALIVE_RETRY_SECONDS = 15
 JOB_WAIT_LOG_SECONDS = 10
 SIBLING_BUSY_MESSAGE = "Shared local WanGP engine is busy with another paired project."
 REQUEST_TIMEOUT_SECONDS = 30
+PAIRING_TIMEOUT_SECONDS = 15
 UPLOAD_TIMEOUT_SECONDS = 120
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 USER_AGENT = f"{PLUGIN_ID}/0.1.0"
@@ -146,9 +160,73 @@ ALLOWED_VIDEO_INPUT_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES | ALLOWED_AUDIO_INPUT_
 ALLOWED_VIDEO_OUTPUT_MIME_TYPES = {"video/mp4"}
 ALLOWED_VIDEO_SUFFIXES = {".mp4"}
 ALLOWED_EVENT_SOURCE_VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime"}
+ALLOWED_STORYBOARD_SOURCE_VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime", "video/webm"}
+ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES = ALLOWED_AUDIO_INPUT_MIME_TYPES | {"video/mp4", "video/quicktime", "video/webm"}
+ALLOWED_STORYBOARD_MATTE_MIME_TYPES = {"image/png", "image/jpeg"}
 ALLOWED_EVENT_OVERLAY_MIME_TYPES = {"image/png"}
 ALLOWED_EVENT_BUMPER_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 ALLOWED_EVENT_INPUT_KINDS = {"source_video", "overlay_png", "bumper_image"}
+STORYBOARD_FFMPEG_OPERATION_TYPES = {
+    "multicam_card_overlay_take",
+    "multicam_card_pass_through_take",
+    "multicam_card_trim_take",
+    "multicam_final_assembly",
+    "multicam_optimize_video",
+    "optimize_video",
+    "replace_video_soundtrack",
+    "multicam_seekable_mp4",
+    "multicam_ai_video_take_prepare",
+    "mediastoryboard_card_pass_through_take",
+    "mediastoryboard_card_local_video_take",
+    "mediastoryboard_card_trim_take",
+    "mediastoryboard_card_edge_trim_take",
+}
+STORYBOARD_TRIM_OPERATION_TYPES = {
+    "multicam_card_trim_take",
+    "mediastoryboard_card_trim_take",
+    "mediastoryboard_card_edge_trim_take",
+}
+STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES = {
+    "multicam_card_overlay_take",
+    "multicam_card_pass_through_take",
+    "multicam_card_trim_take",
+    "multicam_optimize_video",
+    "optimize_video",
+    "replace_video_soundtrack",
+    "multicam_seekable_mp4",
+    "multicam_ai_video_take_prepare",
+    "mediastoryboard_card_pass_through_take",
+    "mediastoryboard_card_local_video_take",
+    "mediastoryboard_card_trim_take",
+    "mediastoryboard_card_edge_trim_take",
+}
+STORYBOARD_VIDEO_INPUT_KINDS = {
+    "source_video",
+    "video",
+    "input_video",
+    "take_video",
+    "card_video",
+    "segment_video",
+    "overlay_video",
+    "control_video",
+}
+STORYBOARD_IMAGE_INPUT_KINDS = {
+    "image",
+    "source_image",
+    "overlay_image",
+    "overlay_png",
+    "poster_image",
+    "start_image",
+    "end_image",
+}
+STORYBOARD_AUDIO_INPUT_KINDS = {
+    "audio",
+    "source_audio",
+    "soundtrack_audio",
+    "driving_audio",
+    "narration_audio",
+}
+ALLOWED_STORYBOARD_INPUT_KINDS = STORYBOARD_VIDEO_INPUT_KINDS | STORYBOARD_IMAGE_INPUT_KINDS | STORYBOARD_AUDIO_INPUT_KINDS
 PROMPT_PROCESSING_MODE_CHOICES = ("G", "PG", "FG")
 PROMPT_PROCESSING_MODES = set(PROMPT_PROCESSING_MODE_CHOICES)
 DEFAULT_PROMPT_PROCESSING_MODE = "FG"
@@ -224,6 +302,7 @@ MIME_EXTENSION = {
     "audio/ogg": ".ogg",
     "video/mp4": ".mp4",
     "video/quicktime": ".mov",
+    "video/webm": ".webm",
 }
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 SEED_FILENAME_RE = re.compile(r"(?:^|[_-])seed(-?\d+)(?:[_\-.]|$)", re.IGNORECASE)
@@ -471,6 +550,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._cancel_requested_by_midom = False
         self._last_heartbeat_log_at = 0.0
         self._last_idle_poll_log_at = 0.0
+        self._last_local_wangp_busy_log_at = 0.0
         self._last_heartbeat_at = 0.0
         self._last_candidate_poll_at = 0.0
         self._idle_since_at = None
@@ -485,6 +565,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._mp3_encoder_cache_at = 0.0
         self._ffmpeg_probe_cache = None
         self._ffmpeg_probe_cache_at = 0.0
+        self._ffmpeg_probe_log_signature = None
 
     def _log(self, message: str, *, force: bool = False) -> None:
         if not VERBOSE_LOGGING and not force:
@@ -853,16 +934,24 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise gr.Error("Stop the worker before pairing again.")
 
         self._log(f"Pairing worker with Midom at {api_base_url}; machine_name={machine_name!r}.")
+        capabilities_started_at = time.monotonic()
+        capabilities = self._capabilities()
+        self._log(
+            "Prepared capabilities for pairing; "
+            f"models={len(capabilities.get('models') or [])} "
+            f"media_processing={len(capabilities.get('media_processing') or [])} "
+            f"elapsed_seconds={time.monotonic() - capabilities_started_at:.2f}."
+        )
         response = requests.post(
             f"{api_base_url}/b1/media-workers/pair",
             json={
                 "pairing_code": pairing_code,
                 "plugin_id": PLUGIN_ID,
                 "machine_name": machine_name,
-                "capabilities": self._capabilities(),
+                "capabilities": capabilities,
             },
             headers={"Accept": "application/json", "User-Agent": USER_AGENT},
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=PAIRING_TIMEOUT_SECONDS,
         )
         if response.status_code >= 400:
             self._log(f"Pairing rejected by Midom; http_status={response.status_code} message={self._midom_error_message(response)!r}.", force=True)
@@ -1379,6 +1468,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         event_capability = self._event_video_processing_capability()
         if event_capability:
             media_processing.append(event_capability)
+        storyboard_capability = self._storyboard_ffmpeg_processing_capability()
+        if storyboard_capability:
+            media_processing.append(storyboard_capability)
         return {
             "schema_version": 1,
             "media_types": ["audio", "image", "video"],
@@ -1422,6 +1514,100 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "source_video": source_mime_types,
                 "overlay_png": ["image/png"],
                 "bumper_image": ["image/png", "image/jpeg", "image/webp"],
+            },
+        }
+
+    def _storyboard_ffmpeg_processing_capability(self) -> Optional[dict[str, Any]]:
+        probe = self._ffmpeg_processing_probe()
+        if not probe.get("ffmpeg_available") or not probe.get("ffprobe_available"):
+            self._log(
+                "Storyboard FFmpeg Processing capability withheld; "
+                f"ffmpeg_available={probe.get('ffmpeg_available')} ffprobe_available={probe.get('ffprobe_available')}.",
+                force=True,
+            )
+            return None
+        source_mime_types = ["video/mp4", "video/webm"]
+        if probe.get("quicktime_demux_available"):
+            source_mime_types.append("video/quicktime")
+        return {
+            "family": "media_processing",
+            "media_type": "video",
+            "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+            "processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+            "display_name": "Storyboard FFmpeg Processing",
+            "supported": True,
+            "detected": True,
+            "ffmpeg_available": True,
+            "ffprobe_available": True,
+            "nvenc_available": bool(probe.get("nvenc_available")),
+            "h264_encoder": EVENT_VIDEO_H264_ENCODER,
+            "operation_types": sorted(STORYBOARD_FFMPEG_OPERATION_TYPES),
+            "supported_operations": sorted(STORYBOARD_FFMPEG_OPERATION_TYPES),
+            "max_input_bytes": MAX_STORYBOARD_VIDEO_INPUT_BYTES,
+            "max_duration_seconds": MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+            "supports_trim": True,
+            "supports_concat": True,
+            "supports_overlay": True,
+            "supports_faststart": True,
+            "operation_features": {
+                "multicam_card_overlay_take": [
+                    "static_rectangle_overlay",
+                    "animated_rectangle_overlay",
+                    "animated_position",
+                    "animated_opacity",
+                    "fixed_canvas_animated_scale",
+                    "luminance_matte_png",
+                    "luminance_matte_jpeg",
+                    "base_or_overlay_audio",
+                ],
+                "multicam_final_assembly": [
+                    "ordered_segments",
+                    "segment_trim",
+                    "normalize_before_concat",
+                    "silent_audio_fill",
+                    "h264_aac_mp4_faststart",
+                ],
+                "multicam_optimize_video": [
+                    "h264_aac_reencode",
+                    "faststart",
+                    "max_dimension_scale",
+                    "crf_preset_audio_bitrate",
+                ],
+                "optimize_video": [
+                    "h264_aac_reencode",
+                    "faststart",
+                    "max_dimension_scale",
+                    "crf_preset_audio_bitrate",
+                ],
+                "replace_video_soundtrack": [
+                    "source_video_stream",
+                    "soundtrack_audio_replacement",
+                    "soundtrack_video_container_audio",
+                    "video_and_audio_start_offsets",
+                    "duration_trim",
+                    "head_tail_silence",
+                    "h264_aac_mp4_faststart",
+                ],
+            },
+            "output_mime_types": ["video/mp4"],
+            "input_mime_types": {
+                "video": source_mime_types,
+                "source_video": source_mime_types,
+                "input_video": source_mime_types,
+                "take_video": source_mime_types,
+                "card_video": source_mime_types,
+                "segment_video": source_mime_types,
+                "overlay_video": source_mime_types,
+                "image": sorted(ALLOWED_IMAGE_MIME_TYPES),
+                "source_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
+                "overlay_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
+                "overlay_png": ["image/png"],
+                "poster_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
+                "audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
+                "source_audio": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
+                "soundtrack_audio": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
+                "driving_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
+                "narration_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
             },
         }
 
@@ -1476,31 +1662,33 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         except Exception:
             probe["ffprobe_available"] = False
         if probe["ffmpeg_available"]:
-            try:
-                completed = subprocess.run(
-                    [ffmpeg_binary, "-hide_banner", "-demuxers"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                demuxers = f"{completed.stdout}\n{completed.stderr}".lower()
-                probe["quicktime_demux_available"] = completed.returncode == 0 and "mov,mp4,m4a,3gp,3g2,mj2" in demuxers
-            except Exception:
-                probe["quicktime_demux_available"] = False
+            # Avoid running `ffmpeg -demuxers` during pairing/UI refresh. On some
+            # Windows installs it can be surprisingly slow, and downloaded inputs
+            # are still ffprobed before a job is accepted for processing.
+            probe["quicktime_demux_available"] = True
             # First-pass Event Video Processing always uses libx264. Do not report NVENC
             # until we add a real encode smoke check, because listing h264_nvenc is not
             # enough to prove the GPU encoder can run in this process.
             probe["nvenc_available"] = False
         self._ffmpeg_probe_cache = dict(probe)
         self._ffmpeg_probe_cache_at = now
-        self._log(
-            "FFmpeg processing probe; "
-            f"ffmpeg={ffmpeg_binary!r} ffmpeg_available={probe['ffmpeg_available']} "
-            f"ffprobe={ffprobe_binary!r} ffprobe_available={probe['ffprobe_available']} "
-            f"quicktime_demux_available={probe['quicktime_demux_available']} "
-            f"nvenc_available={probe['nvenc_available']}."
+        signature = (
+            probe["ffmpeg_binary"],
+            probe["ffprobe_binary"],
+            probe["ffmpeg_available"],
+            probe["ffprobe_available"],
+            probe["quicktime_demux_available"],
+            probe["nvenc_available"],
         )
+        if signature != self._ffmpeg_probe_log_signature:
+            self._ffmpeg_probe_log_signature = signature
+            self._log(
+                "FFmpeg processing probe; "
+                f"ffmpeg={ffmpeg_binary!r} ffmpeg_available={probe['ffmpeg_available']} "
+                f"ffprobe={ffprobe_binary!r} ffprobe_available={probe['ffprobe_available']} "
+                f"quicktime_demux_available={probe['quicktime_demux_available']} "
+                f"nvenc_available={probe['nvenc_available']}."
+            )
         return probe
 
     def _seedvc_speech_available(self) -> bool:
@@ -1842,6 +2030,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._validate_job_scope(job, config)
         if self._is_event_video_processing_job(job):
             return self._validate_event_video_processing_job(job, job_id)
+        if self._is_storyboard_ffmpeg_processing_job(job):
+            return self._validate_storyboard_ffmpeg_processing_job(job, job_id)
         media_type = str(job.get("media_type") or job.get("kind") or "image").lower()
         if media_type == "audio":
             return self._validate_audio_job(job, job_id)
@@ -1919,14 +2109,46 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return settings
 
     def _is_event_video_processing_job(self, job: dict[str, Any]) -> bool:
+        processing_task = str(job.get("processing_task") or "").strip().lower()
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        operation_type = self._storyboard_operation_type(job)
+        return (
+            operation_type not in STORYBOARD_FFMPEG_OPERATION_TYPES
+            and (processing_task == EVENT_VIDEO_PROCESSING_TASK or processor_id == EVENT_VIDEO_PROCESSOR_ID)
+        )
+
+    def _is_storyboard_ffmpeg_processing_job(self, job: dict[str, Any]) -> bool:
         family = str(job.get("family") or "").strip().lower()
         processing_task = str(job.get("processing_task") or "").strip().lower()
         processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        operation_type = self._storyboard_operation_type(job)
         return (
-            family == "media_processing"
-            or processing_task == EVENT_VIDEO_PROCESSING_TASK
-            or processor_id == EVENT_VIDEO_PROCESSOR_ID
+            operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES
+            or processing_task == STORYBOARD_FFMPEG_PROCESSING_TASK
+            or processor_id == STORYBOARD_FFMPEG_PROCESSOR_ID
+            or (family == "media_processing" and operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES)
         )
+
+    @staticmethod
+    def _storyboard_operation_type(payload: dict[str, Any]) -> str:
+        processing = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        return str(
+            payload.get("operation_type")
+            or payload.get("operation")
+            or payload.get("mediaassembly_operation_type")
+            or payload.get("mediaassembly_operation")
+            or payload.get("mediaassemblyjob_operation_type")
+            or processing.get("operation_type")
+            or processing.get("operation")
+            or processing.get("mediaassembly_operation_type")
+            or processing.get("mediaassembly_operation")
+            or summary.get("operation_type")
+            or summary.get("operation")
+            or summary.get("mediaassembly_operation_type")
+            or summary.get("mediaassembly_operation")
+            or ""
+        ).strip()
 
     def _validate_event_video_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
         family = str(job.get("family") or "").strip().lower()
@@ -2033,6 +2255,125 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "target_max_width": target_max_width,
                 "target_max_height": target_max_height,
                 "preserve_orientation": preserve_orientation,
+            },
+        }
+
+    def _validate_storyboard_ffmpeg_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
+        family = str(job.get("family") or "").strip().lower()
+        if family != "media_processing":
+            raise ValueError(f"Unsupported storyboard processing family: {family}")
+        media_type = str(job.get("media_type") or "").strip().lower()
+        if media_type != "video":
+            raise ValueError(f"Unsupported storyboard processing media_type: {media_type}")
+        operation_type = self._storyboard_operation_type(job)
+        if operation_type not in STORYBOARD_FFMPEG_OPERATION_TYPES:
+            raise ValueError(f"Unsupported storyboard FFmpeg operation_type: {operation_type}")
+        processing_task = str(job.get("processing_task") or STORYBOARD_FFMPEG_PROCESSING_TASK).strip().lower()
+        if processing_task not in {"", STORYBOARD_FFMPEG_PROCESSING_TASK, "mediaassemblyjob", "mediaassembly_ffmpeg", "storyboard_ffmpeg"}:
+            raise ValueError(f"Unsupported storyboard processing_task: {processing_task}")
+        processor_id = str(job.get("processor_id") or job.get("model_id") or STORYBOARD_FFMPEG_PROCESSOR_ID).strip()
+        if processor_id not in {"", STORYBOARD_FFMPEG_PROCESSOR_ID}:
+            raise ValueError(f"Unsupported storyboard processor_id: {processor_id}")
+        output = job.get("output") or {}
+        if not isinstance(output, dict):
+            raise ValueError("Storyboard FFmpeg output must be a JSON object.")
+        try:
+            output_count = int(output.get("count") or 1)
+        except (TypeError, ValueError):
+            raise ValueError(f"Unsupported storyboard output count: {output.get('count')}")
+        if output_count != 1:
+            raise ValueError(f"Unsupported storyboard output count: {output_count}")
+        output_format = str(output.get("format") or "mp4").strip().lower()
+        if output_format != "mp4":
+            raise ValueError(f"Unsupported storyboard output format: {output_format}")
+        processing = job.get("processing") or {}
+        if not isinstance(processing, dict):
+            raise ValueError("Storyboard FFmpeg processing payload must be a JSON object.")
+        operation_payload = job.get("operation_payload") or {}
+        nested_operation_payload = processing.get("operation_payload") or {}
+        if operation_payload and not isinstance(operation_payload, dict):
+            raise ValueError("Storyboard FFmpeg operation_payload must be a JSON object when provided.")
+        if nested_operation_payload and not isinstance(nested_operation_payload, dict):
+            raise ValueError("Storyboard FFmpeg processing.operation_payload must be a JSON object when provided.")
+        processing = {
+            **(operation_payload if isinstance(operation_payload, dict) else {}),
+            **(nested_operation_payload if isinstance(nested_operation_payload, dict) else {}),
+            **{key: value for key, value in processing.items() if key != "operation_payload"},
+        }
+        width = self._coerce_int(output.get("width") or processing.get("width") or processing.get("output_width"), 0, 0, 4096)
+        height = self._coerce_int(output.get("height") or processing.get("height") or processing.get("output_height"), 0, 0, 4096)
+        if (width == 0) != (height == 0):
+            raise ValueError("Storyboard output width and height must be supplied together.")
+        trim_start = self._coerce_float(
+            processing.get("trim_start_seconds", processing.get("start_seconds", processing.get("start_time_seconds"))),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        trim_duration = self._optional_positive_float(
+            processing.get("duration_seconds", processing.get("trim_duration_seconds")),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        trim_end = self._optional_positive_float(
+            processing.get("trim_end_seconds", processing.get("end_seconds", processing.get("end_time_seconds"))),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Storyboard FFmpeg inputs must be a list.")
+        video_count = 0
+        image_count = 0
+        audio_count = 0
+        for item in inputs:
+            if not isinstance(item, dict):
+                raise ValueError("Storyboard FFmpeg input descriptor must be a JSON object.")
+            kind = str(item.get("kind") or "").strip()
+            if kind not in ALLOWED_STORYBOARD_INPUT_KINDS:
+                raise ValueError(f"Unsupported storyboard FFmpeg input kind: {kind}")
+            if kind in STORYBOARD_VIDEO_INPUT_KINDS:
+                video_count += 1
+            elif kind in STORYBOARD_IMAGE_INPUT_KINDS:
+                image_count += 1
+            elif kind in STORYBOARD_AUDIO_INPUT_KINDS:
+                audio_count += 1
+        if operation_type == "multicam_final_assembly":
+            if video_count < 1:
+                raise ValueError("Storyboard final assembly requires at least one video input.")
+        elif operation_type == "replace_video_soundtrack":
+            if video_count != 1:
+                raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one source video input; got {video_count}.")
+            if audio_count != 1:
+                raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one soundtrack audio input; got {audio_count}.")
+        elif operation_type in STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES and video_count < 1:
+            raise ValueError(f"Storyboard operation {operation_type} requires at least one video input.")
+        if not self._storyboard_ffmpeg_processing_capability():
+            raise ValueError("Storyboard FFmpeg Processing is unavailable because local ffmpeg/ffprobe support is incomplete.")
+        self._log(
+            "Validated claimed Storyboard FFmpeg Processing job; "
+            f"job_id={job_id} operation_type={operation_type} output={width}x{height} "
+            f"trim_start={trim_start} trim_duration={trim_duration} trim_end={trim_end} "
+            f"video_inputs={video_count} image_inputs={image_count} audio_inputs={audio_count}."
+        )
+        return {
+            "model_type": STORYBOARD_FFMPEG_PROCESSOR_ID,
+            "_midom_job_id": job_id,
+            "_midom_media_type": "media_processing",
+            "_midom_processing_family": "media_processing",
+            "_midom_processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+            "_midom_processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+            "_midom_operation_type": operation_type,
+            "_midom_output_count": 1,
+            "_midom_output_format": "mp4",
+            "_midom_output_mime_type": "video/mp4",
+            "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), MAX_STORYBOARD_VIDEO_OUTPUT_BYTES, 1, MAX_STORYBOARD_VIDEO_OUTPUT_BYTES),
+            "_midom_processing": {
+                **processing,
+                "operation_type": operation_type,
+                "output_width": width,
+                "output_height": height,
+                "trim_start_seconds": trim_start,
+                "trim_duration_seconds": trim_duration,
+                "trim_end_seconds": trim_end,
             },
         }
 
@@ -3311,6 +3652,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             number = default
         return max(minimum, min(maximum, number))
 
+    @staticmethod
+    def _coerce_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = default
+        return max(float(minimum), min(float(maximum), number))
+
+    @classmethod
+    def _optional_positive_float(cls, value: Any, maximum: float) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        number = cls._coerce_float(value, 0.0, 0.0, maximum)
+        return number if number > 0 else None
+
     def _coerce_input_id(self, item: dict[str, Any]) -> int:
         try:
             input_id = int(item.get("input_id"))
@@ -3799,9 +4155,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     ):
         try:
             self._pair_worker(api_base_url, pairing_code, machine_name, allow_insecure_local_dev, allow_insecure_lan_dev)
-            self._update_capabilities()
             status_text = self._start_worker(api_session)
-            self._log("Pairing flow complete; capabilities updated and worker start requested.")
+            self._log("Pairing flow complete; capabilities were sent during pairing and worker start was requested.")
             return self._ui_result(status_text)
         except gr.Error as exc:
             message = self._friendly_exception_message(exc)
@@ -3810,6 +4165,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         except requests.RequestException as exc:
             message = self._friendly_exception_message(exc)
             self._log(f"Pairing was not completed because the Midom API request failed: {message}", force=True)
+            return self._ui_result()
+        except Exception as exc:
+            message = self._friendly_exception_message(exc)
+            self._log(f"Pairing was not completed because the bridge hit a local error: {message}", force=True)
             return self._ui_result()
 
     def _wake_or_update_capabilities_ui(self):
@@ -4056,6 +4415,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if self._stop_event.is_set():
             return
         if idle_mode != "standby" and self._current_active_job_id() is None:
+            local_busy_reason = self._local_wangp_busy_reason()
+            if local_busy_reason:
+                if now - self._last_local_wangp_busy_log_at >= IDLE_POLL_LOG_SECONDS:
+                    self._last_local_wangp_busy_log_at = now
+                    self._log(f"Candidate polling deferred; {local_busy_reason}")
+                self._last_candidate_poll_at = time.monotonic()
+                return
             poll_interval = self._candidate_poll_interval_seconds(idle_mode)
             if now - self._last_candidate_poll_at >= poll_interval:
                 ran_job = self._poll_once()
@@ -4099,13 +4465,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         active_job_id = self._current_active_job_id()
         idle_mode = self._idle_mode()
         active_context = self._active_job_context
+        local_busy_reason = self._local_wangp_busy_reason() if active_job_id is None else None
         is_active_connection = (
             active_job_id is not None
             and active_context is not None
             and str(active_context.connection_id) == str(connection.connection_id)
         )
         is_sibling_busy = active_job_id is not None and not is_active_connection
-        if is_sibling_busy:
+        if local_busy_reason:
+            accepting = bool(JOB_FLOW_ENABLED and not self._stop_event.is_set() and idle_mode != "standby")
+            status = "busy"
+            heartbeat_active_job_id = None
+            message = LOCAL_WANGP_BUSY_MESSAGE
+        elif is_sibling_busy:
             accepting = bool(JOB_FLOW_ENABLED and not self._stop_event.is_set())
             status = "busy"
             heartbeat_active_job_id = None
@@ -4172,6 +4544,27 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if status != "busy" or active_job_id is None:
             return "Worker is not accepting new jobs."
         return self._active_job_message(active_job_id)
+
+    def _local_wangp_busy_reason(self) -> str:
+        state_component = getattr(self, "state", None)
+        state = getattr(state_component, "value", None)
+        if not isinstance(state, dict):
+            return ""
+        gen = state.get("gen")
+        if not isinstance(gen, dict):
+            return ""
+        inline_queue = gen.get("inline_queue")
+        if inline_queue is not None:
+            return "WanGP has a pending inline UI or Deepy queue request."
+        queue_value = gen.get("queue")
+        if isinstance(queue_value, list) and queue_value:
+            return f"WanGP UI queue has {len(queue_value)} pending or running task(s)."
+        if bool(gen.get("in_progress")) or bool(gen.get("main_process_running")):
+            return "WanGP main generation is in progress."
+        process_status = str(gen.get("process_status") or "").strip()
+        if process_status and process_status not in {"process:main"}:
+            return f"WanGP GPU process is busy ({process_status})."
+        return ""
 
     def _active_job_message(self, active_job_id: Any) -> str:
         snapshot = dict(self._active_job_status or {})
@@ -4254,7 +4647,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if jobs:
             self._log(
                 f"Candidate poll returned {len(jobs)} candidate(s); "
-                f"connection_id={connection.connection_id} worker_id={connection.worker_id}."
+                f"connection_id={connection.connection_id} worker_id={connection.worker_id} "
+                f"order={self._candidate_order_log(jobs)}."
             )
         else:
             now = time.monotonic()
@@ -4308,6 +4702,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     f"input_image_count={(summary.get('input_image_count') if isinstance(summary, dict) else None)!r} "
                     f"input_audio_count={(summary.get('input_audio_count') if isinstance(summary, dict) else None)!r}."
                 )
+            elif candidate_media_type == "image":
+                summary = candidate.get("summary") or {}
+                self._log(
+                    "Image candidate is compatible; "
+                    f"connection_id={connection.connection_id} worker_id={connection.worker_id} "
+                    f"job_id={candidate.get('job_id')} model_id={candidate.get('model_id')} "
+                    f"output_count={(summary.get('output_count') if isinstance(summary, dict) else None)!r} "
+                    f"output_format={(summary.get('output_format') if isinstance(summary, dict) else None)!r} "
+                    f"reference_image_count={(summary.get('reference_image_count') if isinstance(summary, dict) else None)!r} "
+                    f"control_image_count={(summary.get('control_image_count') if isinstance(summary, dict) else None)!r}."
+                )
             candidate_job_id = int(candidate["job_id"])
             self._log(f"Attempting explicit claim; connection_id={connection.connection_id} worker_id={connection.worker_id} job_id={candidate_job_id}.")
             claimed = self._claim_job(connection, candidate_job_id)
@@ -4318,6 +4723,30 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._run_job(connection, claimed)
             return True
         return False
+
+    @staticmethod
+    def _candidate_order_log(jobs: list[Any]) -> str:
+        parts = []
+        for index, candidate in enumerate(jobs[:10]):
+            if not isinstance(candidate, dict):
+                parts.append(f"{index}:<non-object>")
+                continue
+            summary = candidate.get("summary") if isinstance(candidate.get("summary"), dict) else {}
+            media_type = str(candidate.get("media_type") or "").strip() or "?"
+            model_id = str(candidate.get("model_id") or candidate.get("processor_id") or "").strip() or "?"
+            job_id = candidate.get("job_id")
+            created_at = candidate.get("created_at") or candidate.get("queued_at") or summary.get("created_at") or summary.get("queued_at")
+            priority = candidate.get("priority") or summary.get("priority")
+            extra = []
+            if created_at:
+                extra.append(f"queued_at={created_at}")
+            if priority is not None:
+                extra.append(f"priority={priority}")
+            suffix = f" {' '.join(extra)}" if extra else ""
+            parts.append(f"{index}:job_id={job_id} media={media_type} model={model_id}{suffix}")
+        if len(jobs) > 10:
+            parts.append(f"...+{len(jobs) - 10} more")
+        return "[" + "; ".join(parts) + "]"
 
     def _candidate_is_compatible(self, candidate: Any, config: Any) -> bool:
         return self._candidate_incompatibility_reason(candidate, config) is None
@@ -4347,6 +4776,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_id = str(candidate.get("model_id") or "").strip()
         if self._candidate_is_event_video_processing(candidate):
             return self._event_video_candidate_incompatibility_reason(candidate)
+        if self._candidate_is_storyboard_ffmpeg_processing(candidate):
+            return self._storyboard_ffmpeg_candidate_incompatibility_reason(candidate)
         if media_type not in {"image", "audio", "video"}:
             return f"unsupported media_type: {candidate.get('media_type')}"
         if media_type == "image" and model_id not in ALLOWED_MODEL_TYPES:
@@ -4546,13 +4977,27 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         summary = candidate.get("summary") or {}
         if not isinstance(summary, dict):
             summary = {}
+        processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
+        processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
+        operation_type = self._storyboard_operation_type(candidate)
+        return (
+            operation_type not in STORYBOARD_FFMPEG_OPERATION_TYPES
+            and (processing_task == EVENT_VIDEO_PROCESSING_TASK or processor_id == EVENT_VIDEO_PROCESSOR_ID)
+        )
+
+    def _candidate_is_storyboard_ffmpeg_processing(self, candidate: dict[str, Any]) -> bool:
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
         family = str(candidate.get("family") or summary.get("family") or "").strip().lower()
         processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
         processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
+        operation_type = self._storyboard_operation_type(candidate)
         return (
-            family == "media_processing"
-            or processing_task == EVENT_VIDEO_PROCESSING_TASK
-            or processor_id == EVENT_VIDEO_PROCESSOR_ID
+            operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES
+            or processing_task == STORYBOARD_FFMPEG_PROCESSING_TASK
+            or processor_id == STORYBOARD_FFMPEG_PROCESSOR_ID
+            or (family == "media_processing" and operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES)
         )
 
     def _event_video_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
@@ -4596,6 +5041,52 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return "apply_overlay requires overlay_png inputs"
         if add_ending_bumper and bumper_count <= 0:
             return "add_ending_bumper requires bumper_image inputs"
+        return None
+
+    def _storyboard_ffmpeg_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
+        if not self._storyboard_ffmpeg_processing_capability():
+            return "storyboard ffmpeg processing is unavailable on this worker"
+        media_type = str(candidate.get("media_type") or "").strip().lower()
+        if media_type != "video":
+            return f"unsupported storyboard media_type: {candidate.get('media_type')}"
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        family = str(candidate.get("family") or summary.get("family") or "").strip().lower()
+        if family and family != "media_processing":
+            return f"unsupported storyboard processing family: {family}"
+        operation_type = self._storyboard_operation_type(candidate)
+        if operation_type not in STORYBOARD_FFMPEG_OPERATION_TYPES:
+            return f"unsupported storyboard operation_type: {operation_type}"
+        processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or STORYBOARD_FFMPEG_PROCESSOR_ID).strip()
+        if processor_id not in {"", STORYBOARD_FFMPEG_PROCESSOR_ID}:
+            return f"unsupported storyboard processor_id: {processor_id}"
+        output_format = str(summary.get("output_format") or summary.get("format") or "mp4").strip().lower()
+        if output_format != "mp4":
+            return f"unsupported storyboard output_format: {output_format}"
+        try:
+            output_count = int(summary.get("output_count") or 1)
+        except (TypeError, ValueError):
+            return f"invalid storyboard output_count: {summary.get('output_count')}"
+        if output_count != 1:
+            return f"unsupported storyboard output_count: {output_count}"
+        video_count = self._coerce_int(
+            summary.get("video_input_count", summary.get("source_video_count", summary.get("input_video_count"))),
+            1,
+            0,
+            100,
+        )
+        if operation_type == "multicam_final_assembly":
+            if video_count < 1:
+                return "final assembly requires video inputs"
+        elif operation_type == "replace_video_soundtrack":
+            if video_count != 1:
+                return f"replace_video_soundtrack requires exactly one source video input; got {video_count}"
+            audio_count = self._coerce_int(summary.get("audio_input_count", summary.get("soundtrack_audio_count")), 1, 0, 10)
+            if audio_count != 1:
+                return f"replace_video_soundtrack requires exactly one soundtrack audio input; got {audio_count}"
+        elif operation_type in STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES and video_count < 1:
+            return f"{operation_type} requires a video input"
         return None
 
     def _claim_job(self, connection: ConnectionContext, job_id: int) -> Optional[dict[str, Any]]:
@@ -4649,17 +5140,31 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 downloaded_inputs = self._download_job_inputs(connection, job, temp_dir)
                 self._apply_inputs_to_settings(settings, downloaded_inputs, job)
                 if media_type == "media_processing":
-                    source_video_count = sum(1 for item in downloaded_inputs if item.get("kind") == "source_video")
-                    overlay_count = sum(1 for item in downloaded_inputs if item.get("kind") == "overlay_png")
-                    bumper_count = sum(1 for item in downloaded_inputs if item.get("kind") == "bumper_image")
-                    self._log(
-                        "Prepared Event Video Processing settings; "
-                        f"job_id={job_id} processor_id={settings.get('_midom_processor_id')} "
-                        f"output_profile={settings.get('_midom_output_profile')} "
-                        f"processing={settings.get('_midom_processing')} "
-                        f"source_video_count={source_video_count} overlay_png_count={overlay_count} "
-                        f"bumper_image_count={bumper_count}."
-                    )
+                    processor_id = str(settings.get("_midom_processor_id") or "")
+                    if processor_id == EVENT_VIDEO_PROCESSOR_ID:
+                        source_video_count = sum(1 for item in downloaded_inputs if item.get("kind") == "source_video")
+                        overlay_count = sum(1 for item in downloaded_inputs if item.get("kind") == "overlay_png")
+                        bumper_count = sum(1 for item in downloaded_inputs if item.get("kind") == "bumper_image")
+                        self._log(
+                            "Prepared Event Video Processing settings; "
+                            f"job_id={job_id} processor_id={processor_id} "
+                            f"output_profile={settings.get('_midom_output_profile')} "
+                            f"processing={settings.get('_midom_processing')} "
+                            f"source_video_count={source_video_count} overlay_png_count={overlay_count} "
+                            f"bumper_image_count={bumper_count}."
+                        )
+                    elif processor_id == STORYBOARD_FFMPEG_PROCESSOR_ID:
+                        self._log(
+                            "Prepared Storyboard FFmpeg Processing settings; "
+                            f"job_id={job_id} processor_id={processor_id} "
+                            f"operation_type={settings.get('_midom_operation_type')} "
+                            f"processing={settings.get('_midom_processing')} "
+                            f"video_count={sum(1 for item in downloaded_inputs if item.get('category') == 'video')} "
+                            f"image_count={sum(1 for item in downloaded_inputs if item.get('category') == 'image')} "
+                            f"audio_count={sum(1 for item in downloaded_inputs if item.get('category') == 'audio')}."
+                        )
+                    else:
+                        raise ValueError(f"Unsupported media processing processor_id: {processor_id}")
                 elif media_type == "audio":
                     source_audio_count = sum(1 for item in downloaded_inputs if item.get("kind") == "source_audio")
                     reference_audio_count = sum(1 for item in downloaded_inputs if item.get("kind") == "reference_audio")
@@ -4734,23 +5239,38 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 if media_type == "media_processing":
                     process_handle = LocalProcessJob()
                     self._active_job = process_handle
+                    processor_id = str(settings.get("_midom_processor_id") or "")
                     try:
                         try:
-                            output_path, processing_metadata = self._run_event_video_processing_job(
-                                connection,
-                                job_id,
-                                settings,
-                                downloaded_inputs,
-                                temp_dir,
-                                process_handle,
-                            )
+                            if processor_id == EVENT_VIDEO_PROCESSOR_ID:
+                                output_path, processing_metadata = self._run_event_video_processing_job(
+                                    connection,
+                                    job_id,
+                                    settings,
+                                    downloaded_inputs,
+                                    temp_dir,
+                                    process_handle,
+                                )
+                                cancel_message = "Event Video Processing was cancelled."
+                            elif processor_id == STORYBOARD_FFMPEG_PROCESSOR_ID:
+                                output_path, processing_metadata = self._run_storyboard_ffmpeg_processing_job(
+                                    connection,
+                                    job_id,
+                                    settings,
+                                    downloaded_inputs,
+                                    temp_dir,
+                                    process_handle,
+                                )
+                                cancel_message = "Storyboard FFmpeg Processing was cancelled."
+                            else:
+                                raise ValueError(f"Unsupported media processing processor_id: {processor_id}")
                         except RuntimeError as exc:
                             if str(exc) == "cancel_requested":
                                 self._post_job_update(
                                     connection,
                                     job_id,
                                     "fail",
-                                    {"reason": "cancel_requested", "message": "Event Video Processing was cancelled."},
+                                    {"reason": "cancel_requested", "message": cancel_message},
                                 )
                                 return
                             raise
@@ -4763,19 +5283,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             connection,
                             job_id,
                             "fail",
-                            {"reason": "cancel_requested", "message": "Event Video Processing was cancelled."},
+                            {"reason": "cancel_requested", "message": f"{processing_metadata.get('processing_task', 'Media processing')} was cancelled."},
                         )
                         return
                     artifact = self._upload_video_artifact(connection, job_id, output_path, 0, settings)
                     complete_payload = {
                         "artifacts": [artifact],
                         "backend": "ffmpeg",
-                        "model_id": EVENT_VIDEO_PROCESSOR_ID,
-                        "processor_id": EVENT_VIDEO_PROCESSOR_ID,
+                        "model_id": processor_id,
+                        "processor_id": processor_id,
                         "processing_metadata": processing_metadata,
                     }
                     self._post_job_update(connection, job_id, "complete", complete_payload)
-                    self._log(f"Event Video Processing complete accepted by Midom; job_id={job_id}.")
+                    self._log(f"Media processing complete accepted by Midom; job_id={job_id} processor_id={processor_id}.")
                     return
                 callbacks = self._callbacks_for_job(connection, job_id)
                 self._log(
@@ -5066,6 +5586,1122 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         return metadata
 
+    def _run_storyboard_ffmpeg_processing_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+    ) -> tuple[str, dict[str, Any]]:
+        processing = settings.get("_midom_processing") or {}
+        operation_type = str(settings.get("_midom_operation_type") or "").strip()
+        video_inputs = self._storyboard_video_inputs(downloaded_inputs)
+        if not video_inputs:
+            raise ValueError("Storyboard FFmpeg Processing requires at least one video input.")
+        output_width, output_height = self._storyboard_output_size(video_inputs[0], processing)
+        final_output = Path(temp_dir) / "storyboard-processed.mp4"
+        self._set_active_job_status(
+            phase="processing",
+            status=f"Running storyboard FFmpeg operation {operation_type}.",
+            progress=3,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        if operation_type == "multicam_final_assembly":
+            assembly_inputs = self._storyboard_ordered_assembly_inputs(video_inputs, processing)
+            segment_paths = []
+            progress_cursor = 5
+            progress_span = max(1, 75 // max(1, len(assembly_inputs)))
+            total_seconds = 0.0
+            for index, video_input in enumerate(assembly_inputs):
+                segment_output = Path(temp_dir) / f"storyboard-segment-{index}.mp4"
+                segment_end = min(80, progress_cursor + progress_span)
+                segment_processing = self._storyboard_segment_processing(video_input, processing, index)
+                segment_duration = self._storyboard_effective_segment_duration(video_input, segment_processing)
+                total_seconds += segment_duration
+                self._run_storyboard_video_ffmpeg(
+                    connection,
+                    job_id,
+                    video_input,
+                    None,
+                    None,
+                    None,
+                    segment_output,
+                    output_width,
+                    output_height,
+                    process_handle,
+                    processing=segment_processing,
+                    progress_start=progress_cursor,
+                    progress_end=segment_end,
+                    status=f"Preparing storyboard assembly segment {index + 1} of {len(assembly_inputs)}.",
+                )
+                segment_paths.append(segment_output)
+                progress_cursor = min(81, segment_end + 1)
+            self._concat_event_video_segments(
+                connection,
+                job_id,
+                segment_paths,
+                final_output,
+                total_seconds,
+                process_handle,
+                progress_start=82,
+                progress_end=95,
+                status="Assembling storyboard final MP4.",
+            )
+            video_inputs = assembly_inputs
+        elif operation_type in {"multicam_optimize_video", "optimize_video"}:
+            primary = self._storyboard_primary_video_input(video_inputs)
+            output_width, output_height = self._storyboard_optimize_output_size(primary, processing)
+            self._run_storyboard_optimize_video_ffmpeg(
+                connection,
+                job_id,
+                primary,
+                final_output,
+                output_width,
+                output_height,
+                process_handle,
+                processing=processing,
+                progress_start=5,
+                progress_end=95,
+                status=f"Optimizing storyboard video operation {operation_type}.",
+            )
+        elif operation_type == "replace_video_soundtrack":
+            primary = self._storyboard_primary_video_input(video_inputs)
+            soundtrack_input = self._storyboard_audio_input(downloaded_inputs)
+            if soundtrack_input is None:
+                raise ValueError("Storyboard replace_video_soundtrack requires one soundtrack_audio input.")
+            self._run_storyboard_replace_soundtrack_ffmpeg(
+                connection,
+                job_id,
+                primary,
+                soundtrack_input,
+                final_output,
+                output_width,
+                output_height,
+                process_handle,
+                processing=processing,
+                progress_start=5,
+                progress_end=95,
+                status="Replacing storyboard video soundtrack.",
+            )
+        else:
+            primary = self._storyboard_primary_video_input(video_inputs)
+            overlay = self._storyboard_overlay_input(downloaded_inputs, processing) if operation_type == "multicam_card_overlay_take" else None
+            matte = self._storyboard_matte_input(downloaded_inputs, processing) if operation_type == "multicam_card_overlay_take" else None
+            audio_input = self._storyboard_audio_input(downloaded_inputs)
+            self._run_storyboard_video_ffmpeg(
+                connection,
+                job_id,
+                primary,
+                overlay,
+                matte,
+                audio_input,
+                final_output,
+                output_width,
+                output_height,
+                process_handle,
+                processing=processing,
+                progress_start=5,
+                progress_end=95,
+                status=f"Rendering storyboard operation {operation_type}.",
+            )
+        if not final_output.is_file() or final_output.stat().st_size <= 0:
+            raise ValueError("Storyboard FFmpeg Processing did not produce a processed MP4.")
+        output_metadata = self._validate_storyboard_ffmpeg_output(
+            final_output,
+            expected_width=output_width,
+            expected_height=output_height,
+            max_bytes=self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_STORYBOARD_VIDEO_OUTPUT_BYTES, 1, MAX_STORYBOARD_VIDEO_OUTPUT_BYTES),
+        )
+        self._set_active_job_status(
+            phase="uploading",
+            status="Storyboard FFmpeg Processing finished; uploading processed MP4.",
+            progress=96,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        result_metadata = {
+            "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+            "processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+            "operation_type": operation_type,
+            "ffmpeg_encoder": EVENT_VIDEO_H264_ENCODER,
+            "output_width": int(output_metadata.get("display_width") or output_width),
+            "output_height": int(output_metadata.get("display_height") or output_height),
+            "output_duration_seconds": float(output_metadata.get("duration_seconds") or 0.0),
+            "fps": self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120),
+            "video_input_count": len(video_inputs),
+            "image_input_count": sum(1 for item in downloaded_inputs if item.get("category") == "image"),
+            "audio_input_count": sum(1 for item in downloaded_inputs if item.get("category") == "audio"),
+            "worker_id": connection.worker_id,
+        }
+        if operation_type == "multicam_final_assembly":
+            result_metadata["segment_count"] = len(video_inputs)
+        return str(final_output), result_metadata
+
+    def _storyboard_ordered_assembly_inputs(
+        self,
+        video_inputs: list[dict[str, Any]],
+        processing: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        segments = processing.get("segments")
+        if not isinstance(segments, list) or not segments:
+            return list(video_inputs)
+        input_by_id = {int(item.get("input_id") or 0): item for item in video_inputs}
+        ordered = []
+        missing_ids = []
+        segment_entries = [
+            (self._coerce_int(segment.get("order", segment.get("sequence", index)), index, 0, 10_000), index, segment)
+            for index, segment in enumerate(segments)
+            if isinstance(segment, dict)
+        ]
+        for _order, index, segment in sorted(segment_entries, key=lambda entry: (entry[0], entry[1])):
+            input_id = self._coerce_int(segment.get("input_id"), 0, 0, 2_147_483_647)
+            if input_id <= 0:
+                continue
+            match = input_by_id.get(input_id)
+            if not match:
+                missing_ids.append(input_id)
+                continue
+            ordered.append({**match, "_segment_index": index, "_segment_payload": segment})
+        if missing_ids:
+            raise ValueError(f"Storyboard final assembly referenced missing input_id(s): {missing_ids}")
+        if not ordered:
+            return list(video_inputs)
+        return ordered
+
+    def _storyboard_segment_processing(
+        self,
+        video_input: dict[str, Any],
+        processing: dict[str, Any],
+        index: int,
+    ) -> dict[str, Any]:
+        segment = video_input.get("_segment_payload") if isinstance(video_input.get("_segment_payload"), dict) else {}
+        trim_start = self._coerce_float(
+            self._first_present(segment, "trim_start_seconds", "start_seconds", "start_time_seconds"),
+            self._coerce_float(processing.get("trim_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS),
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        trim_duration = self._optional_positive_float(
+            self._first_present(segment, "trim_duration_seconds", "duration_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        trim_end = self._optional_positive_float(
+            self._first_present(segment, "trim_end_seconds", "end_seconds", "end_time_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        if trim_duration is None and trim_end is None:
+            trim_duration = self._optional_positive_float(processing.get("trim_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            trim_end = self._optional_positive_float(processing.get("trim_end_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        return {
+            **processing,
+            "operation_type": "multicam_final_assembly_segment",
+            "trim_start_seconds": trim_start,
+            "trim_duration_seconds": trim_duration,
+            "trim_end_seconds": trim_end,
+            "segment_index": int(video_input.get("_segment_index", index)),
+        }
+
+    def _storyboard_effective_segment_duration(self, video_input: dict[str, Any], processing: dict[str, Any]) -> float:
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else {}
+        source_duration = float(metadata.get("duration_seconds") or 1.0)
+        trim_start = self._coerce_float(processing.get("trim_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        trim_duration = self._storyboard_trim_duration(source_duration, processing, trim_start)
+        return max(0.1, float(trim_duration or max(0.1, source_duration - trim_start)))
+
+    def _storyboard_optimize_output_size(self, video_input: dict[str, Any], processing: dict[str, Any]) -> tuple[int, int]:
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else {}
+        source_width = self._coerce_int(metadata.get("display_width") or metadata.get("width"), 1280, 2, 8192)
+        source_height = self._coerce_int(metadata.get("display_height") or metadata.get("height"), 720, 2, 8192)
+        requested_width = self._coerce_int(processing.get("output_width") or processing.get("width"), 0, 0, 8192)
+        requested_height = self._coerce_int(processing.get("output_height") or processing.get("height"), 0, 0, 8192)
+        if requested_width > 0 and requested_height > 0:
+            return self._even_video_size(requested_width, requested_height)
+        max_dimension = self._coerce_int(processing.get("max_dimension"), 0, 0, 8192)
+        if max_dimension <= 0 or max(source_width, source_height) <= max_dimension:
+            return self._even_video_size(source_width, source_height)
+        ratio = float(max_dimension) / float(max(source_width, source_height))
+        return self._even_video_size(max(2, int(round(source_width * ratio))), max(2, int(round(source_height * ratio))))
+
+    def _run_storyboard_optimize_video_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(video_input["path"]))
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        source_duration = float(metadata.get("duration_seconds") or 1.0)
+        has_audio = bool(metadata.get("has_audio"))
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            str(source_path),
+        ]
+        audio_label = "0:a:0"
+        if not has_audio:
+            command.extend([
+                "-f",
+                "lavfi",
+                "-t",
+                f"{source_duration:.3f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ])
+            audio_label = "1:a:0"
+        video_filter = (
+            f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+            f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"fps={self._coerce_int(processing.get('fps'), STORYBOARD_OUTPUT_FPS, 1, 120)},"
+            "setsar=1,format=yuv420p[vout];"
+            f"[{audio_label}]aresample=48000,aformat=channel_layouts=stereo[aout]"
+        )
+        command.extend([
+            "-filter_complex",
+            video_filter,
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ])
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, source_duration),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(source_duration),
+        )
+
+    def _run_storyboard_replace_soundtrack_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        soundtrack_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(video_input["path"]))
+        soundtrack_path = Path(str(soundtrack_input["path"]))
+        video_metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        audio_metadata = soundtrack_input.get("metadata") if isinstance(soundtrack_input.get("metadata"), dict) else self._probe_audio_metadata(soundtrack_path)
+        source_duration = float(video_metadata.get("duration_seconds") or 1.0)
+        audio_duration = float(audio_metadata.get("duration_seconds") or 1.0)
+        video_start = self._coerce_float(
+            self._first_present(processing, "video_start_seconds", "trim_start_seconds", "start_seconds"),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        requested_duration = self._optional_positive_float(
+            self._first_present(processing, "output_duration_seconds", "duration_seconds", "trim_duration_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        remaining_video_duration = max(0.1, source_duration - video_start)
+        effective_duration = min(requested_duration or remaining_video_duration, remaining_video_duration)
+        effective_duration = max(0.1, effective_duration)
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            str(source_path),
+            "-i",
+            str(soundtrack_path),
+        ]
+        video_filter = (
+            f"[0:v]trim=start={video_start:.3f}:duration={effective_duration:.3f},setpts=PTS-STARTPTS,"
+            f"scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+            f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"fps={self._coerce_int(processing.get('fps'), STORYBOARD_OUTPUT_FPS, 1, 120)},"
+            "setsar=1,format=yuv420p[vout]"
+        )
+        filter_parts = [video_filter]
+        filter_parts.extend(self._storyboard_external_audio_filter_parts("1:a:0", processing, effective_duration))
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-t",
+            f"{effective_duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ])
+        self._log(
+            "Replacing storyboard video soundtrack; "
+            f"job_id={job_id} source_input_id={video_input.get('input_id')} "
+            f"soundtrack_input_id={soundtrack_input.get('input_id')} "
+            f"soundtrack_kind={soundtrack_input.get('kind')} soundtrack_mime={soundtrack_input.get('mime_type')} "
+            f"video_start={video_start:.3f} audio_duration={audio_duration:.3f} output_duration={effective_duration:.3f}."
+        )
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, effective_duration),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(effective_duration),
+        )
+
+    def _run_storyboard_video_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        overlay_input: Optional[dict[str, Any]],
+        matte_input: Optional[dict[str, Any]],
+        audio_input: Optional[dict[str, Any]],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(video_input["path"]))
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        source_duration = float(metadata.get("duration_seconds") or 1.0)
+        trim_start = self._coerce_float(processing.get("trim_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        trim_duration = self._storyboard_trim_duration(source_duration, processing, trim_start)
+        command = [self._ffmpeg_binary(), "-y", "-hide_banner", "-v", "error", "-progress", "pipe:1", "-nostats"]
+        if trim_start > 0:
+            command.extend(["-ss", f"{trim_start:.3f}"])
+        command.extend(["-i", str(source_path)])
+        next_input_index = 1
+        audio_input_label = "0:a:0"
+        effective_duration = float(trim_duration or max(0.1, source_duration - trim_start))
+        external_audio = audio_input is not None
+        if external_audio:
+            command.extend(["-i", str(audio_input["path"])])
+            audio_input_label = f"{next_input_index}:a:0"
+            next_input_index += 1
+        overlay_input_index = None
+        matte_input_index = None
+        if overlay_input is not None:
+            if overlay_input.get("category") == "image":
+                command.extend(["-loop", "1", "-t", f"{effective_duration:.3f}", "-i", str(overlay_input["path"])])
+            else:
+                command.extend(["-i", str(overlay_input["path"])])
+            overlay_input_index = next_input_index
+            next_input_index += 1
+        if matte_input is not None and overlay_input_index is None:
+            raise ValueError("Overlay matte was provided but could not be applied: no overlay input was provided.")
+        if matte_input is not None:
+            command.extend(["-loop", "1", "-t", f"{effective_duration:.3f}", "-i", str(matte_input["path"])])
+            matte_input_index = next_input_index
+            next_input_index += 1
+        if overlay_input is not None and overlay_input.get("category") == "video":
+            overlay_metadata = overlay_input.get("metadata") if isinstance(overlay_input.get("metadata"), dict) else {}
+            overlay_duration = float(overlay_metadata.get("duration_seconds") or 0.0)
+            if overlay_duration > 0:
+                effective_duration = max(0.1, min(effective_duration, overlay_duration))
+                trim_duration = effective_duration
+        audio_source = str(processing.get("audio_source") or "").strip().lower()
+        if overlay_input_index is not None and audio_source in {"base", "overlay"}:
+            if audio_source == "overlay":
+                audio_input_label = f"{overlay_input_index}:a:0"
+                overlay_metadata = overlay_input.get("metadata") if isinstance(overlay_input.get("metadata"), dict) else {}
+                selected_audio_has_stream = bool(overlay_metadata.get("has_audio"))
+            else:
+                audio_input_label = "0:a:0"
+                selected_audio_has_stream = bool(metadata.get("has_audio"))
+        else:
+            selected_audio_has_stream = bool(external_audio or metadata.get("has_audio"))
+        if overlay_input_index is not None and audio_source in {"base", "overlay"} and not selected_audio_has_stream:
+            source_name = "overlay_video" if audio_source == "overlay" else "source_video"
+            raise ValueError(
+                f"Storyboard overlay audio_source={audio_source!r} requested, but {source_name} has no audio stream."
+            )
+        if not selected_audio_has_stream:
+            command.extend([
+                "-f",
+                "lavfi",
+                "-t",
+                f"{effective_duration:.3f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ])
+            audio_input_label = f"{next_input_index}:a:0"
+            next_input_index += 1
+        fit_mode = str(processing.get("fit_mode") or processing.get("fit") or "contain").strip().lower()
+        if self._coerce_bool(processing.get("crop"), False) or fit_mode in {"cover", "crop"}:
+            video_filter = (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},setsar=1,format=rgba[vbase]"
+            )
+        else:
+            video_filter = (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+            f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                "setsar=1,format=rgba[vbase]"
+            )
+        filter_parts = [video_filter]
+        if external_audio:
+            filter_parts.extend(self._storyboard_external_audio_filter_parts(audio_input_label, processing, effective_duration))
+        else:
+            filter_parts.append(f"[{audio_input_label}]aresample=48000,aformat=channel_layouts=stereo[aout]")
+        if overlay_input_index is not None:
+            self._log_storyboard_overlay_matte_state(job_id, overlay_input, matte_input)
+            try:
+                overlay_filter_parts = self._storyboard_overlay_filter_parts(
+                        overlay_input,
+                        overlay_input_index,
+                        matte_input_index,
+                        output_width,
+                        output_height,
+                        processing,
+                        effective_duration,
+                )
+            except Exception as exc:
+                if matte_input is not None:
+                    raise ValueError(f"Overlay matte was provided but could not be applied: {exc}") from exc
+                raise
+            filter_parts.extend(overlay_filter_parts)
+        else:
+            filter_parts.append("[vbase]format=yuv420p[vout]")
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-r",
+            str(self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120)),
+            *(["-t", f"{trim_duration:.3f}"] if trim_duration is not None else []),
+            *self._event_video_encode_args(),
+            str(output_path),
+        ])
+        try:
+            self._run_ffmpeg_with_progress(
+                connection,
+                job_id,
+                command,
+                total_seconds=max(1.0, effective_duration),
+                progress_start=progress_start,
+                progress_end=progress_end,
+                phase="processing",
+                status=status,
+                process_handle=process_handle,
+                timeout_seconds=self._storyboard_step_timeout(effective_duration),
+            )
+        except Exception as exc:
+            if matte_input is not None and str(exc) != "cancel_requested":
+                raise ValueError(f"Overlay matte was provided but could not be applied: {exc}") from exc
+            raise
+
+    def _validate_storyboard_ffmpeg_output(
+        self,
+        path: Path,
+        *,
+        expected_width: int,
+        expected_height: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        if not path.is_file():
+            raise ValueError("Storyboard FFmpeg output MP4 is missing.")
+        file_size = path.stat().st_size
+        if file_size <= 0 or file_size > max_bytes:
+            raise ValueError(f"Storyboard FFmpeg output size is outside allowed bounds: {file_size} bytes.")
+        with path.open("rb") as reader:
+            header = reader.read(64)
+        if not self._looks_like_mp4(header):
+            raise ValueError("Storyboard FFmpeg output does not look like MP4 bytes.")
+        metadata = self._probe_event_video_metadata(path)
+        output_width = int(metadata.get("display_width") or metadata.get("width") or 0)
+        output_height = int(metadata.get("display_height") or metadata.get("height") or 0)
+        if expected_width > 0 and expected_height > 0 and (output_width, output_height) != (int(expected_width), int(expected_height)):
+            raise ValueError(
+                "Storyboard FFmpeg output dimensions do not match the requested output; "
+                f"expected {expected_width}x{expected_height}, got {output_width}x{output_height}."
+            )
+        duration = float(metadata.get("duration_seconds") or 0.0)
+        if duration <= 0:
+            raise ValueError("Storyboard FFmpeg output duration could not be read.")
+        if duration > MAX_STORYBOARD_VIDEO_DURATION_SECONDS + 0.05:
+            raise ValueError(
+                "Storyboard FFmpeg output duration exceeds bridge safety limit; "
+                f"max={MAX_STORYBOARD_VIDEO_DURATION_SECONDS}s got={duration:.2f}s."
+            )
+        video_codec = str(metadata.get("video_codec") or "").lower()
+        audio_codec = str(metadata.get("audio_codec") or "").lower()
+        if video_codec != "h264":
+            raise ValueError(f"Storyboard FFmpeg output must use H.264 video; got {video_codec or 'unknown'}.")
+        if audio_codec != "aac":
+            raise ValueError(f"Storyboard FFmpeg output must use AAC audio; got {audio_codec or 'unknown'}.")
+        self._log(
+            "Validated Storyboard FFmpeg output; "
+            f"filename={path.name!r} dimensions={output_width}x{output_height} "
+            f"duration_seconds={duration:.2f} bytes={file_size} video_codec={video_codec} audio_codec={audio_codec}."
+        )
+        return metadata
+
+    @staticmethod
+    def _storyboard_video_inputs(downloaded_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            [item for item in downloaded_inputs if item.get("category") == "video"],
+            key=lambda item: (int(item.get("order") or 0), int(item.get("input_id") or 0)),
+        )
+
+    @staticmethod
+    def _storyboard_primary_video_input(video_inputs: list[dict[str, Any]]) -> dict[str, Any]:
+        preferred_roles = {"primary", "source", "take", "card", "input"}
+        for item in video_inputs:
+            role = str(item.get("role") or "").strip().lower()
+            kind = str(item.get("kind") or "").strip().lower()
+            if role in preferred_roles or kind in {"source_video", "input_video", "take_video", "card_video", "video"}:
+                return item
+        return video_inputs[0]
+
+    @staticmethod
+    def _storyboard_overlay_input(downloaded_inputs: list[dict[str, Any]], processing: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        for item in downloaded_inputs:
+            role = str(item.get("role") or "").strip().lower()
+            kind = str(item.get("kind") or "").strip().lower()
+            if kind == "overlay_video" or (role == "overlay" and item.get("category") == "video"):
+                return item
+        for item in downloaded_inputs:
+            role = str(item.get("role") or "").strip().lower()
+            kind = str(item.get("kind") or "").strip().lower()
+            if AwsWorkerBridgePlugin._is_storyboard_matte_descriptor(item, processing):
+                continue
+            if role == "overlay" or kind in {"overlay_image", "overlay_png"}:
+                return item
+        return None
+
+    @staticmethod
+    def _storyboard_matte_input(downloaded_inputs: list[dict[str, Any]], processing: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+        for item in downloaded_inputs:
+            if item.get("category") == "image" and AwsWorkerBridgePlugin._is_storyboard_matte_descriptor(item, processing):
+                return item
+        return None
+
+    @staticmethod
+    def _is_storyboard_matte_descriptor(item: dict[str, Any], processing: Optional[dict[str, Any]] = None) -> bool:
+        role = str(item.get("role") or "").strip().lower()
+        kind = str(item.get("kind") or "").strip().lower()
+        if role in {"matte", "mask"} or kind in {"matte_image", "mask_image", "overlay_matte", "overlay_mask"}:
+            return True
+        if not isinstance(processing, dict):
+            return False
+        selector_values = {
+            processing.get("mask_dbfileid"),
+            processing.get("mask_input_id"),
+            processing.get("matte_dbfileid"),
+            processing.get("matte_input_id"),
+            processing.get("overlay_mask_dbfileid"),
+            processing.get("overlay_matte_dbfileid"),
+        }
+        selector_ids = set()
+        for value in selector_values:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                selector_ids.add(number)
+        if not selector_ids:
+            return False
+        candidate_values = {
+            item.get("input_id"),
+            item.get("dbfileid"),
+            item.get("dbfile_id"),
+            item.get("file_id"),
+        }
+        for value in candidate_values:
+            try:
+                if int(value) in selector_ids:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    def _log_storyboard_overlay_matte_state(
+        self,
+        job_id: int,
+        overlay_input: dict[str, Any],
+        matte_input: Optional[dict[str, Any]],
+    ) -> None:
+        overlay_path = Path(str(overlay_input.get("path") or ""))
+        if matte_input is None:
+            self._log(
+                "Storyboard overlay matte state; "
+                f"job_id={job_id} matte_detected=False final_overlay_mode=no_matte "
+                f"overlay_input_id={overlay_input.get('input_id')} overlay_filename={overlay_path.name!r}."
+            )
+            return
+        matte_path = Path(str(matte_input.get("path") or ""))
+        matte_width = self._coerce_int(matte_input.get("width"), 0, 0, 100_000)
+        matte_height = self._coerce_int(matte_input.get("height"), 0, 0, 100_000)
+        decoded_format = str(matte_input.get("decoded_format") or "").strip().upper()
+        mime_type = str(matte_input.get("mime_type") or "").strip().lower()
+        self._log(
+            "Storyboard overlay matte state; "
+            f"job_id={job_id} matte_detected=True matte_input_id={matte_input.get('input_id')} "
+            f"matte_dbfileid={matte_input.get('dbfileid') or matte_input.get('dbfile_id') or ''} "
+            f"matte_filename={matte_path.name!r} matte_mime={mime_type!r} "
+            f"matte_dimensions={matte_width}x{matte_height} matte_format={decoded_format or 'unknown'} "
+            "alphamerge_applied=True final_overlay_mode=luminance_matte."
+        )
+
+    def _storyboard_overlay_filter_parts(
+        self,
+        overlay_input: dict[str, Any],
+        overlay_input_index: int,
+        matte_input_index: Optional[int],
+        output_width: int,
+        output_height: int,
+        processing: dict[str, Any],
+        effective_duration: float,
+    ) -> list[str]:
+        variant = str(processing.get("overlay_variant") or "static_rectangle").strip().lower()
+        if variant in {"animated_rectangle", "interpolated_rectangle"}:
+            return self._storyboard_animated_overlay_filter_parts(
+                overlay_input,
+                overlay_input_index,
+                matte_input_index,
+                output_width,
+                output_height,
+                processing,
+                effective_duration,
+            )
+        return self._storyboard_static_overlay_filter_parts(
+            overlay_input,
+            overlay_input_index,
+            matte_input_index,
+            output_width,
+            output_height,
+            processing,
+        )
+
+    def _storyboard_static_overlay_filter_parts(
+        self,
+        overlay_input: dict[str, Any],
+        overlay_input_index: int,
+        matte_input_index: Optional[int],
+        output_width: int,
+        output_height: int,
+        processing: dict[str, Any],
+    ) -> list[str]:
+        overlay_x = self._coerce_int(self._first_present(processing, "overlay_x", "x", "left", "pip_x"), 0, -4096, 4096)
+        overlay_y = self._coerce_int(self._first_present(processing, "overlay_y", "y", "top", "pip_y"), 0, -4096, 4096)
+        overlay_width = self._coerce_int(self._first_present(processing, "overlay_width", "overlay_w", "pip_width", "pip_w"), 0, 0, 4096)
+        overlay_height = self._coerce_int(self._first_present(processing, "overlay_height", "overlay_h", "pip_height", "pip_h"), 0, 0, 4096)
+        if overlay_width <= 0 or overlay_height <= 0:
+            preset = str(processing.get("overlay_preset") or "").strip().lower()
+            scale = self._optional_positive_float(processing.get("overlay_scale"), 1.0)
+            if preset and scale:
+                rect = self._storyboard_overlay_rect(
+                    output_width,
+                    output_height,
+                    overlay_input,
+                    preset,
+                    scale,
+                    self._coerce_int(processing.get("margin_x"), 0, 0, 4096),
+                    self._coerce_int(processing.get("margin_y"), 0, 0, 4096),
+                )
+                overlay_x, overlay_y, overlay_width, overlay_height = rect
+        start_opacity = self._coerce_float(processing.get("start_opacity", processing.get("opacity")), 1.0, 0.0, 1.0)
+        end_opacity = self._coerce_float(processing.get("end_opacity"), start_opacity, 0.0, 1.0)
+        opacity = end_opacity
+        parts = []
+        overlay_chain = f"[{overlay_input_index}:v]"
+        if overlay_width > 0 and overlay_height > 0:
+            overlay_chain += f"scale={overlay_width}:{overlay_height},"
+        overlay_chain += "format=rgb24[ovbase]" if matte_input_index is not None else "format=rgba[ovbase]"
+        parts.append(overlay_chain)
+        source_label = "ovbase"
+        if matte_input_index is not None:
+            if overlay_width > 0 and overlay_height > 0:
+                parts.append(f"[{matte_input_index}:v]scale={overlay_width}:{overlay_height},format=rgb24,format=gray[ovmask]")
+            else:
+                parts.append(f"[{matte_input_index}:v]format=rgb24,format=gray[ovmask]")
+            parts.append("[ovbase][ovmask]alphamerge,format=rgba[ovmatte]")
+            source_label = "ovmatte"
+        if opacity < 0.999:
+            parts.append(
+                f"[{source_label}]geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                f"a='alpha(X,Y)*{opacity:.6f}'[ov]"
+            )
+        else:
+            parts.append(f"[{source_label}]copy[ov]")
+        parts.append(f"[vbase][ov]overlay={overlay_x}:{overlay_y}:format=auto:eof_action=pass,format=yuv420p[vout]")
+        return parts
+
+    def _storyboard_animated_overlay_filter_parts(
+        self,
+        overlay_input: dict[str, Any],
+        overlay_input_index: int,
+        matte_input_index: Optional[int],
+        output_width: int,
+        output_height: int,
+        processing: dict[str, Any],
+        effective_duration: float,
+    ) -> list[str]:
+        start_preset = str(processing.get("overlay_preset") or "bottom_right").strip().lower()
+        start_scale = self._coerce_float(processing.get("overlay_scale"), 0.28, 0.01, 4.0)
+        start_margin_x = self._coerce_int(processing.get("margin_x"), 32, 0, 4096)
+        start_margin_y = self._coerce_int(processing.get("margin_y"), 32, 0, 4096)
+        end_preset = str(processing.get("end_overlay_preset") or processing.get("overlay_preset") or "bottom_right").strip().lower()
+        end_scale = self._coerce_float(processing.get("end_overlay_scale"), start_scale, 0.01, 4.0)
+        end_margin_x = self._coerce_int(processing.get("end_margin_x"), start_margin_x, 0, 4096)
+        end_margin_y = self._coerce_int(processing.get("end_margin_y"), start_margin_y, 0, 4096)
+        start_rect = self._storyboard_overlay_rect(
+            output_width,
+            output_height,
+            overlay_input,
+            start_preset,
+            start_scale,
+            start_margin_x,
+            start_margin_y,
+        )
+        end_rect = self._storyboard_overlay_rect(
+            output_width,
+            output_height,
+            overlay_input,
+            end_preset,
+            end_scale,
+            end_margin_x,
+            end_margin_y,
+        )
+        _sx, _sy, sw, sh = start_rect
+        _ex, _ey, ew, eh = end_rect
+        tile_width, tile_height = self._even_video_size(max(sw, ew), max(sh, eh))
+        min_width_ratio = max(0.01, min(float(sw), float(ew)) / float(tile_width))
+        min_height_ratio = max(0.01, min(float(sh), float(eh)) / float(tile_height))
+        zoom_canvas_width, zoom_canvas_height = self._even_video_size(
+            int(math.ceil(float(tile_width) / min_width_ratio)),
+            int(math.ceil(float(tile_height) / min_height_ratio)),
+        )
+        if zoom_canvas_width > 8192 or zoom_canvas_height > 8192:
+            raise ValueError(
+                "Storyboard animated overlay scale range is too large for fixed-canvas rendering; "
+                f"tile={tile_width}x{tile_height} zoom_canvas={zoom_canvas_width}x{zoom_canvas_height}."
+            )
+        progress_t = self._storyboard_overlay_progress_expr(effective_duration, str(processing.get("overlay_easing") or "ease_in_out"), "t")
+        progress_t_upper = self._storyboard_overlay_progress_expr(effective_duration, str(processing.get("overlay_easing") or "ease_in_out"), "T")
+        progress_on = self._storyboard_overlay_frame_progress_expr(
+            effective_duration,
+            self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120),
+            str(processing.get("overlay_easing") or "ease_in_out"),
+        )
+        current_width_t = f"({sw}+({ew}-{sw})*({progress_t}))"
+        current_height_t = f"({sh}+({eh}-{sh})*({progress_t}))"
+        current_width_on = f"({sw}+({ew}-{sw})*({progress_on}))"
+        current_height_on = f"({sh}+({eh}-{sh})*({progress_on}))"
+        desired_x_expr = f"({start_rect[0]}+({end_rect[0]}-{start_rect[0]})*({progress_t}))"
+        desired_y_expr = f"({start_rect[1]}+({end_rect[1]}-{start_rect[1]})*({progress_t}))"
+        x_expr = f"({desired_x_expr}-(({tile_width})-({current_width_t}))/2)"
+        y_expr = f"({desired_y_expr}-(({tile_height})-({current_height_t}))/2)"
+        zoom_x_expr = (
+            f"(({current_width_on})/{float(tile_width):.6f})/{min_width_ratio:.6f}"
+        )
+        zoom_y_expr = (
+            f"(({current_height_on})/{float(tile_height):.6f})/{min_height_ratio:.6f}"
+        )
+        zoom_expr = f"min(({zoom_x_expr})\\,({zoom_y_expr}))"
+        start_opacity = self._coerce_float(processing.get("start_opacity"), 1.0, 0.0, 1.0)
+        end_opacity = self._coerce_float(processing.get("end_opacity"), start_opacity, 0.0, 1.0)
+        opacity_expr = f"({start_opacity:.6f}+({end_opacity:.6f}-{start_opacity:.6f})*({progress_t_upper}))"
+        parts = [
+        ]
+        if matte_input_index is not None:
+            parts.extend([
+                (
+                    f"[{overlay_input_index}:v]setpts=PTS-STARTPTS,"
+                    f"fps={self._coerce_int(processing.get('fps'), STORYBOARD_OUTPUT_FPS, 1, 120)},format=rgb24,"
+                    f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                    f"pad={zoom_canvas_width}:{zoom_canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black[ovscaledrgb]"
+                ),
+                (
+                    f"[{matte_input_index}:v]format=rgb24,"
+                    f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                    f"pad={zoom_canvas_width}:{zoom_canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black,format=gray[ovmask]"
+                ),
+                "[ovscaledrgb][ovmask]alphamerge,format=rgba[ovmatte]",
+            ])
+            source_label = "ovmatte"
+        else:
+            parts.append(
+                f"[{overlay_input_index}:v]setpts=PTS-STARTPTS,"
+                f"fps={self._coerce_int(processing.get('fps'), STORYBOARD_OUTPUT_FPS, 1, 120)},format=rgba,"
+                f"scale={tile_width}:{tile_height}:force_original_aspect_ratio=decrease,"
+                f"pad={zoom_canvas_width}:{zoom_canvas_height}:(ow-iw)/2:(oh-ih)/2:color=black@0[ovscaled]"
+            )
+            source_label = "ovscaled"
+        parts.extend([
+            (
+                f"[{source_label}]zoompan=z='{zoom_expr}':"
+                "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                f"d=1:s={tile_width}x{tile_height}:fps={self._coerce_int(processing.get('fps'), STORYBOARD_OUTPUT_FPS, 1, 120)},"
+                f"setpts=N/({self._coerce_int(processing.get('fps'), STORYBOARD_OUTPUT_FPS, 1, 120)}*TB),format=rgba[ovtile]"
+            ),
+            (
+                "[ovtile]geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+                f"a='alpha(X,Y)*({opacity_expr})'[ov]"
+            ),
+            (
+                f"[vbase][ov]overlay=x='{x_expr}':y='{y_expr}':"
+                "format=auto:eval=frame:eof_action=pass,format=yuv420p[vout]"
+            ),
+        ])
+        return parts
+
+    @staticmethod
+    def _storyboard_overlay_tile_position(
+        canvas_width: int,
+        canvas_height: int,
+        tile_width: int,
+        tile_height: int,
+        preset: str,
+        margin_x: int,
+        margin_y: int,
+    ) -> tuple[int, int]:
+        preset = preset if preset in {"bottom_right", "bottom_left", "top_right", "top_left", "center"} else "bottom_right"
+        if preset == "bottom_right":
+            x = canvas_width - tile_width - int(margin_x)
+            y = canvas_height - tile_height - int(margin_y)
+        elif preset == "bottom_left":
+            x = int(margin_x)
+            y = canvas_height - tile_height - int(margin_y)
+        elif preset == "top_right":
+            x = canvas_width - tile_width - int(margin_x)
+            y = int(margin_y)
+        elif preset == "top_left":
+            x = int(margin_x)
+            y = int(margin_y)
+        else:
+            x = (canvas_width - tile_width) // 2
+            y = (canvas_height - tile_height) // 2
+        return max(0, min(canvas_width - tile_width, x)), max(0, min(canvas_height - tile_height, y))
+
+    def _storyboard_overlay_rect(
+        self,
+        canvas_width: int,
+        canvas_height: int,
+        overlay_input: dict[str, Any],
+        preset: str,
+        scale: float,
+        margin_x: int,
+        margin_y: int,
+    ) -> tuple[int, int, int, int]:
+        source_width, source_height = self._storyboard_input_display_size(overlay_input)
+        aspect = max(0.01, float(source_width) / float(source_height or 1))
+        rect_width = max(2, int(round(float(canvas_width) * float(scale))))
+        rect_height = max(2, int(round(rect_width / aspect)))
+        if rect_height > canvas_height:
+            rect_height = max(2, int(round(float(canvas_height) * float(scale))))
+            rect_width = max(2, int(round(rect_height * aspect)))
+        rect_width, rect_height = self._even_video_size(min(rect_width, canvas_width), min(rect_height, canvas_height))
+        preset = preset if preset in {"bottom_right", "bottom_left", "top_right", "top_left", "center"} else "bottom_right"
+        if preset == "bottom_right":
+            x = canvas_width - rect_width - int(margin_x)
+            y = canvas_height - rect_height - int(margin_y)
+        elif preset == "bottom_left":
+            x = int(margin_x)
+            y = canvas_height - rect_height - int(margin_y)
+        elif preset == "top_right":
+            x = canvas_width - rect_width - int(margin_x)
+            y = int(margin_y)
+        elif preset == "top_left":
+            x = int(margin_x)
+            y = int(margin_y)
+        else:
+            x = (canvas_width - rect_width) // 2
+            y = (canvas_height - rect_height) // 2
+        x = max(0, min(canvas_width - rect_width, x))
+        y = max(0, min(canvas_height - rect_height, y))
+        return x, y, rect_width, rect_height
+
+    @staticmethod
+    def _storyboard_input_display_size(item: dict[str, Any]) -> tuple[int, int]:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        width = int(metadata.get("display_width") or metadata.get("width") or item.get("width") or 0)
+        height = int(metadata.get("display_height") or metadata.get("height") or item.get("height") or 0)
+        return max(2, width or 2), max(2, height or 2)
+
+    @staticmethod
+    def _storyboard_overlay_progress_expr(duration_seconds: float, easing: str, time_var: str) -> str:
+        duration = max(0.001, float(duration_seconds or 0.001))
+        p = f"if(gte({time_var}\\,{duration:.6f})\\,1\\,if(lte({time_var}\\,0)\\,0\\,{time_var}/{duration:.6f}))"
+        if str(easing or "").strip().lower() == "linear":
+            return p
+        return f"(({p})*({p})*(3-2*({p})))"
+
+    @staticmethod
+    def _storyboard_overlay_frame_progress_expr(duration_seconds: float, fps: int, easing: str) -> str:
+        frame_count = max(1.0, float(duration_seconds or 0.001) * float(max(1, int(fps or STORYBOARD_OUTPUT_FPS))))
+        p = f"if(gte(on\\,{frame_count:.6f})\\,1\\,if(lte(on\\,0)\\,0\\,on/{frame_count:.6f}))"
+        if str(easing or "").strip().lower() == "linear":
+            return p
+        return f"(({p})*({p})*(3-2*({p})))"
+
+    @staticmethod
+    def _storyboard_audio_input(downloaded_inputs: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+        preferred_kinds = ("soundtrack_audio", "source_audio")
+        for preferred_kind in preferred_kinds:
+            for item in downloaded_inputs:
+                if item.get("category") == "audio" and str(item.get("kind") or "").strip().lower() == preferred_kind:
+                    return item
+        for item in downloaded_inputs:
+            role = str(item.get("role") or "").strip().lower()
+            if item.get("category") == "audio" and role in {"soundtrack", "source", "audio", "primary"}:
+                return item
+        return None
+
+    def _storyboard_external_audio_filter_parts(
+        self,
+        audio_input_label: str,
+        processing: dict[str, Any],
+        effective_duration: float,
+    ) -> list[str]:
+        soundtrack_start = self._coerce_float(
+            self._first_present(processing, "soundtrack_start", "soundtrack_start_seconds", "audio_start_seconds", "audio_offset_seconds"),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        head_silence = self._coerce_float(
+            self._first_present(processing, "soundtrack_head_silence", "soundtrack_head_silence_seconds", "audio_head_silence_seconds"),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        tail_silence = self._coerce_float(
+            self._first_present(processing, "soundtrack_tail_silence", "soundtrack_tail_silence_seconds", "audio_tail_silence_seconds"),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        total_duration = max(0.1, float(effective_duration or 0.1))
+        head_silence = min(head_silence, total_duration)
+        tail_silence = min(tail_silence, max(0.0, total_duration - head_silence))
+        body_duration = max(0.0, total_duration - head_silence - tail_silence)
+        if body_duration <= 0.001:
+            return [
+                (
+                    "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                    f"atrim=duration={total_duration:.3f},asetpts=PTS-STARTPTS,"
+                    "aformat=channel_layouts=stereo[aout]"
+                )
+            ]
+        if head_silence <= 0.001 and tail_silence <= 0.001:
+            return [
+                (
+                    f"[{audio_input_label}]atrim=start={soundtrack_start:.3f}:duration={body_duration:.3f},"
+                    "asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[aout]"
+                )
+            ]
+        parts = []
+        concat_labels = []
+        if head_silence > 0.001:
+            parts.append(
+                "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                f"atrim=duration={head_silence:.3f},asetpts=PTS-STARTPTS,"
+                "aformat=channel_layouts=stereo[ahead]"
+            )
+            concat_labels.append("[ahead]")
+        parts.append(
+            f"[{audio_input_label}]atrim=start={soundtrack_start:.3f}:duration={body_duration:.3f},"
+            "asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[amain]"
+        )
+        concat_labels.append("[amain]")
+        if tail_silence > 0.001:
+            parts.append(
+                "anullsrc=channel_layout=stereo:sample_rate=48000,"
+                f"atrim=duration={tail_silence:.3f},asetpts=PTS-STARTPTS,"
+                "aformat=channel_layouts=stereo[atail]"
+            )
+            concat_labels.append("[atail]")
+        parts.append(f"{''.join(concat_labels)}concat=n={len(concat_labels)}:v=0:a=1,aformat=channel_layouts=stereo[aout]")
+        return parts
+
+    def _storyboard_output_size(self, video_input: dict[str, Any], processing: dict[str, Any]) -> tuple[int, int]:
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else {}
+        width = self._coerce_int(processing.get("output_width") or processing.get("width"), 0, 0, 4096)
+        height = self._coerce_int(processing.get("output_height") or processing.get("height"), 0, 0, 4096)
+        if width <= 0 or height <= 0:
+            width = self._coerce_int(metadata.get("display_width") or metadata.get("width"), 1280, 2, 4096)
+            height = self._coerce_int(metadata.get("display_height") or metadata.get("height"), 720, 2, 4096)
+        return self._even_video_size(width, height)
+
+    @staticmethod
+    def _even_video_size(width: int, height: int) -> tuple[int, int]:
+        even_width = max(2, int(width) - (int(width) % 2))
+        even_height = max(2, int(height) - (int(height) % 2))
+        return even_width, even_height
+
+    @staticmethod
+    def _first_present(payload: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in payload and payload.get(key) is not None:
+                return payload.get(key)
+        return None
+
+    def _storyboard_trim_duration(self, source_duration: float, processing: dict[str, Any], trim_start: float) -> Optional[float]:
+        trim_duration = self._optional_positive_float(processing.get("trim_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if trim_duration is not None:
+            return min(trim_duration, max(0.1, float(source_duration or 0.0) - trim_start))
+        trim_end = self._optional_positive_float(processing.get("trim_end_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if trim_end is not None and trim_end > trim_start:
+            return min(trim_end - trim_start, max(0.1, float(source_duration or 0.0) - trim_start))
+        if trim_start > 0:
+            return max(0.1, float(source_duration or 0.0) - trim_start)
+        return None
+
+    @staticmethod
+    def _storyboard_step_timeout(duration_seconds: float) -> int:
+        try:
+            duration = max(1.0, float(duration_seconds or 1.0))
+        except (TypeError, ValueError):
+            duration = 1.0
+        return int(min(STORYBOARD_TIMEOUT_MAX_SECONDS, max(STORYBOARD_TIMEOUT_BASE_SECONDS, STORYBOARD_TIMEOUT_BASE_SECONDS + duration * STORYBOARD_TIMEOUT_MULTIPLIER)))
+
     def _event_video_output_size(self, metadata: dict[str, Any], processing: dict[str, Any]) -> tuple[int, int]:
         target_a = self._coerce_int(processing.get("target_max_width"), 720, 1, 4096)
         target_b = self._coerce_int(processing.get("target_max_height"), 1280, 1, 4096)
@@ -5245,6 +6881,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         output_path: Path,
         total_seconds: float,
         process_handle: LocalProcessJob,
+        *,
+        progress_start: int = 86,
+        progress_end: int = 95,
+        status: str = "Appending Event video ending bumper.",
     ) -> None:
         list_path = output_path.with_suffix(".txt")
         with list_path.open("w", encoding="utf-8") as writer:
@@ -5277,10 +6917,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             job_id,
             command,
             total_seconds=max(1.0, float(total_seconds or 1.0)),
-            progress_start=86,
-            progress_end=95,
+            progress_start=progress_start,
+            progress_end=progress_end,
             phase="processing",
-            status="Appending Event video ending bumper.",
+            status=status,
             process_handle=process_handle,
             timeout_seconds=self._event_video_step_timeout(max(1.0, float(total_seconds or 1.0))),
         )
@@ -5317,6 +6957,39 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "-metadata:s:v:0",
             "rotate=0",
         ]
+
+    def _storyboard_encode_args(self, processing: dict[str, Any]) -> list[str]:
+        preset = str(processing.get("preset") or "veryfast").strip().lower()
+        if preset not in {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}:
+            preset = "veryfast"
+        tune = str(processing.get("tune") or "none").strip().lower()
+        if tune not in {"none", "film", "animation", "grain", "stillimage", "fastdecode", "zerolatency"}:
+            tune = "none"
+        crf = self._coerce_int(processing.get("crf"), EVENT_VIDEO_X264_CRF, 0, 51)
+        audio_bitrate = str(processing.get("audio_bitrate") or "128k").strip().lower()
+        if not re.fullmatch(r"[1-9][0-9]{1,3}k", audio_bitrate):
+            audio_bitrate = "128k"
+        args = [
+            "-c:v",
+            EVENT_VIDEO_H264_ENCODER,
+            "-preset",
+            preset,
+            "-crf",
+            str(crf),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            audio_bitrate,
+            "-movflags",
+            "+faststart",
+            "-metadata:s:v:0",
+            "rotate=0",
+        ]
+        if tune != "none":
+            args[6:6] = ["-tune", tune]
+        return args
 
     def _run_ffmpeg_with_progress(
         self,
@@ -6178,6 +7851,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError("Job inputs must be a list.")
         if self._is_event_video_processing_job(job):
             return self._download_event_video_processing_inputs(connection, job, temp_dir, inputs)
+        if self._is_storyboard_ffmpeg_processing_job(job):
+            return self._download_storyboard_ffmpeg_processing_inputs(connection, job, temp_dir, inputs)
         media_type = str(job.get("media_type") or "image").strip().lower()
         if media_type == "audio":
             return self._download_audio_job_inputs(connection, job, temp_dir, inputs)
@@ -6723,6 +8398,147 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "Event Video Processing input download complete; "
             f"job_id={job_id} source_video_count={source_count} overlay_png_count={overlay_count} "
             f"bumper_image_count={bumper_count}."
+        )
+        return downloaded
+
+    def _download_storyboard_ffmpeg_processing_inputs(
+        self,
+        connection: ConnectionContext,
+        job: dict[str, Any],
+        temp_dir: str,
+        inputs: list[Any],
+    ) -> list[dict[str, Any]]:
+        downloaded = []
+        job_id = self._coerce_job_id(job)
+        operation_type = self._storyboard_operation_type(job)
+        raw_processing = job.get("processing") if isinstance(job.get("processing"), dict) else {}
+        operation_payload = job.get("operation_payload") if isinstance(job.get("operation_payload"), dict) else {}
+        nested_operation_payload = raw_processing.get("operation_payload") if isinstance(raw_processing.get("operation_payload"), dict) else {}
+        processing = {**operation_payload, **nested_operation_payload, **{key: value for key, value in raw_processing.items() if key != "operation_payload"}}
+        source_video_mime_types = set(ALLOWED_STORYBOARD_SOURCE_VIDEO_MIME_TYPES)
+        if not self._ffmpeg_processing_probe().get("quicktime_demux_available"):
+            source_video_mime_types.discard("video/quicktime")
+        self._log(
+            f"Downloading Storyboard FFmpeg inputs; job_id={job_id} operation_type={operation_type} "
+            f"descriptors={len(inputs)} video_mime_types={sorted(source_video_mime_types)}."
+        )
+        for index, item in enumerate(inputs):
+            if not isinstance(item, dict):
+                raise ValueError("Storyboard FFmpeg input descriptor must be a JSON object.")
+            input_id = self._coerce_input_id(item)
+            kind = str(item.get("kind") or "").strip()
+            if kind not in ALLOWED_STORYBOARD_INPUT_KINDS:
+                raise ValueError(f"Unsupported Storyboard FFmpeg input kind: {kind}")
+            if kind in STORYBOARD_VIDEO_INPUT_KINDS:
+                allowed_mime_types = source_video_mime_types
+                max_bytes = MAX_STORYBOARD_VIDEO_INPUT_BYTES
+                category = "video"
+            elif kind in STORYBOARD_IMAGE_INPUT_KINDS:
+                allowed_mime_types = ALLOWED_STORYBOARD_MATTE_MIME_TYPES if self._is_storyboard_matte_descriptor(item, processing) else ALLOWED_IMAGE_MIME_TYPES
+                max_bytes = MAX_STORYBOARD_IMAGE_INPUT_BYTES
+                category = "image"
+            else:
+                if kind in {"source_audio", "soundtrack_audio"}:
+                    allowed_mime_types = ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES
+                    max_bytes = MAX_STORYBOARD_VIDEO_INPUT_BYTES
+                else:
+                    allowed_mime_types = ALLOWED_AUDIO_INPUT_MIME_TYPES
+                    max_bytes = MAX_STORYBOARD_AUDIO_INPUT_BYTES
+                category = "audio"
+            self._log(
+                f"Requesting Storyboard FFmpeg input download; job_id={job_id} input_id={input_id} "
+                f"kind={kind} declared_mime={item.get('mime_type')!r} declared_bytes={item.get('bytes')!r}."
+            )
+            response = requests.get(
+                f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
+                headers=self._headers(connection),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                stream=True,
+            )
+            response.raise_for_status()
+            mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if mime_type not in allowed_mime_types:
+                if category == "image" and self._is_storyboard_matte_descriptor(item, processing):
+                    raise ValueError(
+                        "Overlay matte was provided but could not be applied: "
+                        f"unsupported matte MIME type {mime_type or 'unknown'}."
+                    )
+                raise ValueError(f"Unsupported Storyboard FFmpeg {kind} MIME type: {mime_type}")
+            data = self._read_limited_response_content(response, input_id, max_bytes)
+            expected_size = item.get("bytes")
+            if expected_size is not None and len(data) != int(expected_size):
+                raise ValueError(f"Storyboard FFmpeg input {input_id} size mismatch.")
+            actual_sha256 = hashlib.sha256(data).hexdigest()
+            expected_sha256 = str(item.get("sha256") or response.headers.get("X-Midom-SHA256") or "").strip().lower()
+            if expected_sha256 and actual_sha256 != expected_sha256:
+                raise ValueError(f"Storyboard FFmpeg input {input_id} SHA-256 mismatch.")
+            filename = self._safe_input_filename(item.get("filename"), input_id, mime_type)
+            path = Path(temp_dir) / filename
+            with path.open("wb") as writer:
+                writer.write(data)
+            entry = {
+                "input_id": input_id,
+                "kind": kind,
+                "category": category,
+                "path": str(path),
+                "mime_type": mime_type,
+                "sha256": actual_sha256,
+                "order": self._coerce_int(item.get("order", item.get("sequence", index)), index, 0, 10_000),
+                "role": str(item.get("role") or "").strip(),
+            }
+            for id_key in ("dbfileid", "dbfile_id", "file_id"):
+                if item.get(id_key) is not None:
+                    entry[id_key] = item.get(id_key)
+            if category == "video":
+                metadata = self._probe_event_video_metadata(path)
+                duration_seconds = float(metadata.get("duration_seconds") or 0.0)
+                if duration_seconds > MAX_STORYBOARD_VIDEO_DURATION_SECONDS + 0.05:
+                    raise ValueError(
+                        f"Storyboard FFmpeg video input exceeds {MAX_STORYBOARD_VIDEO_DURATION_SECONDS} seconds; "
+                        f"got {duration_seconds:.2f}s."
+                    )
+                entry["metadata"] = metadata
+            elif category == "image":
+                try:
+                    with Image.open(path) as image:
+                        entry["width"], entry["height"] = image.size
+                        entry["decoded_format"] = str(image.format or "").upper()
+                except Exception as exc:
+                    if self._is_storyboard_matte_descriptor(entry, processing):
+                        raise ValueError(f"Overlay matte was provided but could not be applied: decode failed: {exc}") from exc
+                    raise
+                if self._is_storyboard_matte_descriptor(entry, processing) and entry["decoded_format"] not in {"PNG", "JPEG"}:
+                    raise ValueError(
+                        "Overlay matte was provided but could not be applied: "
+                        f"decoded matte format {entry['decoded_format'] or 'unknown'} is not PNG or JPEG."
+                    )
+            else:
+                metadata = self._probe_audio_metadata(path)
+                entry["metadata"] = metadata
+                entry["duration_seconds"] = float(metadata.get("duration_seconds") or 0.0)
+            downloaded.append(entry)
+            self._log(
+                f"Downloaded Storyboard FFmpeg input; job_id={job_id} input_id={input_id} "
+                f"kind={kind} category={category} mime_type={mime_type} bytes={len(data)} "
+                f"sha256={actual_sha256[:12]}..."
+            )
+        video_count = sum(1 for item in downloaded if item.get("category") == "video")
+        if operation_type == "multicam_final_assembly":
+            if video_count < 1:
+                raise ValueError("Storyboard final assembly requires at least one downloaded video input.")
+        elif operation_type == "replace_video_soundtrack":
+            audio_count = sum(1 for item in downloaded if item.get("category") == "audio")
+            if video_count != 1:
+                raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one downloaded source video input; got {video_count}.")
+            if audio_count != 1:
+                raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one downloaded soundtrack audio input; got {audio_count}.")
+        elif operation_type in STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES and video_count < 1:
+            raise ValueError(f"Storyboard operation {operation_type} requires at least one downloaded video input.")
+        self._log(
+            "Storyboard FFmpeg input download complete; "
+            f"job_id={job_id} operation_type={operation_type} video_count={video_count} "
+            f"image_count={sum(1 for item in downloaded if item.get('category') == 'image')} "
+            f"audio_count={sum(1 for item in downloaded if item.get('category') == 'audio')}."
         )
         return downloaded
 
