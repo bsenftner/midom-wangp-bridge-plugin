@@ -248,11 +248,28 @@ Audio output is truthful per worker:
   - `720x1280`
 - Optional sync profile:
   - `standard`
-  - `omninft_rl_lora_sync` / Better Audio-Video Sync, reported only when the local OmniNFT LTX-2.3 LoRA is installed.
+  - `omninft_rl_lora_sync` / Better Audio-Video Sync, reported only when the local OmniNFT RL-LoRA is installed.
 
-LTX-2.3 control-video mode:
+`ltx2_25_22B_distilled`
 
-- Same model id: `ltx2_22B_1_1`.
+- LTX-2.5 Distilled audio-guided video.
+- One start image.
+- One driving audio input.
+- Optional Ending Image Target for ordinary audio-guided jobs.
+- Duration follows driving audio up to 20 seconds.
+- Curated Midom delivery resolutions:
+  - `1280x720`
+  - `720x1280`
+- Model-native stride dimensions are hidden by the bridge-side delivery adapter.
+- Optional sync profile:
+  - `standard`
+  - `omninft_rl_lora_sync` / Better Audio-Video Sync, reported only when the local OmniNFT RL-LoRA is installed.
+
+LTX control-video mode:
+
+- Supported model ids:
+  - `ltx2_22B_1_1`
+  - `ltx2_25_22B_distilled`
 - One start image.
 - One normalized control video with embedded audio.
 - No separate driving audio in the current contract.
@@ -263,7 +280,7 @@ LTX-2.3 control-video mode:
   - Human motion aligned.
   - Depth.
   - Canny edges.
-  - Raw control video.
+- Raw control video is not exposed in the first Midom pass.
 
 `i2v_2_2_Enhanced_Lightning_v2_svi2pro`
 

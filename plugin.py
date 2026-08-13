@@ -154,7 +154,10 @@ ALLOWED_AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".mp4", ".webm", ".ogg"}
 ALLOWED_AUDIO_OUTPUT_SUFFIXES = {".mp3", ".wav"}
 SVI_VIDEO_MODEL_ID = "i2v_2_2_Enhanced_Lightning_v2_svi2pro"
 SVI_SPEED_PROFILE_ID = "enhanced_lightning_v2_8_step"
-ALLOWED_VIDEO_MODEL_TYPES = {"longcat_avatar_v1_5", "ltx2_22B_1_1", SVI_VIDEO_MODEL_ID}
+LTX23_VIDEO_MODEL_ID = "ltx2_22B_1_1"
+LTX25_DISTILLED_VIDEO_MODEL_ID = "ltx2_25_22B_distilled"
+LTX_VIDEO_MODEL_IDS = {LTX23_VIDEO_MODEL_ID, LTX25_DISTILLED_VIDEO_MODEL_ID}
+ALLOWED_VIDEO_MODEL_TYPES = {"longcat_avatar_v1_5", *LTX_VIDEO_MODEL_IDS, SVI_VIDEO_MODEL_ID}
 ALLOWED_CONTROL_VIDEO_MIME_TYPES = {"video/mp4"}
 ALLOWED_VIDEO_INPUT_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES | ALLOWED_AUDIO_INPUT_MIME_TYPES | ALLOWED_CONTROL_VIDEO_MIME_TYPES
 ALLOWED_VIDEO_OUTPUT_MIME_TYPES = {"video/mp4"}
@@ -316,8 +319,14 @@ LONGCAT_VIDEO_RESOLUTIONS = {"832x480", "1280x720", "720x1280"}
 LONGCAT_VIDEO_FPS = 25
 LTX_VIDEO_RESOLUTIONS = {"1280x720", "720x1280"}
 LTX_OVERSCAN_RENDER_RESOLUTIONS = {
-    "1280x720": "1280x768",
-    "720x1280": "768x1280",
+    LTX23_VIDEO_MODEL_ID: {
+        "1280x720": "1280x768",
+        "720x1280": "768x1280",
+    },
+    LTX25_DISTILLED_VIDEO_MODEL_ID: {
+        "1280x720": "1280x768",
+        "720x1280": "768x1280",
+    },
 }
 LTX_CONTROL_VIDEO_PROFILES = (
     {"profile_id": "landscape_16_9", "width": 1280, "height": 720, "fps": 24},
@@ -1358,63 +1367,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 ],
             },
         })
-        models.append({
-            "model_id": "ltx2_22B_1_1",
-            "family": "ltx2",
-            "media_type": "video",
-            "display_name": "LTX-2 2.3 Dev 1.1 22B",
-            "supported": True,
-            "detected": True,
-            "capabilities": {
-                "audio_conditioned_video": True,
-                "audio_guided_video": True,
-                "driving_audio_guided": True,
-                "prompt_generated_audio": False,
-                "reference_voice_video": False,
-                "control_video": True,
-                "control_video_audio": True,
-                "control_video_audio_guided": True,
-                "control_video_portrait": True,
-                "separate_driving_audio_with_control_video": False,
-                "control_video_modes": list(LTX_CONTROL_VIDEO_MODES.keys()),
-                "duration_modes": [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE],
-                "end_image": True,
-                "ending_image_target": True,
-                "image_to_video": False,
-                "talking_avatar": False,
-                "multi_output": False,
-            },
-            "limits": {
-                "max_outputs": 1,
-                "max_prompt_chars": MAX_PROMPT_CHARS,
-                "max_duration_seconds": MAX_LTX_VIDEO_DURATION_SECONDS,
-                "max_artifact_bytes": MAX_VIDEO_BYTES,
-                "resolutions": sorted(LTX_VIDEO_RESOLUTIONS),
-                "control_video_profiles": [dict(profile) for profile in LTX_CONTROL_VIDEO_PROFILES],
-                "input_mime_types": sorted(ALLOWED_VIDEO_INPUT_MIME_TYPES),
-                "output_mime_types": sorted(ALLOWED_VIDEO_OUTPUT_MIME_TYPES),
-                "prompt_modes": ["plain"],
-                "duration_modes": [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE],
-                "default_duration_mode": LTX_DURATION_MODE,
-                "required_input_kinds": ["start_image", "driving_audio"],
-                "optional_input_kinds": ["end_image"],
-                "control_video_required_input_kinds": ["start_image", "control_video"],
-                "control_video_optional_input_kinds": [],
-                "max_end_images": 1,
-                "speed_profiles": [
-                    {
-                        "profile_id": "standard",
-                        "display_name": "Standard",
-                        "description": "Use plugin-curated LTX-2.3 audio-guided defaults.",
-                        "quality_tier": "standard",
-                        "steps": 8,
-                        "available": True,
-                        "default": True,
-                    }
-                ],
-            },
-            "video_sync_profiles": self._ltx_video_sync_profiles(),
-        })
+        models.append(self._ltx_video_capability(LTX23_VIDEO_MODEL_ID, "LTX-2 2.3 Dev 1.1 22B"))
+        models.append(self._ltx_video_capability(LTX25_DISTILLED_VIDEO_MODEL_ID, "LTX-2 2.5 Distilled 22B"))
         models.append({
             "model_id": SVI_VIDEO_MODEL_ID,
             "family": "wan2_2",
@@ -1794,6 +1748,65 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             profiles.append(item)
         return profiles
 
+    def _ltx_video_capability(self, model_id: str, display_name: str) -> dict[str, Any]:
+        return {
+            "model_id": model_id,
+            "family": "ltx2",
+            "media_type": "video",
+            "display_name": display_name,
+            "supported": True,
+            "detected": True,
+            "capabilities": {
+                "audio_conditioned_video": True,
+                "audio_guided_video": True,
+                "driving_audio_guided": True,
+                "prompt_generated_audio": False,
+                "reference_voice_video": False,
+                "control_video": True,
+                "control_video_audio": True,
+                "control_video_audio_guided": True,
+                "control_video_portrait": True,
+                "separate_driving_audio_with_control_video": False,
+                "control_video_modes": list(LTX_CONTROL_VIDEO_MODES.keys()),
+                "duration_modes": [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE],
+                "end_image": True,
+                "ending_image_target": True,
+                "image_to_video": False,
+                "talking_avatar": False,
+                "multi_output": False,
+            },
+            "limits": {
+                "max_outputs": 1,
+                "max_prompt_chars": MAX_PROMPT_CHARS,
+                "max_duration_seconds": MAX_LTX_VIDEO_DURATION_SECONDS,
+                "max_artifact_bytes": MAX_VIDEO_BYTES,
+                "resolutions": sorted(LTX_VIDEO_RESOLUTIONS),
+                "control_video_profiles": [dict(profile) for profile in LTX_CONTROL_VIDEO_PROFILES],
+                "input_mime_types": sorted(ALLOWED_VIDEO_INPUT_MIME_TYPES),
+                "output_mime_types": sorted(ALLOWED_VIDEO_OUTPUT_MIME_TYPES),
+                "prompt_modes": ["plain"],
+                "duration_modes": [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE],
+                "default_duration_mode": LTX_DURATION_MODE,
+                "required_input_kinds": ["start_image", "driving_audio"],
+                "optional_input_kinds": ["end_image"],
+                "control_video_required_input_kinds": ["start_image", "control_video"],
+                "control_video_optional_input_kinds": [],
+                "max_end_images": 1,
+                "speed_profiles": [
+                    {
+                        "profile_id": "standard",
+                        "display_name": "Standard",
+                        "description": f"Use plugin-curated {display_name} audio-guided defaults.",
+                        "quality_tier": "standard",
+                        "steps": 8,
+                        "available": True,
+                        "default": True,
+                    }
+                ],
+            },
+            "video_sync_profiles": self._ltx_video_sync_profiles(),
+        }
+
     def _ltx_video_sync_profiles(self) -> list[dict[str, Any]]:
         omni_lora = self._find_lora_relative_path("ltx2", LTX_VIDEO_SYNC_OMNINFT_LORA)
         omni_available = bool(omni_lora)
@@ -1801,7 +1814,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             {
                 "profile_id": "standard",
                 "display_name": "Standard",
-                "description": "Use standard LTX-2.3 audio/video sync.",
+                "description": "Use standard LTX audio/video sync.",
                 "quality_tier": "standard",
                 "available": True,
                 "default": True,
@@ -1809,7 +1822,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             {
                 "profile_id": LTX_VIDEO_SYNC_OMNINFT_PROFILE_ID,
                 "display_name": "Better Audio/Video Sync",
-                "description": "Use WanGP's installed OmniNFT RL-LoRA for LTX-2.3 22B audio/video sync.",
+                "description": "Use WanGP's installed OmniNFT RL-LoRA for LTX audio/video sync.",
                 "quality_tier": "sync",
                 "available": omni_available,
             },
@@ -2889,7 +2902,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_type = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
         if model_type not in ALLOWED_VIDEO_MODEL_TYPES:
             raise ValueError(f"Unsupported video model_type: {model_type}")
-        if model_type == "ltx2_22B_1_1":
+        if model_type in LTX_VIDEO_MODEL_IDS:
             return self._validate_ltx_video_job(job, job_id, model_type)
         if model_type == SVI_VIDEO_MODEL_ID:
             return self._validate_svi_video_job(job, job_id, model_type)
@@ -3583,7 +3596,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             height = output.get("height")
             if width and height:
                 resolution = f"{int(width)}x{int(height)}"
-        if model_type == "ltx2_22B_1_1":
+        if model_type in LTX_VIDEO_MODEL_IDS:
             if not resolution:
                 return "1280x720"
             if resolution not in LTX_VIDEO_RESOLUTIONS:
@@ -3603,13 +3616,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
 
     @staticmethod
     def _is_ltx_video_model(model_type: Any) -> bool:
-        return str(model_type or "").strip() == "ltx2_22B_1_1"
+        return str(model_type or "").strip() in LTX_VIDEO_MODEL_IDS
 
     def _apply_ltx_delivery_adapter(self, settings: dict[str, Any]) -> None:
         if not self._is_ltx_video_model(settings.get("model_type")):
             return
         requested_resolution = str(settings.get("resolution") or "").strip()
-        internal_resolution = LTX_OVERSCAN_RENDER_RESOLUTIONS.get(requested_resolution)
+        model_type = str(settings.get("model_type") or "").strip()
+        internal_resolution = LTX_OVERSCAN_RENDER_RESOLUTIONS.get(model_type, {}).get(requested_resolution)
         if not internal_resolution:
             raise ValueError(f"Unsupported LTX delivery resolution: {requested_resolution}")
         requested_size = self._parse_resolution_size(requested_resolution)
@@ -4888,7 +4902,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     duration_mode = str(summary.get("duration_mode") or LONGCAT_DURATION_MODE).strip().lower()
                     if duration_mode != LONGCAT_DURATION_MODE:
                         return f"unsupported duration_mode: {duration_mode}"
-                elif model_id == "ltx2_22B_1_1":
+                elif model_id in LTX_VIDEO_MODEL_IDS:
                     video_task = str(summary.get("video_task") or "audio_conditioned_video").strip().lower()
                     if video_task not in {"audio_conditioned_video", "control_video_guided_video"}:
                         return f"unsupported video_task: {video_task}"
@@ -4925,7 +4939,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     speed_profile_id = str(summary.get("speed_profile_id") or SVI_SPEED_PROFILE_ID).strip() or SVI_SPEED_PROFILE_ID
                     if speed_profile_id != SVI_SPEED_PROFILE_ID:
                         return f"unsupported speed_profile_id: {speed_profile_id}"
-                if model_id == "ltx2_22B_1_1":
+                if model_id in LTX_VIDEO_MODEL_IDS:
                     video_task = str(summary.get("video_task") or "audio_conditioned_video").strip().lower()
                     is_control_video_job = video_task == "control_video_guided_video"
                     input_audio_count = self._coerce_int(summary.get("input_audio_count"), 0 if is_control_video_job else 1, 0, 10)
@@ -8159,14 +8173,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_type = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
         generation = job.get("generation") or {}
         video_task = str(generation.get("video_task") or "").strip().lower() if isinstance(generation, dict) else ""
-        is_ltx_control_video = model_type == "ltx2_22B_1_1" and video_task == "control_video_guided_video"
-        if model_type in {"ltx2_22B_1_1", SVI_VIDEO_MODEL_ID}:
+        is_ltx_control_video = model_type in LTX_VIDEO_MODEL_IDS and video_task == "control_video_guided_video"
+        if model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID:
             required_image_kind = "start_image"
         else:
             required_image_kind = "reference_image"
         requires_driving_audio = model_type != SVI_VIDEO_MODEL_ID and not is_ltx_control_video
         requires_control_video = is_ltx_control_video
-        model_label = "SVI" if model_type == SVI_VIDEO_MODEL_ID else ("LTX" if model_type == "ltx2_22B_1_1" else "LongCat")
+        model_label = "SVI" if model_type == SVI_VIDEO_MODEL_ID else ("LTX" if model_type in LTX_VIDEO_MODEL_IDS else "LongCat")
         reference_image_count = 0
         end_image_count = 0
         driving_audio_count = 0
@@ -8175,7 +8189,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"Downloading video job inputs; job_id={job_id} descriptors={len(inputs)} "
             f"required_{required_image_kind}=1 required_driving_audio={1 if requires_driving_audio else 0} "
             f"required_control_video={1 if requires_control_video else 0} "
-            f"optional_end_image={1 if model_type in {'ltx2_22B_1_1', SVI_VIDEO_MODEL_ID} and not is_ltx_control_video else 0}."
+            f"optional_end_image={1 if (model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID) and not is_ltx_control_video else 0}."
         )
         for item in inputs:
             if not isinstance(item, dict):
@@ -8185,7 +8199,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             allowed_kinds = {required_image_kind, "driving_audio"} if requires_driving_audio else {required_image_kind}
             if requires_control_video:
                 allowed_kinds.add("control_video")
-            if model_type in {"ltx2_22B_1_1", SVI_VIDEO_MODEL_ID} and not is_ltx_control_video:
+            if (model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID) and not is_ltx_control_video:
                 allowed_kinds.add("end_image")
             if kind not in allowed_kinds:
                 raise ValueError(f"Unsupported video job input kind: {kind}")
@@ -8821,7 +8835,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     f"audio_prompt_type={settings.get('audio_prompt_type')!r}."
                 )
                 return
-            if model_type == "ltx2_22B_1_1":
+            if model_type in LTX_VIDEO_MODEL_IDS:
                 start_image_inputs = [item for item in downloaded_inputs if item.get("kind") == "start_image"]
                 end_image_inputs = [item for item in downloaded_inputs if item.get("kind") == "end_image"]
                 control_video_inputs = [item for item in downloaded_inputs if item.get("kind") == "control_video"]
