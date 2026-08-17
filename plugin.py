@@ -123,6 +123,26 @@ IDLE_POLL_LOG_SECONDS = 30
 MP3_ENCODER_CACHE_SECONDS = 60
 MAX_OUTPUTS = 6
 QWEN_LAYERED_MAX_OUTPUTS = 9
+QWEN_MULTI_ANGLE_TOOL_ID = "qwen_image_edit_2511_multiple_angles"
+QWEN_MULTI_ANGLE_TOOL_DISPLAY_NAME = "Generate Alternate View"
+QWEN_MULTI_ANGLE_TOOL_VERSION = "1"
+QWEN_MULTI_ANGLE_BASE_MODEL_ID = "qwen_image_edit_plus2_20B"
+QWEN_MULTI_ANGLE_LORA_DIR = "qwen"
+QWEN_MULTI_ANGLE_LORA_FILENAME = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
+QWEN_MULTI_ANGLE_LORA_SHA256 = "42426ded4e25fd22879d9e198b857556445ef4ca56e8da3246d0345155bb6765"
+QWEN_MULTI_ANGLE_LORA_LICENSE = "Apache 2.0"
+QWEN_MULTI_ANGLE_DEFAULT_VIEW_CHANGE_STRENGTH = "standard"
+QWEN_MULTI_ANGLE_VIEW_CHANGE_STRENGTHS = {
+    "subtle": "0.75",
+    "standard": "0.9",
+    "strong": "1.05",
+    "maximum": "1.15",
+}
+QWEN_MULTI_ANGLE_ALLOWED_ACCELERATOR_PROFILE_IDS = {
+    "standard",
+    "qwen_edit_2511_lightning_8",
+    "qwen_edit_v1_lightning_8",
+}
 SHARED_DEV_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 CONTROL_MODE_DEFINITIONS = {
     "pose": {"display_name": "Human pose", "description": "Use the control image to guide human pose."},
@@ -168,6 +188,28 @@ ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES = ALLOWED_AUDIO_INPUT_MIME_TYPES |
 ALLOWED_STORYBOARD_MATTE_MIME_TYPES = {"image/png", "image/jpeg"}
 ALLOWED_EVENT_OVERLAY_MIME_TYPES = {"image/png"}
 ALLOWED_EVENT_BUMPER_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+QWEN_MULTI_ANGLE_AZIMUTHS = {
+    "front": "front view",
+    "front_left": "front-left quarter view",
+    "left": "left side view",
+    "back_left": "back-left quarter view",
+    "back": "back view",
+    "back_right": "back-right quarter view",
+    "right": "right side view",
+    "front_right": "front-right quarter view",
+}
+QWEN_MULTI_ANGLE_ELEVATIONS = {
+    "low": "low-angle shot",
+    "eye_level": "eye-level shot",
+    "elevated": "elevated shot",
+    "high": "high-angle shot",
+}
+QWEN_MULTI_ANGLE_DISTANCES = {
+    "close": "close-up",
+    "medium": "medium shot",
+    "wide": "wide shot",
+    "full_body": "wide shot",
+}
 ALLOWED_EVENT_INPUT_KINDS = {"source_video", "overlay_png", "bumper_image"}
 STORYBOARD_FFMPEG_OPERATION_TYPES = {
     "multicam_card_overlay_take",
@@ -575,6 +617,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._ffmpeg_probe_cache = None
         self._ffmpeg_probe_cache_at = 0.0
         self._ffmpeg_probe_log_signature = None
+        self._lora_hash_cache = {}
 
     def _log(self, message: str, *, force: bool = False) -> None:
         if not VERBOSE_LOGGING and not force:
@@ -1043,6 +1086,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             }
             if metadata.get("output_roles"):
                 model_limits["output_roles"] = list(metadata["output_roles"])
+            curated_tools = self._curated_tools_for_model(model_id)
             models.append({
                 "model_id": model_id,
                 "family": metadata["family"],
@@ -1053,6 +1097,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "capabilities": model_capabilities,
                 "limits": model_limits,
                 "accelerator_profiles": self._accelerator_profiles_for_model(model_id),
+                **({"curated_tools": curated_tools} if curated_tools else {}),
             })
         audio_output_mime_types = self._audio_output_mime_types()
         models.append({
@@ -1425,10 +1470,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         storyboard_capability = self._storyboard_ffmpeg_processing_capability()
         if storyboard_capability:
             media_processing.append(storyboard_capability)
+        curated_tools = [
+            dict(tool)
+            for model in models
+            if isinstance(model, dict)
+            for tool in (model.get("curated_tools") or [])
+            if isinstance(tool, dict)
+        ]
         return {
             "schema_version": 1,
             "media_types": ["audio", "image", "video"],
             "models": models,
+            "curated_tools": curated_tools,
             "media_processing": media_processing,
             "unsupported_detected_models": [],
         }
@@ -1748,6 +1801,90 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             profiles.append(item)
         return profiles
 
+    def _curated_tools_for_model(self, model_id: str) -> list[dict[str, Any]]:
+        if str(model_id or "").strip() != QWEN_MULTI_ANGLE_BASE_MODEL_ID:
+            return []
+        availability = self._qwen_multi_angle_tool_availability()
+        return [
+            {
+                "tool_id": QWEN_MULTI_ANGLE_TOOL_ID,
+                "display_name": QWEN_MULTI_ANGLE_TOOL_DISPLAY_NAME,
+                "media_type": "image",
+                "base_model_id": QWEN_MULTI_ANGLE_BASE_MODEL_ID,
+                "available": bool(availability["available"]),
+                "unavailable_reason": availability["unavailable_reason"],
+                "input_kinds": ["reference_image"],
+                "parameters": {
+                    "view_azimuth": list(QWEN_MULTI_ANGLE_AZIMUTHS.keys()),
+                    "view_elevation": list(QWEN_MULTI_ANGLE_ELEVATIONS.keys()),
+                    "shot_distance": list(QWEN_MULTI_ANGLE_DISTANCES.keys()),
+                    "view_change_strength": list(QWEN_MULTI_ANGLE_VIEW_CHANGE_STRENGTHS.keys()),
+                },
+                "default_parameters": {
+                    "view_change_strength": QWEN_MULTI_ANGLE_DEFAULT_VIEW_CHANGE_STRENGTH,
+                },
+                "output": {
+                    "min_count": 1,
+                    "max_count": _image_max_outputs_for_model(QWEN_MULTI_ANGLE_BASE_MODEL_ID),
+                },
+                "accelerator_profiles": self._qwen_multi_angle_accelerator_profiles(),
+                "tool_version": QWEN_MULTI_ANGLE_TOOL_VERSION,
+                "recipe_version": QWEN_MULTI_ANGLE_TOOL_VERSION,
+                "license": QWEN_MULTI_ANGLE_LORA_LICENSE,
+            }
+        ]
+
+    def _qwen_multi_angle_accelerator_profiles(self) -> list[dict[str, Any]]:
+        profiles = []
+        for profile in self._accelerator_profiles_for_model(QWEN_MULTI_ANGLE_BASE_MODEL_ID):
+            profile_id = str(profile.get("profile_id") or "").strip()
+            if profile_id in QWEN_MULTI_ANGLE_ALLOWED_ACCELERATOR_PROFILE_IDS:
+                item = dict(profile)
+                item["default"] = profile_id == "standard"
+                profiles.append(item)
+        return profiles
+
+    def _qwen_multi_angle_tool_availability(self) -> dict[str, Any]:
+        if QWEN_MULTI_ANGLE_BASE_MODEL_ID not in ALLOWED_MODEL_TYPES:
+            return {
+                "available": False,
+                "unavailable_reason": "base_model_not_supported_by_bridge",
+                "lora_relative_path": "",
+                "lora_sha256": "",
+            }
+        relative_path = self._find_lora_relative_path(QWEN_MULTI_ANGLE_LORA_DIR, QWEN_MULTI_ANGLE_LORA_FILENAME)
+        if not relative_path:
+            return {
+                "available": False,
+                "unavailable_reason": "required_lora_file_not_installed",
+                "lora_relative_path": "",
+                "lora_sha256": "",
+            }
+        absolute_path = self._lora_absolute_path(QWEN_MULTI_ANGLE_LORA_DIR, relative_path)
+        try:
+            actual_sha256 = self._sha256_file(absolute_path)
+        except Exception as exc:
+            self._log(f"Qwen multi-angle LoRA hash check failed: {exc}", force=True)
+            return {
+                "available": False,
+                "unavailable_reason": "required_lora_file_hash_unreadable",
+                "lora_relative_path": relative_path,
+                "lora_sha256": "",
+            }
+        if actual_sha256.lower() != QWEN_MULTI_ANGLE_LORA_SHA256:
+            return {
+                "available": False,
+                "unavailable_reason": "required_lora_file_hash_mismatch",
+                "lora_relative_path": relative_path,
+                "lora_sha256": actual_sha256,
+            }
+        return {
+            "available": True,
+            "unavailable_reason": None,
+            "lora_relative_path": relative_path,
+            "lora_sha256": actual_sha256,
+        }
+
     def _ltx_video_capability(self, model_id: str, display_name: str) -> dict[str, Any]:
         return {
             "model_id": model_id,
@@ -1922,6 +2059,36 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 return relative.as_posix()
         return ""
 
+    def _lora_absolute_path(self, lora_dir_name: str, relative_path: str) -> Path:
+        if not lora_dir_name or not relative_path:
+            raise ValueError("LoRA path is incomplete.")
+        wangp_root = Path(__file__).resolve().parents[2]
+        lora_dir = wangp_root / "loras" / lora_dir_name
+        absolute_path = (lora_dir / relative_path).resolve()
+        try:
+            absolute_path.relative_to(lora_dir.resolve())
+        except ValueError:
+            raise ValueError(f"LoRA path escapes expected directory: {relative_path}")
+        if not absolute_path.is_file():
+            raise ValueError(f"LoRA file is missing: {relative_path}")
+        return absolute_path
+
+    def _sha256_file(self, path: Path) -> str:
+        stat = path.stat()
+        cache_key = str(path.resolve())
+        cache_value = self._lora_hash_cache.get(cache_key) if isinstance(self._lora_hash_cache, dict) else None
+        signature = (int(stat.st_size), int(stat.st_mtime_ns))
+        if isinstance(cache_value, dict) and cache_value.get("signature") == signature and cache_value.get("sha256"):
+            return str(cache_value["sha256"])
+        digest = hashlib.sha256()
+        with path.open("rb") as reader:
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                digest.update(chunk)
+        value = digest.hexdigest()
+        if isinstance(self._lora_hash_cache, dict):
+            self._lora_hash_cache[cache_key] = {"signature": signature, "sha256": value}
+        return value
+
     @staticmethod
     def _control_modes_for_model(model_id: str) -> list[dict[str, str]]:
         metadata = MODEL_CAPABILITY_OVERRIDES.get(model_id) or {}
@@ -2089,12 +2256,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         max_outputs = _image_max_outputs_for_model(model_type)
         if output_count < 1 or output_count > max_outputs:
             raise ValueError(f"Unsupported output count: {output.get('count')}")
+        tool_id = str(job.get("tool_id") or generation.get("tool_id") or "").strip()
+        tool_payload = self._validate_qwen_multi_angle_tool_request(job, generation, output_count, tool_id) if tool_id else None
         settings = {}
         settings["model_type"] = model_type
         prompt = str(job.get("prompt") or "").strip()
         if len(prompt) > MAX_PROMPT_CHARS:
             raise ValueError(f"Job prompt exceeds {MAX_PROMPT_CHARS} characters.")
-        settings["prompt"] = prompt
+        settings["prompt"] = str(tool_payload["expanded_prompt"] if tool_payload else prompt)
         if not settings["prompt"]:
             raise ValueError("Job prompt is required.")
         negative_prompt = str(job.get("negative_prompt") or "").strip()
@@ -2106,6 +2275,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         settings["image_mode"] = 1
         settings["video_length"] = 1
         self._apply_accelerator_profile(settings, model_type, generation)
+        if tool_payload:
+            self._apply_curated_image_tool_settings(settings, tool_payload["settings"])
         seed = generation.get("seed")
         if seed is not None:
             settings["seed"] = self._coerce_int(seed, 0, 0, 2_147_483_647)
@@ -2120,6 +2291,167 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             settings["_midom_layer_mode"] = "control_image_decomposition"
             settings["_midom_layer_output_count"] = output_count
         return settings
+
+    def _apply_curated_image_tool_settings(self, settings: dict[str, Any], tool_settings: dict[str, Any]) -> None:
+        existing_loras = [str(item).strip() for item in (settings.get("activated_loras") or []) if str(item).strip()]
+        tool_loras = [str(item).strip() for item in (tool_settings.get("activated_loras") or []) if str(item).strip()]
+        if tool_loras:
+            existing_multipliers = self._lora_multiplier_items(settings.get("loras_multipliers"), len(existing_loras))
+            tool_multipliers = self._lora_multiplier_items(tool_settings.get("loras_multipliers"), len(tool_loras))
+            settings["activated_loras"] = existing_loras + tool_loras
+            settings["loras_multipliers"] = " ".join(existing_multipliers + tool_multipliers).strip()
+        for key, value in tool_settings.items():
+            if key in {"activated_loras", "loras_multipliers"}:
+                continue
+            settings[key] = value
+
+    @staticmethod
+    def _lora_multiplier_items(value: Any, count: int) -> list[str]:
+        if count <= 0:
+            return []
+        if isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            text = str(value or "").replace("\r", "\n").replace("|", " ").strip()
+            items = [item.strip() for item in re.split(r"\s+", text) if item.strip()]
+        if len(items) < count:
+            items.extend(["1"] * (count - len(items)))
+        return items[:count]
+
+    def _validate_qwen_multi_angle_tool_request(
+        self,
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        output_count: int,
+        tool_id: str,
+    ) -> dict[str, Any]:
+        if tool_id != QWEN_MULTI_ANGLE_TOOL_ID:
+            raise ValueError(f"Unsupported image tool_id: {tool_id}")
+        model_type = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
+        if model_type != QWEN_MULTI_ANGLE_BASE_MODEL_ID:
+            raise ValueError(
+                f"{QWEN_MULTI_ANGLE_TOOL_ID} requires model_id {QWEN_MULTI_ANGLE_BASE_MODEL_ID}; got {model_type}."
+            )
+        max_outputs = _image_max_outputs_for_model(model_type)
+        if output_count < 1 or output_count > max_outputs:
+            raise ValueError(f"{QWEN_MULTI_ANGLE_TOOL_ID} supports 1 to {max_outputs} output image(s) per request.")
+        accelerator_profile_id = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
+        if accelerator_profile_id not in QWEN_MULTI_ANGLE_ALLOWED_ACCELERATOR_PROFILE_IDS:
+            raise ValueError(
+                f"{QWEN_MULTI_ANGLE_TOOL_ID} supports only standard or 8-step Qwen Edit accelerator profiles; "
+                f"got accelerator_profile_id={accelerator_profile_id!r}."
+            )
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Job inputs must be a list.")
+        reference_count = sum(1 for item in inputs if isinstance(item, dict) and str(item.get("kind") or "reference_image").strip() == "reference_image")
+        control_count = sum(1 for item in inputs if isinstance(item, dict) and str(item.get("kind") or "").strip() == "control_image")
+        if reference_count != 1 or control_count:
+            raise ValueError(
+                f"{QWEN_MULTI_ANGLE_TOOL_ID} requires exactly one reference_image input and no control_image inputs; "
+                f"got reference_image={reference_count}, control_image={control_count}."
+            )
+        output = job.get("output") or {}
+        if not isinstance(output, dict):
+            raise ValueError(f"{QWEN_MULTI_ANGLE_TOOL_ID} requires an output object.")
+        requested_resolution = self._resolve_job_resolution(job)
+        if not requested_resolution:
+            raise ValueError(f"{QWEN_MULTI_ANGLE_TOOL_ID} requires explicit output.width and output.height.")
+        requested_size = self._parse_resolution_size(requested_resolution)
+        if requested_size is None:
+            raise ValueError(f"{QWEN_MULTI_ANGLE_TOOL_ID} could not resolve requested output resolution.")
+        view_azimuth = str(generation.get("view_azimuth") or "").strip().lower()
+        view_elevation = str(generation.get("view_elevation") or "").strip().lower()
+        shot_distance = str(generation.get("shot_distance") or "").strip().lower()
+        view_change_strength = str(
+            generation.get("view_change_strength") or QWEN_MULTI_ANGLE_DEFAULT_VIEW_CHANGE_STRENGTH
+        ).strip().lower()
+        if view_azimuth not in QWEN_MULTI_ANGLE_AZIMUTHS:
+            raise ValueError(f"Unsupported view_azimuth for {QWEN_MULTI_ANGLE_TOOL_ID}: {view_azimuth}")
+        if view_elevation not in QWEN_MULTI_ANGLE_ELEVATIONS:
+            raise ValueError(f"Unsupported view_elevation for {QWEN_MULTI_ANGLE_TOOL_ID}: {view_elevation}")
+        if shot_distance not in QWEN_MULTI_ANGLE_DISTANCES:
+            raise ValueError(f"Unsupported shot_distance for {QWEN_MULTI_ANGLE_TOOL_ID}: {shot_distance}")
+        if view_change_strength not in QWEN_MULTI_ANGLE_VIEW_CHANGE_STRENGTHS:
+            raise ValueError(f"Unsupported view_change_strength for {QWEN_MULTI_ANGLE_TOOL_ID}: {view_change_strength}")
+        availability = self._qwen_multi_angle_tool_availability()
+        if not availability["available"]:
+            reason = str(availability["unavailable_reason"] or "unavailable")
+            raise ValueError(
+                f"Curated image tool {QWEN_MULTI_ANGLE_TOOL_ID!r} is not available on this WanGP worker: {reason}."
+            )
+        prompt_notes = str(generation.get("prompt_notes") or job.get("prompt") or "").strip()
+        if len(prompt_notes) > MAX_PROMPT_CHARS:
+            raise ValueError(f"{QWEN_MULTI_ANGLE_TOOL_ID} prompt_notes exceeds {MAX_PROMPT_CHARS} characters.")
+        expanded_prompt = self._qwen_multi_angle_expanded_prompt(
+            view_azimuth=view_azimuth,
+            view_elevation=view_elevation,
+            shot_distance=shot_distance,
+            prompt_notes=prompt_notes,
+            requested_size=requested_size,
+        )
+        lora_multiplier = QWEN_MULTI_ANGLE_VIEW_CHANGE_STRENGTHS[view_change_strength]
+        return {
+            "expanded_prompt": expanded_prompt,
+            "settings": {
+                "activated_loras": [str(availability["lora_relative_path"])],
+                "loras_multipliers": lora_multiplier,
+                "_midom_curated_tool_id": QWEN_MULTI_ANGLE_TOOL_ID,
+                "_midom_curated_tool_display_name": QWEN_MULTI_ANGLE_TOOL_DISPLAY_NAME,
+                "_midom_curated_tool_version": QWEN_MULTI_ANGLE_TOOL_VERSION,
+                "_midom_curated_tool_base_model_id": QWEN_MULTI_ANGLE_BASE_MODEL_ID,
+                "_midom_curated_tool_lora_filename": QWEN_MULTI_ANGLE_LORA_FILENAME,
+                "_midom_curated_tool_lora_sha256": QWEN_MULTI_ANGLE_LORA_SHA256,
+                "_midom_curated_tool_lora_license": QWEN_MULTI_ANGLE_LORA_LICENSE,
+                "_midom_curated_tool_lora_multiplier": lora_multiplier,
+                "_midom_curated_tool_parameters": {
+                    "view_azimuth": view_azimuth,
+                    "view_elevation": view_elevation,
+                    "shot_distance": shot_distance,
+                    "view_change_strength": view_change_strength,
+                    "prompt_notes": prompt_notes,
+                    "requested_resolution": requested_resolution,
+                    "output_count": output_count,
+                },
+                "_midom_curated_tool_expanded_prompt": expanded_prompt,
+            },
+        }
+
+    @staticmethod
+    def _qwen_multi_angle_expanded_prompt(
+        *,
+        view_azimuth: str,
+        view_elevation: str,
+        shot_distance: str,
+        prompt_notes: str,
+        requested_size: tuple[int, int],
+    ) -> str:
+        requested_width, requested_height = requested_size
+        if requested_width > requested_height:
+            composition = "landscape"
+        elif requested_height > requested_width:
+            composition = "portrait"
+        else:
+            composition = "square"
+        camera_terms = " ".join(
+            [
+                "<sks>",
+                QWEN_MULTI_ANGLE_AZIMUTHS[view_azimuth],
+                QWEN_MULTI_ANGLE_ELEVATIONS[view_elevation],
+                QWEN_MULTI_ANGLE_DISTANCES[shot_distance],
+            ]
+        )
+        canvas_terms = (
+            f"Keep a {composition} {requested_width}x{requested_height} composition. "
+            "Fill the full canvas naturally. Do not add borders, panels, letterboxing, pillarboxing, or change the image aspect ratio."
+        )
+        notes = re.sub(r"\s+", " ", str(prompt_notes or "")).strip()
+        if notes:
+            return f"{camera_terms}. {canvas_terms} {notes}"
+        return (
+            f"{camera_terms}. {canvas_terms} "
+            "Preserve the same subject identity, outfit, materials, and visual style from the reference image."
+        )
 
     def _is_event_video_processing_job(self, job: dict[str, Any]) -> bool:
         processing_task = str(job.get("processing_task") or "").strip().lower()
@@ -3805,6 +4137,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 }
                 for artifact_index, _file_path in enumerate(generated_files)
             ]
+        curated_tool_id = str(settings.get("_midom_curated_tool_id") or "").strip()
+        if curated_tool_id:
+            metadata["curated_tool"] = {
+                "tool_id": curated_tool_id,
+                "display_name": str(settings.get("_midom_curated_tool_display_name") or ""),
+                "tool_version": str(settings.get("_midom_curated_tool_version") or ""),
+                "recipe_version": str(settings.get("_midom_curated_tool_version") or ""),
+                "base_model_id": str(settings.get("_midom_curated_tool_base_model_id") or settings.get("model_type") or ""),
+                "lora_filename": str(settings.get("_midom_curated_tool_lora_filename") or ""),
+                "lora_sha256": str(settings.get("_midom_curated_tool_lora_sha256") or ""),
+                "lora_license": str(settings.get("_midom_curated_tool_lora_license") or ""),
+                "lora_multiplier": str(settings.get("_midom_curated_tool_lora_multiplier") or ""),
+                "accelerator_profile_id": str(settings.get("_midom_accelerator_profile_id") or "standard"),
+                "parameters": settings.get("_midom_curated_tool_parameters") if isinstance(settings.get("_midom_curated_tool_parameters"), dict) else {},
+                "expanded_prompt": str(settings.get("_midom_curated_tool_expanded_prompt") or ""),
+            }
         combined_audio_segment_count = self._coerce_int(settings.get("_midom_combined_audio_segment_count"), 0, 0, 10_000)
         if combined_audio_segment_count > 1:
             metadata["audio_prompt_processing_mode"] = str(settings.get("_midom_prompt_processing_mode") or "")
@@ -4796,11 +5144,40 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return f"unsupported media_type: {candidate.get('media_type')}"
         if media_type == "image" and model_id not in ALLOWED_MODEL_TYPES:
             return f"unsupported model_id: {candidate.get('model_id')}"
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        if media_type == "image":
+            tool_id = str(candidate.get("tool_id") or summary.get("tool_id") or "").strip()
+            if tool_id:
+                if tool_id != QWEN_MULTI_ANGLE_TOOL_ID:
+                    return f"unsupported image tool_id: {tool_id}"
+                if model_id != QWEN_MULTI_ANGLE_BASE_MODEL_ID:
+                    return f"{tool_id} requires model_id {QWEN_MULTI_ANGLE_BASE_MODEL_ID}"
+                availability = self._qwen_multi_angle_tool_availability()
+                if not availability["available"]:
+                    return f"{tool_id} unavailable: {availability['unavailable_reason']}"
+                accelerator_profile_id = str(
+                    summary.get("accelerator_profile_id") or summary.get("speed_profile_id") or "standard"
+                ).strip() or "standard"
+                if accelerator_profile_id not in QWEN_MULTI_ANGLE_ALLOWED_ACCELERATOR_PROFILE_IDS:
+                    return f"{tool_id} unsupported accelerator_profile_id: {accelerator_profile_id}"
+                if accelerator_profile_id != "standard":
+                    profile = ACCELERATOR_PROFILE_BY_ID.get(accelerator_profile_id)
+                    if not profile:
+                        return f"{tool_id} unknown accelerator_profile_id: {accelerator_profile_id}"
+                    resolved_loras, missing_loras = self._resolve_accelerator_loras(profile)
+                    if missing_loras or not resolved_loras:
+                        return f"{tool_id} accelerator unavailable: {accelerator_profile_id}"
+                view_change_strength = str(
+                    summary.get("view_change_strength") or QWEN_MULTI_ANGLE_DEFAULT_VIEW_CHANGE_STRENGTH
+                ).strip().lower()
+                if view_change_strength not in QWEN_MULTI_ANGLE_VIEW_CHANGE_STRENGTHS:
+                    return f"{tool_id} unsupported view_change_strength: {view_change_strength}"
         if media_type == "audio" and model_id not in ALLOWED_AUDIO_MODEL_TYPES:
             return f"unsupported audio model_id: {candidate.get('model_id')}"
         if media_type == "video" and model_id not in ALLOWED_VIDEO_MODEL_TYPES:
             return f"unsupported video model_id: {candidate.get('model_id')}"
-        summary = candidate.get("summary") or {}
         if isinstance(summary, dict):
             try:
                 output_count = int(summary.get("output_count") or 1)
@@ -5233,6 +5610,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"image_mode={settings.get('image_mode')} video_prompt_type={settings.get('video_prompt_type', '')!r} "
                         f"resolution={settings.get('resolution')} steps={settings.get('num_inference_steps', 'WanGP default')} "
                         f"accelerator_profile={settings.get('_midom_accelerator_profile_id', 'standard')} "
+                        f"curated_tool_id={settings.get('_midom_curated_tool_id', '')!r} "
                         f"seed={settings.get('seed', 'none')} output_count={output_count} "
                         f"reference_count={reference_count} control_count={control_count}."
                     )
@@ -7879,6 +8257,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         supported_control_modes = {item["mode_id"] for item in self._control_modes_for_model(model_id)}
         max_reference_images = self._coerce_int((job.get("limits") or {}).get("max_reference_images"), 0, 0, 3)
         max_control_images = self._coerce_int((job.get("limits") or {}).get("max_control_images"), MAX_CONTROL_IMAGES, 0, MAX_CONTROL_IMAGES)
+        tool_id = str(job.get("tool_id") or ((job.get("generation") or {}).get("tool_id") if isinstance(job.get("generation"), dict) else "") or "").strip()
+        if tool_id == QWEN_MULTI_ANGLE_TOOL_ID:
+            max_reference_images = 1
+            max_control_images = 0
         reference_count = 0
         control_count = 0
         self._log(
@@ -9061,6 +9443,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"model_id={model_id} reference_count={len(paths)} "
                 f"image_refs={[Path(path).name for path in paths]} "
                 f"video_prompt_type={settings['video_prompt_type']!r}."
+            )
+        if str(settings.get("_midom_curated_tool_id") or "") == QWEN_MULTI_ANGLE_TOOL_ID:
+            self._log(
+                "Applied curated Qwen multi-angle tool settings; "
+                f"tool_id={QWEN_MULTI_ANGLE_TOOL_ID} "
+                f"parameters={settings.get('_midom_curated_tool_parameters')} "
+                f"lora={QWEN_MULTI_ANGLE_LORA_FILENAME!r} "
+                f"lora_sha256={QWEN_MULTI_ANGLE_LORA_SHA256[:12]}... "
+                f"lora_multiplier={settings.get('_midom_curated_tool_lora_multiplier')} "
+                f"expanded_prompt={settings.get('_midom_curated_tool_expanded_prompt')!r}."
             )
 
     def _load_image_guide(self, path: str) -> Image.Image:
