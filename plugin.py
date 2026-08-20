@@ -215,6 +215,7 @@ STORYBOARD_FFMPEG_OPERATION_TYPES = {
     "multicam_card_overlay_take",
     "multicam_card_pass_through_take",
     "multicam_card_trim_take",
+    "multicam_card_local_video_take",
     "multicam_final_assembly",
     "multicam_optimize_video",
     "optimize_video",
@@ -231,6 +232,10 @@ STORYBOARD_TRIM_OPERATION_TYPES = {
     "mediastoryboard_card_trim_take",
     "mediastoryboard_card_edge_trim_take",
 }
+STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES = {
+    "multicam_card_local_video_take",
+    "mediastoryboard_card_local_video_take",
+}
 STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES = {
     "multicam_card_overlay_take",
     "multicam_card_pass_through_take",
@@ -241,7 +246,6 @@ STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES = {
     "multicam_seekable_mp4",
     "multicam_ai_video_take_prepare",
     "mediastoryboard_card_pass_through_take",
-    "mediastoryboard_card_local_video_take",
     "mediastoryboard_card_trim_take",
     "mediastoryboard_card_edge_trim_take",
 }
@@ -266,6 +270,7 @@ STORYBOARD_IMAGE_INPUT_KINDS = {
 }
 STORYBOARD_AUDIO_INPUT_KINDS = {
     "audio",
+    "scene_audio",
     "source_audio",
     "soundtrack_audio",
     "driving_audio",
@@ -1595,6 +1600,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "head_tail_silence",
                     "h264_aac_mp4_faststart",
                 ],
+                "multicam_card_local_video_take": [
+                    "one_image",
+                    "two_image_fade",
+                    "voice_over_video",
+                    "silent_audio_fill",
+                    "scene_audio_voice_over",
+                    "h264_aac_mp4_faststart",
+                ],
+                "mediastoryboard_card_local_video_take": [
+                    "one_image",
+                    "two_image_fade",
+                    "voice_over_video",
+                    "silent_audio_fill",
+                    "scene_audio_voice_over",
+                    "h264_aac_mp4_faststart",
+                ],
             },
             "output_mime_types": ["video/mp4"],
             "input_mime_types": {
@@ -1610,7 +1631,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "overlay_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
                 "overlay_png": ["image/png"],
                 "poster_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
+                "start_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
+                "end_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
                 "audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
+                "scene_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
                 "source_audio": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
                 "soundtrack_audio": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
                 "driving_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
@@ -2666,9 +2690,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         inputs = job.get("inputs") or []
         if not isinstance(inputs, list):
             raise ValueError("Storyboard FFmpeg inputs must be a list.")
+        render_mode = str(processing.get("render_mode") or "").strip().lower()
         video_count = 0
         image_count = 0
         audio_count = 0
+        start_image_count = 0
+        end_image_count = 0
+        scene_audio_count = 0
         for item in inputs:
             if not isinstance(item, dict):
                 raise ValueError("Storyboard FFmpeg input descriptor must be a JSON object.")
@@ -2679,8 +2707,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 video_count += 1
             elif kind in STORYBOARD_IMAGE_INPUT_KINDS:
                 image_count += 1
+                if kind == "start_image":
+                    start_image_count += 1
+                elif kind == "end_image":
+                    end_image_count += 1
             elif kind in STORYBOARD_AUDIO_INPUT_KINDS:
                 audio_count += 1
+                if kind == "scene_audio":
+                    scene_audio_count += 1
         if operation_type == "multicam_final_assembly":
             if video_count < 1:
                 raise ValueError("Storyboard final assembly requires at least one video input.")
@@ -2689,6 +2723,46 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one source video input; got {video_count}.")
             if audio_count != 1:
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one soundtrack audio input; got {audio_count}.")
+        elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
+            if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
+                raise ValueError(f"Unsupported storyboard local video take render_mode: {render_mode or 'missing'}")
+            if render_mode == "voice_over_video":
+                if video_count != 1:
+                    raise ValueError(f"Storyboard local voice_over_video render requires exactly one source_video input; got {video_count}.")
+                if scene_audio_count != 1 or audio_count != 1:
+                    raise ValueError(
+                        "Storyboard local voice_over_video render requires exactly one scene_audio input and no other audio inputs; "
+                        f"got scene_audio={scene_audio_count}, audio_inputs={audio_count}."
+                    )
+                if start_image_count or end_image_count:
+                    raise ValueError(
+                        "Storyboard local voice_over_video render does not use start_image or end_image inputs; "
+                        f"got start_image={start_image_count}, end_image={end_image_count}."
+                    )
+                transition = str(processing.get("video_transition") or "").strip().lower()
+                if transition not in {"", "none"}:
+                    raise ValueError(f"Storyboard local voice_over_video does not support video_transition={transition!r}.")
+                duration = self._optional_positive_float(processing.get("duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+                if duration is None:
+                    raise ValueError("Storyboard local voice_over_video requires explicit duration_seconds.")
+            else:
+                if video_count:
+                    raise ValueError(f"Storyboard local {render_mode} render does not support video inputs; got {video_count}.")
+                if audio_count:
+                    raise ValueError("Storyboard local video take one_image/two_image_fade does not support audio inputs yet.")
+            if self._coerce_bool(processing.get("pan_enabled"), False):
+                raise ValueError("Storyboard local video take pan_enabled=true is not supported by the bridge first pass.")
+            if render_mode == "one_image":
+                if start_image_count != 1:
+                    raise ValueError(f"Storyboard local one_image render requires exactly one start_image input; got {start_image_count}.")
+                if end_image_count:
+                    raise ValueError(f"Storyboard local one_image render does not support end_image inputs; got {end_image_count}.")
+            elif render_mode == "two_image_fade":
+                if start_image_count != 1 or end_image_count != 1:
+                    raise ValueError(
+                        "Storyboard local two_image_fade render requires exactly one start_image and one end_image input; "
+                        f"got start_image={start_image_count}, end_image={end_image_count}."
+                    )
         elif operation_type in STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES and video_count < 1:
             raise ValueError(f"Storyboard operation {operation_type} requires at least one video input.")
         if not self._storyboard_ffmpeg_processing_capability():
@@ -5380,6 +5454,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         summary = candidate.get("summary") or {}
         if not isinstance(summary, dict):
             summary = {}
+        processing = candidate.get("processing") or {}
+        if not isinstance(processing, dict):
+            processing = {}
         family = str(candidate.get("family") or summary.get("family") or "").strip().lower()
         processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
         processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
@@ -5476,6 +5553,52 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             audio_count = self._coerce_int(summary.get("audio_input_count", summary.get("soundtrack_audio_count")), 1, 0, 10)
             if audio_count != 1:
                 return f"replace_video_soundtrack requires exactly one soundtrack audio input; got {audio_count}"
+        elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
+            render_mode = str(
+                candidate.get("render_mode") or processing.get("render_mode") or summary.get("render_mode") or ""
+            ).strip().lower()
+            if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
+                return f"{operation_type} unsupported render_mode: {render_mode or 'missing'}"
+            if self._coerce_bool(candidate.get("pan_enabled", processing.get("pan_enabled", summary.get("pan_enabled"))), False):
+                return "local video take pan_enabled=true is not supported"
+            audio_count = self._coerce_int(summary.get("audio_input_count", summary.get("soundtrack_audio_count")), 0, 0, 10)
+            if render_mode == "voice_over_video":
+                if video_count != 1:
+                    return f"voice_over_video requires exactly one source video input; got {video_count}"
+                scene_audio_count = self._coerce_int(summary.get("scene_audio_count"), 1, 0, 10)
+                if scene_audio_count != 1 or audio_count != 1:
+                    return f"voice_over_video requires exactly one scene_audio input; got scene_audio={scene_audio_count}, audio_inputs={audio_count}"
+                transition = str(
+                    candidate.get("video_transition")
+                    or processing.get("video_transition")
+                    or summary.get("video_transition")
+                    or ""
+                ).strip().lower()
+                if transition not in {"", "none"}:
+                    return f"voice_over_video unsupported video_transition: {transition}"
+                duration_value = candidate.get("duration_seconds", processing.get("duration_seconds", summary.get("duration_seconds")))
+                if self._optional_positive_float(duration_value, MAX_STORYBOARD_VIDEO_DURATION_SECONDS) is None:
+                    return "voice_over_video requires duration_seconds"
+                return None
+            if audio_count:
+                return f"{render_mode} local video take does not support audio inputs yet"
+            image_count_value = summary.get("image_input_count", summary.get("source_image_count"))
+            start_image_value = summary.get("start_image_count")
+            end_image_value = summary.get("end_image_count")
+            if render_mode == "one_image":
+                if start_image_value is not None and self._coerce_int(start_image_value, 0, 0, 10) != 1:
+                    return f"one_image requires exactly one start_image input; got {start_image_value}"
+                if end_image_value is not None and self._coerce_int(end_image_value, 0, 0, 10) != 0:
+                    return f"one_image does not support end_image inputs; got {end_image_value}"
+                if image_count_value is not None and self._coerce_int(image_count_value, 0, 0, 10) < 1:
+                    return "one_image requires at least one image input"
+            elif render_mode == "two_image_fade":
+                if start_image_value is not None and self._coerce_int(start_image_value, 0, 0, 10) != 1:
+                    return f"two_image_fade requires exactly one start_image input; got {start_image_value}"
+                if end_image_value is not None and self._coerce_int(end_image_value, 0, 0, 10) != 1:
+                    return f"two_image_fade requires exactly one end_image input; got {end_image_value}"
+                if image_count_value is not None and self._coerce_int(image_count_value, 0, 0, 10) < 2:
+                    return "two_image_fade requires at least two image inputs"
         elif operation_type in STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES and video_count < 1:
             return f"{operation_type} requires a video input"
         return None
@@ -5990,9 +6113,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         processing = settings.get("_midom_processing") or {}
         operation_type = str(settings.get("_midom_operation_type") or "").strip()
         video_inputs = self._storyboard_video_inputs(downloaded_inputs)
-        if not video_inputs:
-            raise ValueError("Storyboard FFmpeg Processing requires at least one video input.")
-        output_width, output_height = self._storyboard_output_size(video_inputs[0], processing)
+        image_inputs = self._storyboard_image_inputs(downloaded_inputs)
+        audio_inputs = self._storyboard_audio_inputs(downloaded_inputs)
+        render_mode = str(processing.get("render_mode") or "").strip().lower()
+        if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
+            if render_mode == "voice_over_video":
+                if not video_inputs:
+                    raise ValueError("Storyboard local voice_over_video requires a source_video input.")
+                output_width, output_height = self._storyboard_output_size(video_inputs[0], processing)
+            else:
+                if not image_inputs:
+                    raise ValueError("Storyboard local video take requires image inputs.")
+                output_width, output_height = self._storyboard_local_take_output_size(image_inputs, processing)
+        else:
+            if not video_inputs:
+                raise ValueError("Storyboard FFmpeg Processing requires at least one video input.")
+            output_width, output_height = self._storyboard_output_size(video_inputs[0], processing)
         final_output = Path(temp_dir) / "storyboard-processed.mp4"
         self._set_active_job_status(
             phase="processing",
@@ -6000,7 +6136,41 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             progress=3,
         )
         self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
-        if operation_type == "multicam_final_assembly":
+        if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
+            if render_mode == "voice_over_video":
+                primary = self._storyboard_primary_video_input(video_inputs)
+                scene_audio = self._storyboard_audio_input_by_kind(audio_inputs, "scene_audio")
+                if scene_audio is None:
+                    raise ValueError("Storyboard local voice_over_video requires one scene_audio input.")
+                self._run_storyboard_voice_over_video_take_ffmpeg(
+                    connection,
+                    job_id,
+                    primary,
+                    scene_audio,
+                    final_output,
+                    output_width,
+                    output_height,
+                    process_handle,
+                    processing=processing,
+                    progress_start=5,
+                    progress_end=95,
+                    status=f"Rendering storyboard voice-over video operation {operation_type}.",
+                )
+            else:
+                self._run_storyboard_local_video_take_ffmpeg(
+                    connection,
+                    job_id,
+                    image_inputs,
+                    final_output,
+                    output_width,
+                    output_height,
+                    process_handle,
+                    processing=processing,
+                    progress_start=5,
+                    progress_end=95,
+                    status=f"Rendering storyboard local video take operation {operation_type}.",
+                )
+        elif operation_type == "multicam_final_assembly":
             assembly_inputs = self._storyboard_ordered_assembly_inputs(video_inputs, processing)
             segment_paths = []
             progress_cursor = 5
@@ -6128,6 +6298,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         }
         if operation_type == "multicam_final_assembly":
             result_metadata["segment_count"] = len(video_inputs)
+        if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
+            result_metadata["render_mode"] = str(processing.get("render_mode") or "").strip().lower()
+            result_metadata["local_take_image_count"] = len(image_inputs)
         return str(final_output), result_metadata
 
     def _storyboard_ordered_assembly_inputs(
@@ -6573,12 +6746,397 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         return metadata
 
+    def _run_storyboard_local_video_take_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        image_inputs: list[dict[str, Any]],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        render_mode = str(processing.get("render_mode") or "").strip().lower()
+        if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
+            raise ValueError(f"Unsupported storyboard local video take render_mode: {render_mode or 'missing'}")
+        if self._coerce_bool(processing.get("pan_enabled"), False):
+            raise ValueError("Storyboard local video take pan_enabled=true is not supported by the bridge first pass.")
+        if render_mode == "voice_over_video":
+            raise ValueError("Storyboard local voice_over_video render must be routed through the source-video renderer.")
+        duration = self._storyboard_local_take_duration(processing)
+        fps = self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120)
+        start_image = self._storyboard_image_input_by_kind(image_inputs, "start_image")
+        if start_image is None:
+            raise ValueError("Storyboard local video take requires one start_image input.")
+        if render_mode == "one_image":
+            self._run_storyboard_one_image_take_ffmpeg(
+                connection,
+                job_id,
+                start_image,
+                output_path,
+                output_width,
+                output_height,
+                duration,
+                fps,
+                process_handle,
+                processing=processing,
+                progress_start=progress_start,
+                progress_end=progress_end,
+                status=status,
+            )
+            return
+        end_image = self._storyboard_image_input_by_kind(image_inputs, "end_image")
+        if end_image is None:
+            raise ValueError("Storyboard local two_image_fade render requires one end_image input.")
+        self._run_storyboard_two_image_fade_take_ffmpeg(
+            connection,
+            job_id,
+            start_image,
+            end_image,
+            output_path,
+            output_width,
+            output_height,
+            duration,
+            fps,
+            process_handle,
+            processing=processing,
+            progress_start=progress_start,
+            progress_end=progress_end,
+            status=status,
+        )
+
+    def _run_storyboard_voice_over_video_take_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        scene_audio_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        duration = self._storyboard_local_take_duration(processing)
+        tolerance = self._coerce_float(processing.get("duration_tolerance_seconds"), 0.25, 0.0, 2.0)
+        video_trim_start = self._coerce_float(
+            self._first_present(processing, "video_trim_start_seconds", "trim_start_seconds", "start_seconds"),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        video_metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else {}
+        video_duration = float(video_metadata.get("duration_seconds") or 0.0)
+        if video_duration <= 0:
+            raise ValueError("Storyboard local voice_over_video source_video duration could not be read.")
+        available_video_duration = max(0.0, video_duration - video_trim_start)
+        if available_video_duration + tolerance < duration:
+            raise ValueError(
+                "Storyboard local voice_over_video source_video is shorter than requested duration after trim; "
+                f"available={available_video_duration:.3f}s requested={duration:.3f}s tolerance={tolerance:.3f}s."
+            )
+        audio_metadata = scene_audio_input.get("metadata") if isinstance(scene_audio_input.get("metadata"), dict) else {}
+        audio_duration = float(scene_audio_input.get("duration_seconds") or audio_metadata.get("duration_seconds") or 0.0)
+        if audio_duration <= 0:
+            raise ValueError("Storyboard local voice_over_video scene_audio duration could not be read.")
+        if audio_duration + tolerance < duration:
+            raise ValueError(
+                "Storyboard local voice_over_video scene_audio is shorter than requested duration; "
+                f"available={audio_duration:.3f}s requested={duration:.3f}s tolerance={tolerance:.3f}s."
+            )
+        transition = str(processing.get("video_transition") or "").strip().lower()
+        if transition not in {"", "none"}:
+            raise ValueError(f"Storyboard local voice_over_video does not support video_transition={transition!r}.")
+        fps = self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120)
+        fit_mode = str(processing.get("video_fit_mode") or processing.get("fit_mode") or processing.get("fit") or "contain").strip().lower()
+        if fit_mode in {"crop_to_fill", "cover", "crop"}:
+            video_filter = (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},setsar=1,setpts=PTS-STARTPTS,format=yuv420p[vout]"
+            )
+        else:
+            video_filter = (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+                f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                "setsar=1,setpts=PTS-STARTPTS,format=yuv420p[vout]"
+            )
+        audio_start = self._coerce_float(
+            self._first_present(processing, "scene_audio_start_seconds", "audio_start_seconds", "soundtrack_start"),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ]
+        if video_trim_start > 0:
+            command.extend(["-ss", f"{video_trim_start:.3f}"])
+        command.extend(["-i", str(Path(str(video_input["path"])))])
+        if audio_start > 0:
+            command.extend(["-ss", f"{audio_start:.3f}"])
+        command.extend([
+            "-i",
+            str(Path(str(scene_audio_input["path"]))),
+            "-filter_complex",
+            f"{video_filter};[1:a:0]aresample=48000,aformat=channel_layouts=stereo[aout]",
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-r",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ])
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=duration,
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(duration),
+        )
+
+    def _run_storyboard_one_image_take_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        image_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        duration: float,
+        fps: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        image_path = Path(str(image_input["path"]))
+        filter_parts = [
+            self._storyboard_local_image_filter("0:v", "vout", output_width, output_height, fps, processing),
+            "[1:a:0]aresample=48000,aformat=channel_layouts=stereo[aout]",
+        ]
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-loop",
+            "1",
+            "-framerate",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(image_path),
+            "-f",
+            "lavfi",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-r",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ]
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=duration,
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(duration),
+        )
+
+    def _run_storyboard_two_image_fade_take_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        start_image: dict[str, Any],
+        end_image: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        duration: float,
+        fps: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        fade_duration = self._coerce_float(processing.get("fade_duration_seconds"), 1.0, 0.05, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        fade_duration = min(fade_duration, max(0.05, duration - 0.05))
+        fade_start = self._coerce_float(processing.get("fade_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        fade_start = min(fade_start, max(0.0, duration - fade_duration))
+        filter_parts = [
+            self._storyboard_local_image_filter("0:v", "vstart", output_width, output_height, fps, processing, pixel_format="rgba"),
+            self._storyboard_local_image_filter("1:v", "vend", output_width, output_height, fps, processing, pixel_format="rgba"),
+            f"[vend]fade=t=in:st={fade_start:.3f}:d={fade_duration:.3f}:alpha=1[vendfade]",
+            "[vstart][vendfade]overlay=x=0:y=0:format=auto,format=yuv420p[vout]",
+            "[2:a:0]aresample=48000,aformat=channel_layouts=stereo[aout]",
+        ]
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-loop",
+            "1",
+            "-framerate",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(Path(str(start_image["path"]))),
+            "-loop",
+            "1",
+            "-framerate",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(Path(str(end_image["path"]))),
+            "-f",
+            "lavfi",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-r",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ]
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=duration,
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(duration),
+        )
+
+    def _storyboard_local_image_filter(
+        self,
+        input_label: str,
+        output_label: str,
+        output_width: int,
+        output_height: int,
+        fps: int,
+        processing: dict[str, Any],
+        *,
+        pixel_format: str = "yuv420p",
+    ) -> str:
+        fit_mode = str(processing.get("fit_mode") or processing.get("fit") or "contain").strip().lower()
+        if self._coerce_bool(processing.get("crop"), False) or fit_mode in {"cover", "crop"}:
+            transform = (
+                f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height}"
+            )
+        else:
+            transform = (
+                f"scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+                f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black"
+            )
+        return (
+            f"[{input_label}]fps={fps},{transform},setsar=1,setpts=PTS-STARTPTS,"
+            f"format={pixel_format}[{output_label}]"
+        )
+
     @staticmethod
     def _storyboard_video_inputs(downloaded_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return sorted(
             [item for item in downloaded_inputs if item.get("category") == "video"],
             key=lambda item: (int(item.get("order") or 0), int(item.get("input_id") or 0)),
         )
+
+    @staticmethod
+    def _storyboard_image_inputs(downloaded_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            [item for item in downloaded_inputs if item.get("category") == "image"],
+            key=lambda item: (int(item.get("order") or 0), int(item.get("input_id") or 0)),
+        )
+
+    @staticmethod
+    def _storyboard_image_input_by_kind(image_inputs: list[dict[str, Any]], kind: str) -> Optional[dict[str, Any]]:
+        for item in image_inputs:
+            if str(item.get("kind") or "").strip().lower() == kind:
+                return item
+        return None
+
+    @staticmethod
+    def _storyboard_audio_inputs(downloaded_inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
+            [item for item in downloaded_inputs if item.get("category") == "audio"],
+            key=lambda item: (int(item.get("order") or 0), int(item.get("input_id") or 0)),
+        )
+
+    @staticmethod
+    def _storyboard_audio_input_by_kind(audio_inputs: list[dict[str, Any]], kind: str) -> Optional[dict[str, Any]]:
+        for item in audio_inputs:
+            if str(item.get("kind") or "").strip().lower() == kind:
+                return item
+        return None
 
     @staticmethod
     def _storyboard_primary_video_input(video_inputs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -7061,6 +7619,59 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             width = self._coerce_int(metadata.get("display_width") or metadata.get("width"), 1280, 2, 4096)
             height = self._coerce_int(metadata.get("display_height") or metadata.get("height"), 720, 2, 4096)
         return self._even_video_size(width, height)
+
+    def _storyboard_local_take_output_size(self, image_inputs: list[dict[str, Any]], processing: dict[str, Any]) -> tuple[int, int]:
+        width = self._coerce_int(processing.get("output_width") or processing.get("width"), 0, 0, 4096)
+        height = self._coerce_int(processing.get("output_height") or processing.get("height"), 0, 0, 4096)
+        if width > 0 and height > 0:
+            return self._even_video_size(width, height)
+        ratio_size = self._storyboard_ratio_output_size(processing)
+        if ratio_size is not None:
+            return ratio_size
+        first_image = image_inputs[0] if image_inputs else {}
+        width = self._coerce_int(first_image.get("width"), 1280, 2, 4096)
+        height = self._coerce_int(first_image.get("height"), 720, 2, 4096)
+        return self._even_video_size(width, height)
+
+    def _storyboard_ratio_output_size(self, processing: dict[str, Any]) -> Optional[tuple[int, int]]:
+        resolution = str(processing.get("resolution") or processing.get("output_resolution") or "").strip().lower()
+        ratio = str(processing.get("ratio") or processing.get("aspect_ratio") or "").strip().lower()
+        if not resolution and not ratio:
+            return None
+        resolution_match = re.search(r"([1-9][0-9]{2,3})", resolution)
+        base = int(resolution_match.group(1)) if resolution_match else 720
+        ratio_aliases = {
+            "16:9": (16, 9),
+            "landscape": (16, 9),
+            "landscape_16_9": (16, 9),
+            "9:16": (9, 16),
+            "portrait": (9, 16),
+            "portrait_9_16": (9, 16),
+            "1:1": (1, 1),
+            "square": (1, 1),
+        }
+        ratio_pair = ratio_aliases.get(ratio)
+        if ratio_pair is None:
+            ratio_match = re.fullmatch(r"\s*([1-9][0-9]?)\s*[:x]\s*([1-9][0-9]?)\s*", ratio)
+            if ratio_match:
+                ratio_pair = (int(ratio_match.group(1)), int(ratio_match.group(2)))
+        if ratio_pair is None:
+            ratio_pair = (16, 9)
+        ratio_width, ratio_height = ratio_pair
+        if ratio_width >= ratio_height:
+            height = base
+            width = round(base * ratio_width / ratio_height)
+        else:
+            width = base
+            height = round(base * ratio_height / ratio_width)
+        return self._even_video_size(width, height)
+
+    def _storyboard_local_take_duration(self, processing: dict[str, Any]) -> float:
+        duration = self._optional_positive_float(
+            self._first_present(processing, "duration_seconds", "trim_duration_seconds", "output_duration_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        return float(duration if duration is not None else 3.0)
 
     @staticmethod
     def _even_video_size(width: int, height: int) -> tuple[int, int]:
@@ -8928,6 +9539,45 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one downloaded source video input; got {video_count}.")
             if audio_count != 1:
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one downloaded soundtrack audio input; got {audio_count}.")
+        elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
+            render_mode = str(processing.get("render_mode") or "").strip().lower()
+            image_count = sum(1 for item in downloaded if item.get("category") == "image")
+            audio_count = sum(1 for item in downloaded if item.get("category") == "audio")
+            start_image_count = sum(1 for item in downloaded if item.get("kind") == "start_image")
+            end_image_count = sum(1 for item in downloaded if item.get("kind") == "end_image")
+            scene_audio_count = sum(1 for item in downloaded if item.get("kind") == "scene_audio")
+            if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
+                raise ValueError(f"Unsupported storyboard local video take render_mode: {render_mode or 'missing'}")
+            if render_mode == "voice_over_video":
+                if video_count != 1:
+                    raise ValueError(f"Storyboard local voice_over_video render requires exactly one downloaded source_video; got {video_count}.")
+                if scene_audio_count != 1 or audio_count != 1:
+                    raise ValueError(
+                        "Storyboard local voice_over_video render requires exactly one downloaded scene_audio and no other audio inputs; "
+                        f"got scene_audio={scene_audio_count}, audio_inputs={audio_count}."
+                    )
+                if start_image_count or end_image_count:
+                    raise ValueError(
+                        "Storyboard local voice_over_video render does not use downloaded start_image or end_image inputs; "
+                        f"got start_image={start_image_count}, end_image={end_image_count}, image_count={image_count}."
+                    )
+            else:
+                if video_count:
+                    raise ValueError(f"Storyboard local {render_mode} render does not support downloaded video inputs; got {video_count}.")
+                if audio_count:
+                    raise ValueError("Storyboard local video take one_image/two_image_fade does not support downloaded audio inputs yet.")
+            if self._coerce_bool(processing.get("pan_enabled"), False):
+                raise ValueError("Storyboard local video take pan_enabled=true is not supported by the bridge first pass.")
+            if render_mode == "one_image" and (start_image_count != 1 or end_image_count):
+                raise ValueError(
+                    "Storyboard local one_image render requires exactly one downloaded start_image and no end_image; "
+                    f"got start_image={start_image_count}, end_image={end_image_count}, image_count={image_count}."
+                )
+            if render_mode == "two_image_fade" and (start_image_count != 1 or end_image_count != 1):
+                raise ValueError(
+                    "Storyboard local two_image_fade render requires exactly one downloaded start_image and one end_image; "
+                    f"got start_image={start_image_count}, end_image={end_image_count}, image_count={image_count}."
+                )
         elif operation_type in STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES and video_count < 1:
             raise ValueError(f"Storyboard operation {operation_type} requires at least one downloaded video input.")
         self._log(
