@@ -49,6 +49,7 @@ EVENT_VIDEO_TIMEOUT_BASE_SECONDS = 120
 EVENT_VIDEO_TIMEOUT_MULTIPLIER = 12
 EVENT_VIDEO_TIMEOUT_MAX_SECONDS = 7200
 STORYBOARD_FFMPEG_PROCESSOR_ID = "storyboard_ffmpeg_processor"
+STORYBOARD_FFMPEG_PROCESSOR_IDS = {STORYBOARD_FFMPEG_PROCESSOR_ID, "storyboard_ffmpeg"}
 STORYBOARD_FFMPEG_PROCESSING_TASK = "storyboard_ffmpeg_processing"
 MAX_STORYBOARD_VIDEO_INPUT_BYTES = 1_073_741_824
 MAX_STORYBOARD_VIDEO_OUTPUT_BYTES = 536_870_912
@@ -220,6 +221,7 @@ STORYBOARD_FFMPEG_OPERATION_TYPES = {
     "multicam_optimize_video",
     "optimize_video",
     "replace_video_soundtrack",
+    "segmented_media_segment_normalize",
     "multicam_seekable_mp4",
     "multicam_ai_video_take_prepare",
     "mediastoryboard_card_pass_through_take",
@@ -243,6 +245,7 @@ STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES = {
     "multicam_optimize_video",
     "optimize_video",
     "replace_video_soundtrack",
+    "segmented_media_segment_normalize",
     "multicam_seekable_mp4",
     "multicam_ai_video_take_prepare",
     "mediastoryboard_card_pass_through_take",
@@ -1600,6 +1603,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "head_tail_silence",
                     "h264_aac_mp4_faststart",
                 ],
+                "segmented_media_segment_normalize": [
+                    "single_segment_normalize",
+                    "scale_to_cover_crop",
+                    "exact_target_dimensions",
+                    "fps_normalize",
+                    "h264_aac_mp4_faststart",
+                    "silent_audio_fill",
+                ],
                 "multicam_card_local_video_take": [
                     "one_image",
                     "two_image_fade",
@@ -2494,7 +2505,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return (
             operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES
             or processing_task == STORYBOARD_FFMPEG_PROCESSING_TASK
-            or processor_id == STORYBOARD_FFMPEG_PROCESSOR_ID
+            or processor_id in STORYBOARD_FFMPEG_PROCESSOR_IDS
             or (family == "media_processing" and operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES)
         )
 
@@ -2641,7 +2652,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if processing_task not in {"", STORYBOARD_FFMPEG_PROCESSING_TASK, "mediaassemblyjob", "mediaassembly_ffmpeg", "storyboard_ffmpeg"}:
             raise ValueError(f"Unsupported storyboard processing_task: {processing_task}")
         processor_id = str(job.get("processor_id") or job.get("model_id") or STORYBOARD_FFMPEG_PROCESSOR_ID).strip()
-        if processor_id not in {"", STORYBOARD_FFMPEG_PROCESSOR_ID}:
+        if processor_id not in {"", *STORYBOARD_FFMPEG_PROCESSOR_IDS}:
             raise ValueError(f"Unsupported storyboard processor_id: {processor_id}")
         output = job.get("output") or {}
         if not isinstance(output, dict):
@@ -2669,8 +2680,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             **(nested_operation_payload if isinstance(nested_operation_payload, dict) else {}),
             **{key: value for key, value in processing.items() if key != "operation_payload"},
         }
-        width = self._coerce_int(output.get("width") or processing.get("width") or processing.get("output_width"), 0, 0, 4096)
-        height = self._coerce_int(output.get("height") or processing.get("height") or processing.get("output_height"), 0, 0, 4096)
+        width = self._coerce_int(output.get("width") or processing.get("target_width") or processing.get("output_width") or processing.get("width"), 0, 0, 4096)
+        height = self._coerce_int(output.get("height") or processing.get("target_height") or processing.get("output_height") or processing.get("height"), 0, 0, 4096)
         if (width == 0) != (height == 0):
             raise ValueError("Storyboard output width and height must be supplied together.")
         trim_start = self._coerce_float(
@@ -2697,6 +2708,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         start_image_count = 0
         end_image_count = 0
         scene_audio_count = 0
+        source_video_count = 0
         for item in inputs:
             if not isinstance(item, dict):
                 raise ValueError("Storyboard FFmpeg input descriptor must be a JSON object.")
@@ -2705,6 +2717,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Unsupported storyboard FFmpeg input kind: {kind}")
             if kind in STORYBOARD_VIDEO_INPUT_KINDS:
                 video_count += 1
+                if kind == "source_video":
+                    source_video_count += 1
             elif kind in STORYBOARD_IMAGE_INPUT_KINDS:
                 image_count += 1
                 if kind == "start_image":
@@ -2723,6 +2737,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one source video input; got {video_count}.")
             if audio_count != 1:
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one soundtrack audio input; got {audio_count}.")
+        elif operation_type == "segmented_media_segment_normalize":
+            if video_count != 1 or source_video_count != 1:
+                raise ValueError(
+                    "Storyboard segmented_media_segment_normalize requires exactly one source_video input; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}."
+                )
+            if width <= 0 or height <= 0:
+                raise ValueError("Storyboard segmented_media_segment_normalize requires target_width and target_height.")
+            resize_mode = str(processing.get("resize_mode") or "scale_to_cover_crop").strip().lower()
+            if resize_mode not in {"scale_to_cover_crop", "cover", "crop"}:
+                raise ValueError(f"Unsupported segmented media segment resize_mode: {resize_mode}")
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
                 raise ValueError(f"Unsupported storyboard local video take render_mode: {render_mode or 'missing'}")
@@ -5464,7 +5489,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return (
             operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES
             or processing_task == STORYBOARD_FFMPEG_PROCESSING_TASK
-            or processor_id == STORYBOARD_FFMPEG_PROCESSOR_ID
+            or processor_id in STORYBOARD_FFMPEG_PROCESSOR_IDS
             or (family == "media_processing" and operation_type in STORYBOARD_FFMPEG_OPERATION_TYPES)
         )
 
@@ -5477,6 +5502,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         summary = candidate.get("summary") or {}
         if not isinstance(summary, dict):
             summary = {}
+        processing = candidate.get("processing") or {}
+        if not isinstance(processing, dict):
+            processing = {}
         family = str(candidate.get("family") or summary.get("family") or "").strip().lower()
         if family and family != "media_processing":
             return f"unsupported media processing family: {family}"
@@ -5520,6 +5548,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         summary = candidate.get("summary") or {}
         if not isinstance(summary, dict):
             summary = {}
+        processing = candidate.get("processing") or {}
+        if not isinstance(processing, dict):
+            processing = {}
         family = str(candidate.get("family") or summary.get("family") or "").strip().lower()
         if family and family != "media_processing":
             return f"unsupported storyboard processing family: {family}"
@@ -5527,7 +5558,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type not in STORYBOARD_FFMPEG_OPERATION_TYPES:
             return f"unsupported storyboard operation_type: {operation_type}"
         processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or STORYBOARD_FFMPEG_PROCESSOR_ID).strip()
-        if processor_id not in {"", STORYBOARD_FFMPEG_PROCESSOR_ID}:
+        if processor_id not in {"", *STORYBOARD_FFMPEG_PROCESSOR_IDS}:
             return f"unsupported storyboard processor_id: {processor_id}"
         output_format = str(summary.get("output_format") or summary.get("format") or "mp4").strip().lower()
         if output_format != "mp4":
@@ -5553,6 +5584,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             audio_count = self._coerce_int(summary.get("audio_input_count", summary.get("soundtrack_audio_count")), 1, 0, 10)
             if audio_count != 1:
                 return f"replace_video_soundtrack requires exactly one soundtrack audio input; got {audio_count}"
+        elif operation_type == "segmented_media_segment_normalize":
+            source_video_count = self._coerce_int(summary.get("source_video_count"), video_count, 0, 10)
+            if video_count != 1 or source_video_count != 1:
+                return (
+                    "segmented_media_segment_normalize requires exactly one source_video input; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}"
+                )
+            resize_mode = str(candidate.get("resize_mode") or processing.get("resize_mode") or summary.get("resize_mode") or "scale_to_cover_crop").strip().lower()
+            if resize_mode not in {"scale_to_cover_crop", "cover", "crop"}:
+                return f"segmented_media_segment_normalize unsupported resize_mode: {resize_mode}"
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             render_mode = str(
                 candidate.get("render_mode") or processing.get("render_mode") or summary.get("render_mode") or ""
@@ -6228,6 +6269,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 progress_end=95,
                 status=f"Optimizing storyboard video operation {operation_type}.",
             )
+        elif operation_type == "segmented_media_segment_normalize":
+            primary = self._storyboard_primary_video_input(video_inputs)
+            self._run_storyboard_segment_normalize_ffmpeg(
+                connection,
+                job_id,
+                primary,
+                final_output,
+                output_width,
+                output_height,
+                process_handle,
+                processing=processing,
+                progress_start=5,
+                progress_end=95,
+                status="Normalizing segmented media segment for storyboard use.",
+            )
         elif operation_type == "replace_video_soundtrack":
             primary = self._storyboard_primary_video_input(video_inputs)
             soundtrack_input = self._storyboard_audio_input(downloaded_inputs)
@@ -6447,6 +6503,94 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             *self._storyboard_encode_args(processing),
             str(output_path),
         ])
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, source_duration),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(source_duration),
+        )
+
+    def _run_storyboard_segment_normalize_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(video_input["path"]))
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        source_duration = float(metadata.get("duration_seconds") or 1.0)
+        has_audio = bool(metadata.get("has_audio"))
+        fps = self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120)
+        resize_mode = str(processing.get("resize_mode") or "scale_to_cover_crop").strip().lower()
+        if resize_mode not in {"scale_to_cover_crop", "cover", "crop"}:
+            raise ValueError(f"Unsupported segmented media segment resize_mode: {resize_mode}")
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            str(source_path),
+        ]
+        audio_label = "0:a:0"
+        if not has_audio:
+            command.extend([
+                "-f",
+                "lavfi",
+                "-t",
+                f"{source_duration:.3f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ])
+            audio_label = "1:a:0"
+        filter_parts = [
+            (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},"
+                f"fps={fps},setsar=1,format=yuv420p[vout]"
+            ),
+            f"[{audio_label}]aresample=48000,aformat=channel_layouts=stereo[aout]",
+        ]
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-r",
+            str(fps),
+            "-t",
+            f"{source_duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ])
+        self._log(
+            "Normalizing segmented media segment; "
+            f"job_id={job_id} input_id={video_input.get('input_id')} "
+            f"track_key={processing.get('track_key')!r} segment_index={processing.get('segment_index')!r} "
+            f"output={output_width}x{output_height} resize_mode={resize_mode!r} fps={fps} "
+            f"duration_seconds={source_duration:.3f} has_audio={has_audio}."
+        )
         self._run_ffmpeg_with_progress(
             connection,
             job_id,
@@ -7613,8 +7757,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
 
     def _storyboard_output_size(self, video_input: dict[str, Any], processing: dict[str, Any]) -> tuple[int, int]:
         metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else {}
-        width = self._coerce_int(processing.get("output_width") or processing.get("width"), 0, 0, 4096)
-        height = self._coerce_int(processing.get("output_height") or processing.get("height"), 0, 0, 4096)
+        width = self._coerce_int(processing.get("target_width") or processing.get("output_width") or processing.get("width"), 0, 0, 4096)
+        height = self._coerce_int(processing.get("target_height") or processing.get("output_height") or processing.get("height"), 0, 0, 4096)
         if width <= 0 or height <= 0:
             width = self._coerce_int(metadata.get("display_width") or metadata.get("width"), 1280, 2, 4096)
             height = self._coerce_int(metadata.get("display_height") or metadata.get("height"), 720, 2, 4096)
@@ -9539,6 +9683,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one downloaded source video input; got {video_count}.")
             if audio_count != 1:
                 raise ValueError(f"Storyboard replace_video_soundtrack requires exactly one downloaded soundtrack audio input; got {audio_count}.")
+        elif operation_type == "segmented_media_segment_normalize":
+            source_video_count = sum(1 for item in downloaded if item.get("kind") == "source_video")
+            if video_count != 1 or source_video_count != 1:
+                raise ValueError(
+                    "Storyboard segmented_media_segment_normalize requires exactly one downloaded source_video input; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}."
+                )
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             render_mode = str(processing.get("render_mode") or "").strip().lower()
             image_count = sum(1 for item in downloaded if item.get("category") == "image")
