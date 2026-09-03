@@ -136,6 +136,10 @@ Z-Image family:
 - `z_image_control2`
 - `z_image_control2_1`
 
+SenseNova family:
+
+- `sensenova_u1_5_8b_mot`
+
 Important image behavior:
 
 - Ordinary image models are capped at 6 outputs.
@@ -144,6 +148,7 @@ Important image behavior:
 - For Qwen Image Layered, artifact index `0` is the source/reconstruction echo and artifact indexes `1..8` are editable decomposition layers.
 - Qwen Edit Plus control images are edit/conditioning inputs, not pure pose/depth guides. A control image with a competing subject can affect subject identity.
 - Z-Image control variants are better suited for structure/layout control from pose, depth, edge, or raw control inputs.
+- SenseNova U1.5 is optimized for high-resolution text-heavy layouts and infographics; the bridge renders lower delivery sizes through a higher-resolution internal render and center-crop/downscale adapter for text quality.
 
 Supported image output types:
 
@@ -157,6 +162,7 @@ Curated image resolutions include:
 - `1024x1024`
 - `1280x720`
 - `720x1280`
+- `2048x2048` for SenseNova delivery
 
 ### Voice Audio Generation
 

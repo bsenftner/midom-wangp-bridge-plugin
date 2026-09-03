@@ -124,6 +124,28 @@ IDLE_POLL_LOG_SECONDS = 30
 MP3_ENCODER_CACHE_SECONDS = 60
 MAX_OUTPUTS = 6
 QWEN_LAYERED_MAX_OUTPUTS = 9
+SENSENOVA_MODEL_ID = "sensenova_u1_5_8b_mot"
+SENSENOVA_MAX_STEPS = 50
+SENSENOVA_DELIVERY_RESOLUTIONS = {
+    "1280x720",
+    "720x1280",
+    "1024x1024",
+    "2048x2048",
+}
+SENSENOVA_INTERNAL_RENDER_RESOLUTIONS = {
+    "1280x720": "3840x2176",
+    "720x1280": "2176x3840",
+    "1024x1024": "2880x2880",
+    "2048x2048": "2880x2880",
+}
+SENSENOVA_REFERENCE_MODES = {
+    "none",
+    "first_reference_defines_dimensions",
+    "use_reference_images",
+}
+SENSENOVA_ACCELERATOR_PROFILE_ID = "sensenova_u1_5_official_8_step"
+SENSENOVA_ACCELERATOR_LORA_DIR = SENSENOVA_MODEL_ID
+SENSENOVA_ACCELERATOR_LORA_FILENAME = "SenseNova-U1.5-8B-MoT-LoRA-8step.safetensors"
 QWEN_MULTI_ANGLE_TOOL_ID = "qwen_image_edit_2511_multiple_angles"
 QWEN_MULTI_ANGLE_TOOL_DISPLAY_NAME = "Generate Alternate View"
 QWEN_MULTI_ANGLE_TOOL_VERSION = "1"
@@ -159,6 +181,20 @@ def _image_max_outputs_for_model(model_id: str) -> int:
     if str(model_id or "") == "qwen_image_layered_20B":
         return QWEN_LAYERED_MAX_OUTPUTS
     return MAX_OUTPUTS
+
+
+def _image_max_steps_for_model(model_id: str) -> int:
+    if str(model_id or "") == SENSENOVA_MODEL_ID:
+        return SENSENOVA_MAX_STEPS
+    return MAX_STEPS
+
+
+def _image_resolutions_for_model(model_id: str) -> set[str]:
+    if str(model_id or "") == SENSENOVA_MODEL_ID:
+        return set(SENSENOVA_DELIVERY_RESOLUTIONS)
+    return set(ALLOWED_RESOLUTIONS)
+
+
 CONTROL_MODE_WANGP_CODES = {
     "pose": "PV",
     "depth": "DV",
@@ -415,6 +451,18 @@ MODEL_CAPABILITY_OVERRIDES = {
     "z_image_control": {"family": "z_image", "display_name": "Z-Image Control", "image_reference": False, "control": True, "max_reference_images": 0, "control_modes": ["pose", "depth", "edges", "raw"]},
     "z_image_control2": {"family": "z_image", "display_name": "Z-Image Control2", "image_reference": False, "control": True, "max_reference_images": 0, "control_modes": ["pose", "depth", "edges", "raw"]},
     "z_image_control2_1": {"family": "z_image", "display_name": "Z-Image Control2.1", "image_reference": False, "control": True, "max_reference_images": 0, "control_modes": ["pose", "depth", "edges", "raw"]},
+    SENSENOVA_MODEL_ID: {
+        "family": "sensenova",
+        "display_name": "SenseNova U1.5 8B MoT",
+        "image_reference": True,
+        "control": False,
+        "inpaint": False,
+        "image_edit": True,
+        "multi_reference_images": True,
+        "prompt_enhancement_by_worker": False,
+        "native_high_res_render": True,
+        "max_reference_images": 3,
+    },
 }
 ALLOWED_MODEL_TYPES = set(MODEL_CAPABILITY_OVERRIDES.keys())
 ALLOWED_AUDIO_MODEL_TYPES = {
@@ -529,6 +577,19 @@ ACCELERATOR_PROFILE_DEFINITIONS = [
         "lora_filenames": ["Qwen-Image-Edit-Lightning-4steps-V1.0-bf16.safetensors"],
         "loras_multipliers": "1",
         "guidance_scale": 1,
+    },
+    {
+        "profile_id": SENSENOVA_ACCELERATOR_PROFILE_ID,
+        "display_name": "Fast - 8 steps",
+        "description": "Use WanGP's installed official SenseNova U1.5 8-step accelerator for faster image generation.",
+        "quality_tier": "fast",
+        "steps": 8,
+        "model_ids": [SENSENOVA_MODEL_ID],
+        "lora_dir": SENSENOVA_ACCELERATOR_LORA_DIR,
+        "lora_filenames": [SENSENOVA_ACCELERATOR_LORA_FILENAME],
+        "loras_multipliers": "1",
+        "guidance_scale": 1.0,
+        "flow_shift": 3.0,
     },
 ]
 ACCELERATOR_PROFILE_BY_ID = {
@@ -1074,24 +1135,42 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             model_capabilities = {
                 "text_to_image": True,
                 "image_reference": image_reference,
-                "inpaint": image_reference,
+                "inpaint": bool(metadata.get("inpaint", image_reference)),
                 "control": control,
                 "multi_output": True,
             }
-            for capability_key in ("layer_decomposition", "source_echo_output", "ordered_layer_outputs"):
+            for capability_key in (
+                "layer_decomposition",
+                "source_echo_output",
+                "ordered_layer_outputs",
+                "image_edit",
+                "multi_reference_images",
+                "prompt_enhancement_by_worker",
+                "native_high_res_render",
+            ):
                 if metadata.get(capability_key):
                     model_capabilities[capability_key] = True
+            if model_id == SENSENOVA_MODEL_ID:
+                model_capabilities["prompt_enhancement_by_worker"] = False
             model_limits = {
                 "max_outputs": _image_max_outputs_for_model(model_id),
-                "max_steps": MAX_STEPS,
+                "max_steps": _image_max_steps_for_model(model_id),
                 "max_reference_images": int(metadata["max_reference_images"]),
                 "max_control_images": MAX_CONTROL_IMAGES if control else 0,
                 "control_modes": control_modes,
                 "max_artifact_bytes": MAX_IMAGE_BYTES,
-                "resolutions": sorted(ALLOWED_RESOLUTIONS),
+                "resolutions": sorted(_image_resolutions_for_model(model_id)),
                 "input_mime_types": sorted(ALLOWED_IMAGE_MIME_TYPES),
                 "output_mime_types": sorted(ALLOWED_IMAGE_MIME_TYPES),
             }
+            if model_id == SENSENOVA_MODEL_ID:
+                model_limits["reference_modes"] = sorted(SENSENOVA_REFERENCE_MODES)
+                model_limits["internal_render_resolutions"] = {
+                    key: SENSENOVA_INTERNAL_RENDER_RESOLUTIONS[key]
+                    for key in sorted(SENSENOVA_INTERNAL_RENDER_RESOLUTIONS)
+                }
+                model_limits["native_high_res_render"] = True
+                model_limits["dimension_alignment"] = 32
             if metadata.get("output_roles"):
                 model_limits["output_roles"] = list(metadata["output_roles"])
             curated_tools = self._curated_tools_for_model(model_id)
@@ -2046,7 +2125,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if selected is None:
             settings["_midom_accelerator_profile_id"] = "standard"
             if generation.get("steps") is not None:
-                settings["num_inference_steps"] = self._coerce_int(generation.get("steps"), DEFAULT_STEPS, 1, MAX_STEPS)
+                settings["num_inference_steps"] = self._coerce_int(
+                    generation.get("steps"),
+                    DEFAULT_STEPS,
+                    1,
+                    _image_max_steps_for_model(model_id),
+                )
                 steps_label = str(settings.get("num_inference_steps"))
             else:
                 settings.pop("num_inference_steps", None)
@@ -2062,6 +2146,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         settings["loras_multipliers"] = str(selected.get("loras_multipliers") or "1")
         if selected.get("guidance_scale") is not None:
             settings["guidance_scale"] = selected["guidance_scale"]
+        if selected.get("flow_shift") is not None:
+            settings["flow_shift"] = selected["flow_shift"]
         settings["_midom_accelerator_profile_id"] = str(selected["profile_id"])
         self._log(
             "Applied WanGP speed profile; "
@@ -2302,13 +2388,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if not settings["prompt"]:
             raise ValueError("Job prompt is required.")
         negative_prompt = str(job.get("negative_prompt") or "").strip()
+        if model_type == SENSENOVA_MODEL_ID and negative_prompt:
+            raise ValueError("SenseNova U1.5 does not support a separate negative_prompt; put exclusions in the main prompt.")
         if negative_prompt:
             settings["negative_prompt"] = negative_prompt[:MAX_PROMPT_CHARS]
-        resolution = self._resolve_job_resolution(job)
+        resolution = self._resolve_job_resolution(job, model_type)
         if resolution:
             settings["resolution"] = resolution
         settings["image_mode"] = 1
         settings["video_length"] = 1
+        if model_type == SENSENOVA_MODEL_ID:
+            self._apply_sensenova_job_settings(settings, job, generation, resolution)
         self._apply_accelerator_profile(settings, model_type, generation)
         if tool_payload:
             self._apply_curated_image_tool_settings(settings, tool_payload["settings"])
@@ -2326,6 +2416,71 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             settings["_midom_layer_mode"] = "control_image_decomposition"
             settings["_midom_layer_output_count"] = output_count
         return settings
+
+    def _apply_sensenova_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+    ) -> None:
+        if not requested_resolution:
+            raise ValueError("SenseNova U1.5 jobs require explicit output.width and output.height.")
+        if bool(generation.get("prompt_enhancement_by_worker")):
+            raise ValueError("SenseNova U1.5 jobs must be prompt-expanded by Midom, not by the WanGP worker.")
+        if generation.get("native_high_res_render") is False:
+            raise ValueError("SenseNova U1.5 jobs require native_high_res_render=true for readable text and infographic quality.")
+        reference_mode = str(generation.get("reference_mode") or "none").strip().lower()
+        if reference_mode not in SENSENOVA_REFERENCE_MODES:
+            raise ValueError(f"Unsupported SenseNova U1.5 reference_mode: {reference_mode}")
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Job inputs must be a list.")
+        reference_count = sum(
+            1
+            for item in inputs
+            if isinstance(item, dict) and str(item.get("kind") or "reference_image").strip() == "reference_image"
+        )
+        control_count = sum(
+            1
+            for item in inputs
+            if isinstance(item, dict) and str(item.get("kind") or "").strip() == "control_image"
+        )
+        if control_count:
+            raise ValueError("SenseNova U1.5 does not support Midom control_image inputs.")
+        if reference_mode == "none" and reference_count:
+            raise ValueError("SenseNova U1.5 reference_mode=none cannot include reference images.")
+        if reference_mode != "none" and reference_count < 1:
+            raise ValueError(f"SenseNova U1.5 reference_mode={reference_mode} requires at least one reference image.")
+        if reference_count > int((MODEL_CAPABILITY_OVERRIDES.get(SENSENOVA_MODEL_ID) or {}).get("max_reference_images") or 3):
+            raise ValueError("SenseNova U1.5 jobs support at most 3 reference images.")
+        internal_resolution = SENSENOVA_INTERNAL_RENDER_RESOLUTIONS.get(requested_resolution)
+        if not internal_resolution:
+            raise ValueError(f"Unsupported SenseNova U1.5 delivery resolution: {requested_resolution}")
+        settings["_midom_requested_resolution"] = requested_resolution
+        settings["_midom_internal_render_resolution"] = internal_resolution
+        settings["_midom_final_output_resolution"] = requested_resolution
+        settings["_midom_image_delivery_adapter"] = "native_high_res_center_crop_downscale"
+        settings["_midom_sensenova_reference_mode"] = reference_mode
+        settings["_midom_sensenova_reference_image_count"] = reference_count
+        settings["_midom_prompt_enhancement_by_worker"] = False
+        settings["_midom_prompt_was_midom_expanded"] = bool(generation.get("prompt_was_midom_expanded"))
+        settings["_midom_prompt_expansion_source"] = str(generation.get("prompt_expansion_source") or "user_prompt").strip()[:128]
+        settings["_midom_native_high_res_render"] = True
+        settings["resolution"] = internal_resolution
+        options = generation.get("options") or {}
+        if isinstance(options, dict):
+            multi_prompts_gen_type = str(options.get("multi_prompts_gen_type") or "").strip().upper()
+            if multi_prompts_gen_type:
+                if multi_prompts_gen_type not in {"FG", "PG", "G"}:
+                    raise ValueError(f"Unsupported SenseNova U1.5 multi_prompts_gen_type: {multi_prompts_gen_type}")
+                settings["multi_prompts_gen_type"] = multi_prompts_gen_type
+        self._log(
+            "Prepared SenseNova high-resolution image adapter; "
+            f"requested_resolution={requested_resolution} internal_render_resolution={internal_resolution} "
+            f"reference_mode={reference_mode!r} reference_count={reference_count} "
+            f"prompt_was_midom_expanded={settings['_midom_prompt_was_midom_expanded']}."
+        )
 
     def _apply_curated_image_tool_settings(self, settings: dict[str, Any], tool_settings: dict[str, Any]) -> None:
         existing_loras = [str(item).strip() for item in (settings.get("activated_loras") or []) if str(item).strip()]
@@ -4006,7 +4161,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if not expected or not actual or expected != actual:
                 raise ValueError(f"Job target {target_key} does not match paired worker scope.")
 
-    def _resolve_job_resolution(self, job: dict[str, Any]) -> str:
+    def _resolve_job_resolution(self, job: dict[str, Any], model_id: Optional[str] = None) -> str:
         output = job.get("output") or {}
         resolution = ""
         if isinstance(output, dict):
@@ -4016,7 +4171,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 resolution = f"{int(width)}x{int(height)}"
         if not resolution:
             return ""
-        if resolution not in ALLOWED_RESOLUTIONS:
+        allowed_resolutions = _image_resolutions_for_model(
+            str(model_id or job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
+        )
+        if resolution not in allowed_resolutions:
             raise ValueError(f"Unsupported resolution: {resolution}")
         return resolution
 
@@ -4236,6 +4394,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 }
                 for artifact_index, _file_path in enumerate(generated_files)
             ]
+        if str(settings.get("model_type") or "") == SENSENOVA_MODEL_ID:
+            metadata["reference_mode"] = str(settings.get("_midom_sensenova_reference_mode") or "none")
+            metadata["reference_image_count"] = self._coerce_int(
+                settings.get("_midom_sensenova_reference_image_count"),
+                0,
+                0,
+                3,
+            )
+            metadata["prompt_enhancement_by_worker"] = False
+            metadata["prompt_was_midom_expanded"] = bool(settings.get("_midom_prompt_was_midom_expanded"))
+            metadata["prompt_expansion_source"] = str(settings.get("_midom_prompt_expansion_source") or "user_prompt")
+            metadata["native_high_res_render"] = bool(settings.get("_midom_native_high_res_render"))
+            metadata["image_delivery_adapter"] = str(settings.get("_midom_image_delivery_adapter") or "")
+            metadata["requested_resolution"] = str(settings.get("_midom_requested_resolution") or "")
+            metadata["internal_render_resolution"] = str(settings.get("_midom_internal_render_resolution") or settings.get("resolution") or "")
+            metadata["final_output_resolution"] = str(settings.get("_midom_final_output_resolution") or settings.get("_midom_requested_resolution") or "")
         curated_tool_id = str(settings.get("_midom_curated_tool_id") or "").strip()
         if curated_tool_id:
             metadata["curated_tool"] = {
@@ -5772,7 +5946,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "Prepared WanGP settings; "
                         f"job_id={job_id} model_type={settings.get('model_type')} "
                         f"image_mode={settings.get('image_mode')} video_prompt_type={settings.get('video_prompt_type', '')!r} "
-                        f"resolution={settings.get('resolution')} steps={settings.get('num_inference_steps', 'WanGP default')} "
+                        f"resolution={settings.get('resolution')} "
+                        f"requested_resolution={settings.get('_midom_requested_resolution', settings.get('resolution'))} "
+                        f"image_delivery_adapter={settings.get('_midom_image_delivery_adapter', '')!r} "
+                        f"steps={settings.get('num_inference_steps', 'WanGP default')} "
                         f"accelerator_profile={settings.get('_midom_accelerator_profile_id', 'standard')} "
                         f"curated_tool_id={settings.get('_midom_curated_tool_id', '')!r} "
                         f"seed={settings.get('seed', 'none')} output_count={output_count} "
@@ -5934,7 +6111,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     elif media_type == "video":
                         artifacts.append(self._upload_video_artifact(connection, job_id, file_path, artifact_index, settings))
                     else:
-                        artifacts.append(self._upload_artifact(connection, job_id, file_path, artifact_index, settings.get("resolution")))
+                        artifacts.append(
+                            self._upload_artifact(
+                                connection,
+                                job_id,
+                                file_path,
+                                artifact_index,
+                                settings.get("_midom_requested_resolution") or settings.get("resolution"),
+                                "center_crop_downscale" if settings.get("_midom_image_delivery_adapter") else "resize",
+                            )
+                        )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
                 self._log(f"All artifacts uploaded; calling complete; job_id={job_id} artifacts={len(artifacts)}.")
                 complete_payload = {
@@ -9010,8 +9196,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_id = str(job.get("model_id") or job.get("model_type") or "").strip()
         model_meta = MODEL_CAPABILITY_OVERRIDES.get(model_id) or {}
         supported_control_modes = {item["mode_id"] for item in self._control_modes_for_model(model_id)}
-        max_reference_images = self._coerce_int((job.get("limits") or {}).get("max_reference_images"), 0, 0, 3)
-        max_control_images = self._coerce_int((job.get("limits") or {}).get("max_control_images"), MAX_CONTROL_IMAGES, 0, MAX_CONTROL_IMAGES)
+        max_reference_images = self._coerce_int(
+            (job.get("limits") or {}).get("max_reference_images"),
+            int(model_meta.get("max_reference_images") or 0),
+            0,
+            3,
+        )
+        max_control_images = self._coerce_int(
+            (job.get("limits") or {}).get("max_control_images"),
+            MAX_CONTROL_IMAGES if model_meta.get("control") else 0,
+            0,
+            MAX_CONTROL_IMAGES,
+        )
         tool_id = str(job.get("tool_id") or ((job.get("generation") or {}).get("tool_id") if isinstance(job.get("generation"), dict) else "") or "").strip()
         if tool_id == QWEN_MULTI_ANGLE_TOOL_ID:
             max_reference_images = 1
@@ -10195,7 +10391,41 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"Model {model_id} does not support ordinary reference images.")
         if control_inputs and not model_meta.get("control"):
             raise ValueError(f"Model {model_id} does not support control images.")
-        if model_id == "qwen_image_layered_20B":
+        if model_id == SENSENOVA_MODEL_ID:
+            reference_mode = str(settings.get("_midom_sensenova_reference_mode") or "none").strip().lower()
+            if control_inputs:
+                raise ValueError("SenseNova U1.5 does not support Midom control_image inputs.")
+            if reference_mode == "none":
+                if paths:
+                    raise ValueError("SenseNova U1.5 reference_mode=none cannot include reference images.")
+                settings["image_refs"] = []
+                settings["video_prompt_type"] = ""
+            elif reference_mode == "first_reference_defines_dimensions":
+                if not paths:
+                    raise ValueError("SenseNova U1.5 first_reference_defines_dimensions requires at least one reference image.")
+                internal_size = self._parse_resolution_size(settings.get("_midom_internal_render_resolution"))
+                if internal_size is None:
+                    raise ValueError("SenseNova U1.5 internal render resolution is missing or invalid.")
+                prepared_paths = list(paths)
+                prepared_paths[0] = self._prepare_sensenova_primary_reference_image(paths[0], internal_size)
+                settings["image_refs"] = prepared_paths
+                settings["video_prompt_type"] = "KI"
+            elif reference_mode == "use_reference_images":
+                if not paths:
+                    raise ValueError("SenseNova U1.5 use_reference_images requires at least one reference image.")
+                settings["image_refs"] = paths
+                settings["video_prompt_type"] = "I"
+            else:
+                raise ValueError(f"Unsupported SenseNova U1.5 reference_mode: {reference_mode}")
+            self._log(
+                "Applied SenseNova reference settings; "
+                f"model_id={model_id} reference_mode={reference_mode!r} "
+                f"reference_count={len(paths)} image_refs={[Path(path).name for path in settings.get('image_refs', [])]} "
+                f"video_prompt_type={settings.get('video_prompt_type')!r} "
+                f"delivery_resolution={settings.get('_midom_requested_resolution')} "
+                f"internal_render_resolution={settings.get('resolution')}."
+            )
+        elif model_id == "qwen_image_layered_20B":
             if paths:
                 raise ValueError("Qwen Image Layered does not support ordinary reference images.")
             if len(control_inputs) != 1:
@@ -10255,6 +10485,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"lora_multiplier={settings.get('_midom_curated_tool_lora_multiplier')} "
                 f"expanded_prompt={settings.get('_midom_curated_tool_expanded_prompt')!r}."
             )
+
+    def _prepare_sensenova_primary_reference_image(self, path: str, internal_size: tuple[int, int]) -> str:
+        source_path = Path(path)
+        target_path = source_path.with_name(f"{source_path.stem}-sensenova-reference-{internal_size[0]}x{internal_size[1]}.png")
+        with Image.open(source_path) as image:
+            source_size = image.size
+            prepared = image.convert("RGB")
+            if prepared.size != internal_size:
+                prepared = self._resize_image_center_crop(prepared, internal_size)
+            prepared.save(target_path, format="PNG", optimize=True)
+        self._log(
+            "Prepared SenseNova primary reference image for high-resolution render; "
+            f"source={source_path.name!r} source_size={source_size[0]}x{source_size[1]} "
+            f"prepared={target_path.name!r} prepared_size={internal_size[0]}x{internal_size[1]}."
+        )
+        return str(target_path)
 
     def _load_image_guide(self, path: str) -> Image.Image:
         with Image.open(path) as image:
@@ -10318,6 +10564,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         file_path: str,
         artifact_index: int,
         expected_resolution: Any = None,
+        normalization_mode: str = "resize",
     ) -> dict[str, Any]:
         self._ensure_job_flow_enabled()
         path = Path(file_path)
@@ -10327,7 +10574,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if suffix not in ALLOWED_IMAGE_SUFFIXES:
             raise ValueError(f"Unsupported generated artifact extension: {suffix}")
         file_size = path.stat().st_size
-        if file_size <= 0 or file_size > MAX_IMAGE_BYTES:
+        if file_size <= 0:
             raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
         mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
@@ -10343,11 +10590,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"Generated artifact could not be decoded as an image: {exc}")
         expected_size = self._parse_resolution_size(expected_resolution)
         if expected_size is not None and (decoded_width, decoded_height) != expected_size:
-            normalized_temp_path = self._normalize_artifact_dimensions(path, expected_size, mime_type)
+            normalized_temp_path = self._normalize_artifact_dimensions(path, expected_size, mime_type, normalization_mode)
             self._log(
                 "Normalized generated artifact dimensions before upload; "
                 f"job_id={job_id} artifact_index={artifact_index} "
                 f"original={decoded_width}x{decoded_height} expected={expected_size[0]}x{expected_size[1]} "
+                f"normalization_mode={normalization_mode!r} "
                 f"normalized_file={normalized_temp_path.name!r}.",
                 force=True,
             )
@@ -10356,6 +10604,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             with Image.open(path) as image:
                 decoded_width, decoded_height = image.size
                 decoded_format = str(image.format or "").upper()
+        if file_size > MAX_IMAGE_BYTES:
+            raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
         with path.open("rb") as reader:
             data = reader.read()
         sha256 = hashlib.sha256(data).hexdigest()
@@ -10793,14 +11043,23 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return None
         return int(match.group(1)), int(match.group(2))
 
-    def _normalize_artifact_dimensions(self, path: Path, expected_size: tuple[int, int], mime_type: str) -> Path:
+    def _normalize_artifact_dimensions(
+        self,
+        path: Path,
+        expected_size: tuple[int, int],
+        mime_type: str,
+        normalization_mode: str = "resize",
+    ) -> Path:
         suffix = MIME_EXTENSION.get(mime_type, path.suffix.lower() or ".png")
         temp_file = tempfile.NamedTemporaryFile(prefix="midom-normalized-", suffix=suffix, delete=False)
         normalized_path = Path(temp_file.name)
         temp_file.close()
         with Image.open(path) as image:
             normalized = image.convert("RGB") if mime_type == "image/jpeg" else image.convert("RGBA")
-            normalized = normalized.resize(expected_size, Image.Resampling.LANCZOS)
+            if normalization_mode == "center_crop_downscale":
+                normalized = self._resize_image_center_crop(normalized, expected_size)
+            else:
+                normalized = normalized.resize(expected_size, Image.Resampling.LANCZOS)
             if mime_type == "image/jpeg":
                 normalized.save(normalized_path, format="JPEG", quality=95, optimize=True)
             elif mime_type == "image/webp":
@@ -10808,6 +11067,27 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             else:
                 normalized.save(normalized_path, format="PNG", optimize=True)
         return normalized_path
+
+    @staticmethod
+    def _resize_image_center_crop(image: Image.Image, expected_size: tuple[int, int]) -> Image.Image:
+        target_width, target_height = expected_size
+        if target_width <= 0 or target_height <= 0:
+            raise ValueError("Target image dimensions must be positive.")
+        source_width, source_height = image.size
+        if source_width <= 0 or source_height <= 0:
+            raise ValueError("Source image dimensions must be positive.")
+        target_ratio = target_width / target_height
+        source_ratio = source_width / source_height
+        if abs(source_ratio - target_ratio) > 0.0001:
+            if source_ratio > target_ratio:
+                crop_width = max(1, int(round(source_height * target_ratio)))
+                left = max(0, (source_width - crop_width) // 2)
+                image = image.crop((left, 0, left + crop_width, source_height))
+            else:
+                crop_height = max(1, int(round(source_width / target_ratio)))
+                top = max(0, (source_height - crop_height) // 2)
+                image = image.crop((0, top, source_width, top + crop_height))
+        return image.resize(expected_size, Image.Resampling.LANCZOS)
 
     def _callbacks_for_job(self, connection: ConnectionContext, job_id: str):
         plugin = self
