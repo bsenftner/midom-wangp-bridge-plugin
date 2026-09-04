@@ -125,6 +125,7 @@ MP3_ENCODER_CACHE_SECONDS = 60
 MAX_OUTPUTS = 6
 QWEN_LAYERED_MAX_OUTPUTS = 9
 SENSENOVA_MODEL_ID = "sensenova_u1_5_8b_mot"
+SENSENOVA_MAX_PROMPT_CHARS = 8000
 SENSENOVA_MAX_STEPS = 50
 SENSENOVA_DELIVERY_RESOLUTIONS = {
     "1280x720",
@@ -187,6 +188,12 @@ def _image_max_steps_for_model(model_id: str) -> int:
     if str(model_id or "") == SENSENOVA_MODEL_ID:
         return SENSENOVA_MAX_STEPS
     return MAX_STEPS
+
+
+def _image_max_prompt_chars_for_model(model_id: str) -> int:
+    if str(model_id or "") == SENSENOVA_MODEL_ID:
+        return SENSENOVA_MAX_PROMPT_CHARS
+    return MAX_PROMPT_CHARS
 
 
 def _image_resolutions_for_model(model_id: str) -> set[str]:
@@ -1155,6 +1162,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             model_limits = {
                 "max_outputs": _image_max_outputs_for_model(model_id),
                 "max_steps": _image_max_steps_for_model(model_id),
+                "max_prompt_chars": _image_max_prompt_chars_for_model(model_id),
                 "max_reference_images": int(metadata["max_reference_images"]),
                 "max_control_images": MAX_CONTROL_IMAGES if control else 0,
                 "control_modes": control_modes,
@@ -2382,8 +2390,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         settings = {}
         settings["model_type"] = model_type
         prompt = str(job.get("prompt") or "").strip()
-        if len(prompt) > MAX_PROMPT_CHARS:
-            raise ValueError(f"Job prompt exceeds {MAX_PROMPT_CHARS} characters.")
+        prompt_limit = _image_max_prompt_chars_for_model(model_type)
+        if len(prompt) > prompt_limit:
+            raise ValueError(f"Job prompt exceeds {prompt_limit} characters.")
         settings["prompt"] = str(tool_payload["expanded_prompt"] if tool_payload else prompt)
         if not settings["prompt"]:
             raise ValueError("Job prompt is required.")
