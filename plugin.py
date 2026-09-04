@@ -133,8 +133,8 @@ SENSENOVA_DELIVERY_RESOLUTIONS = {
     "2048x2048",
 }
 SENSENOVA_INTERNAL_RENDER_RESOLUTIONS = {
-    "1280x720": "3840x2176",
-    "720x1280": "2176x3840",
+    "1280x720": "5440x3072",
+    "720x1280": "3072x5440",
     "1024x1024": "2880x2880",
     "2048x2048": "2880x2880",
 }
@@ -580,10 +580,10 @@ ACCELERATOR_PROFILE_DEFINITIONS = [
     },
     {
         "profile_id": SENSENOVA_ACCELERATOR_PROFILE_ID,
-        "display_name": "Fast - 8 steps",
-        "description": "Use WanGP's installed official SenseNova U1.5 8-step accelerator for faster image generation.",
+        "display_name": "Fast - 12 steps",
+        "description": "Use WanGP's installed official SenseNova U1.5 8-step accelerator LoRA with the tested 12-step Midom quality setting.",
         "quality_tier": "fast",
-        "steps": 8,
+        "steps": 12,
         "model_ids": [SENSENOVA_MODEL_ID],
         "lora_dir": SENSENOVA_ACCELERATOR_LORA_DIR,
         "lora_filenames": [SENSENOVA_ACCELERATOR_LORA_FILENAME],
@@ -2468,6 +2468,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         settings["_midom_prompt_expansion_source"] = str(generation.get("prompt_expansion_source") or "user_prompt").strip()[:128]
         settings["_midom_native_high_res_render"] = True
         settings["resolution"] = internal_resolution
+        custom_settings = settings.get("custom_settings")
+        if not isinstance(custom_settings, dict):
+            custom_settings = {}
+        custom_settings["sensenova_kv_cache"] = "Disabled"
+        settings["custom_settings"] = custom_settings
         options = generation.get("options") or {}
         if isinstance(options, dict):
             multi_prompts_gen_type = str(options.get("multi_prompts_gen_type") or "").strip().upper()

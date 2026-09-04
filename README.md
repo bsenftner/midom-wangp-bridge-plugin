@@ -148,7 +148,10 @@ Important image behavior:
 - For Qwen Image Layered, artifact index `0` is the source/reconstruction echo and artifact indexes `1..8` are editable decomposition layers.
 - Qwen Edit Plus control images are edit/conditioning inputs, not pure pose/depth guides. A control image with a competing subject can affect subject identity.
 - Z-Image control variants are better suited for structure/layout control from pose, depth, edge, or raw control inputs.
-- SenseNova U1.5 is optimized for high-resolution text-heavy layouts and infographics; the bridge renders lower delivery sizes through a higher-resolution internal render and center-crop/downscale adapter for text quality.
+- SenseNova U1.5 is optimized for high-resolution text-heavy layouts and infographics; the bridge renders Midom delivery sizes through a larger internal render and center-crop/downscale adapter for text quality.
+- SenseNova landscape and portrait delivery currently render internally at `5440x3072` and `3072x5440` respectively, then return the requested Midom-visible size.
+- SenseNova Midom jobs force WanGP KV Cache to `Disabled` for the current high-resolution quality/stability baseline.
+- The curated SenseNova accelerator profile uses the official 8-step accelerator LoRA with a tested 12-step Midom fast setting.
 
 Supported image output types:
 
