@@ -281,7 +281,7 @@ LTX control-video mode:
   - `ltx2_25_22B_distilled`
 - One start image.
 - One normalized control video with embedded audio.
-- No separate driving audio in the current contract.
+- Optional separate driving audio, when Midom needs explicit storyboard/card audio provenance and reliable LTX conditioning.
 - No Ending Image Target in the first control-video pass.
 - Duration is bounded by control-video audio/video duration and capped at 20 seconds.
 - Control modes:
@@ -342,6 +342,7 @@ Currently advertised operation types include:
 - `multicam_optimize_video`
 - `optimize_video`
 - `replace_video_soundtrack`
+- `segmented_media_segment_normalize`
 - `multicam_seekable_mp4`
 - `multicam_ai_video_take_prepare`
 - `mediastoryboard_card_pass_through_take`
@@ -380,6 +381,13 @@ Storyboard soundtrack replacement support includes:
 - Accepting either audio files or video containers with audio streams for `source_audio` and `soundtrack_audio`.
 - Mapping only the audio stream from video-container audio-role inputs.
 - Honoring video start offset, soundtrack start offset, requested duration, and optional head/tail silence.
+
+Segmented capture normalization support includes:
+
+- Normalizing raw browser capture segments, usually WebM, into storyboard-compatible H.264/AAC MP4.
+- Exact `1280x720` or `720x1280` output using scale-to-cover crop when requested by Midom.
+- Preserving source audio when present, with silent AAC fill when needed for compatibility.
+- Tolerating raw segmented WebM files that lack readable container duration metadata by using Midom-supplied per-input or download-header duration metadata.
 
 ## WanGP Asset Requirements
 

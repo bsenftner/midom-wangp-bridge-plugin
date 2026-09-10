@@ -2025,7 +2025,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "control_video_audio": True,
                 "control_video_audio_guided": True,
                 "control_video_portrait": True,
-                "separate_driving_audio_with_control_video": False,
+                "separate_driving_audio_with_control_video": True,
                 "control_video_modes": list(LTX_CONTROL_VIDEO_MODES.keys()),
                 "duration_modes": [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE],
                 "end_image": True,
@@ -2049,7 +2049,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "required_input_kinds": ["start_image", "driving_audio"],
                 "optional_input_kinds": ["end_image"],
                 "control_video_required_input_kinds": ["start_image", "control_video"],
-                "control_video_optional_input_kinds": [],
+                "control_video_optional_input_kinds": ["driving_audio"],
                 "max_end_images": 1,
                 "speed_profiles": [
                     {
@@ -3894,15 +3894,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"LTX control-video job requires exactly one start_image input; got {start_image_count}.")
         if control_video_count != 1:
             raise ValueError(f"LTX control-video job requires exactly one control_video input; got {control_video_count}.")
-        if driving_audio_count:
-            raise ValueError("LTX control-video jobs must not include a separate driving_audio input.")
+        if driving_audio_count > 1:
+            raise ValueError(f"LTX control-video job supports at most one driving_audio input; got {driving_audio_count}.")
         if end_image_count:
             raise ValueError("LTX control-video first pass does not support end_image inputs.")
         for item in inputs:
             if not isinstance(item, dict):
                 continue
             kind = str(item.get("kind") or "").strip()
-            if kind not in {"start_image", "control_video"}:
+            if kind not in {"start_image", "control_video", "driving_audio"}:
                 raise ValueError(f"Unsupported LTX control-video input kind: {kind}")
         settings = {
             "model_type": model_type,
@@ -3961,7 +3961,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"video_length={video_length} requested_resolution={settings.get('_midom_requested_resolution')} "
             f"internal_resolution={settings.get('resolution')} duration_mode={duration_mode!r} "
             f"speed_profile_id={speed_profile_id!r} video_sync_profile_id={video_sync_profile_id!r} "
-            f"prompt_chars={len(prompt)} start_image_count={start_image_count} control_video_count={control_video_count}."
+            f"prompt_chars={len(prompt)} start_image_count={start_image_count} "
+            f"control_video_count={control_video_count} driving_audio_count={driving_audio_count}."
         )
         return settings
 
@@ -5623,7 +5624,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         control_video_count = self._coerce_int(summary.get("control_video_count"), 1, 0, 10)
                         if control_video_count != 1:
                             return f"unsupported control_video_count: {control_video_count}"
-                        if input_audio_count != 0:
+                        if input_audio_count not in {0, 1}:
                             return f"unsupported input_audio_count: {input_audio_count}"
                     elif input_audio_count != 1:
                         return f"unsupported input_audio_count: {input_audio_count}"
@@ -8030,6 +8031,74 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 return payload.get(key)
         return None
 
+    def _storyboard_segment_duration_fallback(
+        self,
+        input_descriptor: dict[str, Any],
+        processing: dict[str, Any],
+        response_headers: Any,
+    ) -> tuple[Optional[float], str]:
+        mediaassembly_input = processing.get("mediaassembly_input")
+        if not isinstance(mediaassembly_input, dict):
+            mediaassembly_input = {}
+        candidates = [
+            ("input.source_duration_seconds", input_descriptor.get("source_duration_seconds")),
+            ("input.duration_seconds", input_descriptor.get("duration_seconds")),
+            ("processing.source_duration_seconds", processing.get("source_duration_seconds")),
+            ("processing.duration_seconds", processing.get("duration_seconds")),
+            ("processing.mediaassembly_input.source_duration_seconds", mediaassembly_input.get("source_duration_seconds")),
+            ("processing.mediaassembly_input.duration_seconds", mediaassembly_input.get("duration_seconds")),
+            ("header.X-Midom-Input-Source-Duration-Seconds", response_headers.get("X-Midom-Input-Source-Duration-Seconds") if response_headers else None),
+            ("header.X-Midom-Input-Duration-Seconds", response_headers.get("X-Midom-Input-Duration-Seconds") if response_headers else None),
+        ]
+        for source, value in candidates:
+            duration = self._optional_positive_float(value, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            if duration is not None:
+                return duration, source
+        for prefix, payload in (
+            ("input", input_descriptor),
+            ("processing", processing),
+            ("processing.mediaassembly_input", mediaassembly_input),
+        ):
+            start_value = payload.get("source_start_seconds")
+            try:
+                start = self._coerce_float(start_value, 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            except (TypeError, ValueError):
+                start = 0.0
+            end = self._optional_positive_float(payload.get("source_end_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            if start is not None and end is not None and end > start:
+                return min(MAX_STORYBOARD_VIDEO_DURATION_SECONDS, end - start), f"{prefix}.source_end_seconds-source_start_seconds"
+        if response_headers:
+            try:
+                start = self._coerce_float(
+                    response_headers.get("X-Midom-Input-Source-Start-Seconds"),
+                    0.0,
+                    0.0,
+                    MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+                )
+            except (TypeError, ValueError):
+                start = 0.0
+            end = self._optional_positive_float(response_headers.get("X-Midom-Input-Source-End-Seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            if start is not None and end is not None and end > start:
+                return min(MAX_STORYBOARD_VIDEO_DURATION_SECONDS, end - start), "header.source_end_seconds-source_start_seconds"
+        return None, ""
+
+    def _storyboard_source_audio_duration_fallback(
+        self,
+        input_descriptor: dict[str, Any],
+        response_headers: Any,
+    ) -> tuple[Optional[float], str]:
+        candidates = [
+            ("input.source_duration_seconds", input_descriptor.get("source_duration_seconds")),
+            ("input.duration_seconds", input_descriptor.get("duration_seconds")),
+            ("header.X-Midom-Input-Source-Duration-Seconds", response_headers.get("X-Midom-Input-Source-Duration-Seconds") if response_headers else None),
+            ("header.X-Midom-Input-Duration-Seconds", response_headers.get("X-Midom-Input-Duration-Seconds") if response_headers else None),
+        ]
+        for source, value in candidates:
+            duration = self._optional_positive_float(value, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            if duration is not None:
+                return duration, source
+        return None, ""
+
     def _storyboard_trim_duration(self, source_duration: float, processing: dict[str, Any], trim_start: float) -> Optional[float]:
         trim_duration = self._optional_positive_float(processing.get("trim_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
         if trim_duration is not None:
@@ -8950,7 +9019,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._log(f"Could not probe video duration; filename={path.name!r} error={exc}.")
         return None
 
-    def _probe_control_video_metadata(self, path: Path) -> dict[str, Any]:
+    def _probe_control_video_metadata(self, path: Path, *, require_audio: bool = True) -> dict[str, Any]:
         if not path.is_file():
             raise ValueError(f"Control video file is missing: {path.name}")
         command = [
@@ -9016,7 +9085,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             audio_duration = _duration_seconds(format_block)
         if video_duration <= 0:
             raise ValueError("Control video duration could not be read.")
-        if not isinstance(audio_stream, dict) or audio_duration <= 0:
+        if require_audio and (not isinstance(audio_stream, dict) or audio_duration <= 0):
             raise ValueError("LTX control-video audio-guided mode requires embedded control-video audio.")
         fps_text = str(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate") or "").strip()
         fps = 0.0
@@ -9039,7 +9108,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "fps": fps if fps > 0 else None,
         }
 
-    def _probe_event_video_metadata(self, path: Path) -> dict[str, Any]:
+    def _probe_event_video_metadata(
+        self,
+        path: Path,
+        *,
+        duration_fallback_seconds: Optional[float] = None,
+        duration_fallback_source: str = "",
+    ) -> dict[str, Any]:
         if not path.is_file():
             raise ValueError(f"Event source video file is missing: {path.name}")
         command = [
@@ -9085,8 +9160,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         rotation = self._video_rotation_degrees(video_stream)
         display_width, display_height = (height, width) if int(abs(rotation)) % 180 == 90 else (width, height)
         duration = _duration_seconds(video_stream) or _duration_seconds(format_block)
+        duration_source = "container"
         if duration <= 0:
-            raise ValueError("Event source video duration could not be read.")
+            try:
+                fallback_duration = float(duration_fallback_seconds or 0.0)
+            except (TypeError, ValueError):
+                fallback_duration = 0.0
+            if fallback_duration > 0:
+                duration = fallback_duration
+                duration_source = str(duration_fallback_source or "fallback")
+            else:
+                raise ValueError("Event source video duration could not be read.")
         audio_duration = _duration_seconds(audio_stream) if isinstance(audio_stream, dict) else 0.0
         if audio_duration <= 0 and isinstance(audio_stream, dict):
             audio_duration = _duration_seconds(format_block)
@@ -9111,6 +9195,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "display_height": display_height,
             "orientation": orientation,
             "duration_seconds": duration,
+            "duration_source": duration_source,
             "has_audio": isinstance(audio_stream, dict) and audio_duration > 0,
             "audio_duration_seconds": audio_duration,
             "video_codec": str(video_stream.get("codec_name") or "").strip().lower(),
@@ -9122,7 +9207,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "Probed Event source video; "
             f"filename={path.name!r} stored_size={width}x{height} display_size={display_width}x{display_height} "
             f"orientation={orientation} duration_seconds={duration:.2f} has_audio={metadata['has_audio']} "
-            f"rotation_degrees={rotation} fps={metadata['fps'] if metadata['fps'] is not None else 'unknown'}."
+            f"rotation_degrees={rotation} fps={metadata['fps'] if metadata['fps'] is not None else 'unknown'} "
+            f"duration_source={duration_source!r}."
         )
         return metadata
 
@@ -9142,7 +9228,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 continue
         return 0
 
-    def _probe_audio_metadata(self, path: Path) -> dict[str, Any]:
+    def _probe_audio_metadata(
+        self,
+        path: Path,
+        *,
+        duration_fallback_seconds: Optional[float] = None,
+        duration_fallback_source: str = "",
+    ) -> dict[str, Any]:
         if not path.is_file():
             raise ValueError(f"Audio file is missing: {path.name}")
         command = [
@@ -9181,6 +9273,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return value if value > 0 else 0.0
 
         duration = _duration_seconds(audio_stream) or _duration_seconds(format_block)
+        duration_source = "container"
+        if duration <= 0:
+            try:
+                fallback_duration = float(duration_fallback_seconds or 0.0)
+            except (TypeError, ValueError):
+                fallback_duration = 0.0
+            if fallback_duration > 0:
+                duration = fallback_duration
+                duration_source = str(duration_fallback_source or "fallback")
         try:
             sample_rate = int(audio_stream.get("sample_rate") or 0)
         except (TypeError, ValueError):
@@ -9189,6 +9290,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError("Audio input duration could not be read.")
         return {
             "duration_seconds": duration,
+            "duration_source": duration_source,
             "sample_rate_hz": sample_rate,
         }
 
@@ -9526,6 +9628,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         else:
             required_image_kind = "reference_image"
         requires_driving_audio = model_type != SVI_VIDEO_MODEL_ID and not is_ltx_control_video
+        optional_driving_audio = is_ltx_control_video
         requires_control_video = is_ltx_control_video
         model_label = "SVI" if model_type == SVI_VIDEO_MODEL_ID else ("LTX" if model_type in LTX_VIDEO_MODEL_IDS else "LongCat")
         reference_image_count = 0
@@ -9535,6 +9638,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._log(
             f"Downloading video job inputs; job_id={job_id} descriptors={len(inputs)} "
             f"required_{required_image_kind}=1 required_driving_audio={1 if requires_driving_audio else 0} "
+            f"optional_driving_audio={1 if optional_driving_audio else 0} "
             f"required_control_video={1 if requires_control_video else 0} "
             f"optional_end_image={1 if (model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID) and not is_ltx_control_video else 0}."
         )
@@ -9544,6 +9648,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             input_id = self._coerce_input_id(item)
             kind = str(item.get("kind") or "").strip()
             allowed_kinds = {required_image_kind, "driving_audio"} if requires_driving_audio else {required_image_kind}
+            if optional_driving_audio:
+                allowed_kinds.add("driving_audio")
             if requires_control_video:
                 allowed_kinds.add("control_video")
             if (model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID) and not is_ltx_control_video:
@@ -9611,7 +9717,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"{model_label} video job requires exactly one {required_image_kind} input; got {reference_image_count}.")
         if requires_driving_audio and driving_audio_count != 1:
             raise ValueError(f"{model_label} video job requires exactly one driving_audio input; got {driving_audio_count}.")
-        if not requires_driving_audio and driving_audio_count != 0:
+        if not requires_driving_audio and not optional_driving_audio and driving_audio_count != 0:
             raise ValueError(f"{model_label} video job does not support driving_audio inputs.")
         if requires_control_video and control_video_count != 1:
             raise ValueError(f"{model_label} control-video job requires exactly one control_video input; got {control_video_count}.")
@@ -9851,7 +9957,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 if item.get(id_key) is not None:
                     entry[id_key] = item.get(id_key)
             if category == "video":
-                metadata = self._probe_event_video_metadata(path)
+                fallback_duration = None
+                fallback_source = ""
+                if operation_type == "segmented_media_segment_normalize" and kind == "source_video":
+                    fallback_duration, fallback_source = self._storyboard_segment_duration_fallback(
+                        item,
+                        processing,
+                        response.headers,
+                    )
+                metadata = self._probe_event_video_metadata(
+                    path,
+                    duration_fallback_seconds=fallback_duration,
+                    duration_fallback_source=fallback_source,
+                )
                 duration_seconds = float(metadata.get("duration_seconds") or 0.0)
                 if duration_seconds > MAX_STORYBOARD_VIDEO_DURATION_SECONDS + 0.05:
                     raise ValueError(
@@ -9859,6 +9977,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"got {duration_seconds:.2f}s."
                     )
                 entry["metadata"] = metadata
+                if fallback_duration is not None and metadata.get("duration_source") != "container":
+                    self._log(
+                        "Using Midom supplied segmented media duration fallback; "
+                        f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
+                        f"duration_seconds={duration_seconds:.3f}."
+                    )
             elif category == "image":
                 try:
                     with Image.open(path) as image:
@@ -9874,9 +9998,26 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"decoded matte format {entry['decoded_format'] or 'unknown'} is not PNG or JPEG."
                     )
             else:
-                metadata = self._probe_audio_metadata(path)
+                fallback_duration = None
+                fallback_source = ""
+                if operation_type == "multicam_card_pass_through_take" and kind == "source_audio":
+                    fallback_duration, fallback_source = self._storyboard_source_audio_duration_fallback(
+                        item,
+                        response.headers,
+                    )
+                metadata = self._probe_audio_metadata(
+                    path,
+                    duration_fallback_seconds=fallback_duration,
+                    duration_fallback_source=fallback_source,
+                )
                 entry["metadata"] = metadata
                 entry["duration_seconds"] = float(metadata.get("duration_seconds") or 0.0)
+                if fallback_duration is not None and metadata.get("duration_source") != "container":
+                    self._log(
+                        "Using Midom supplied storyboard source-audio duration fallback; "
+                        f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
+                        f"duration_seconds={entry['duration_seconds']:.3f}."
+                    )
             downloaded.append(entry)
             self._log(
                 f"Downloaded Storyboard FFmpeg input; job_id={job_id} input_id={input_id} "
@@ -10048,6 +10189,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         requested_size: tuple[int, int],
         internal_size: tuple[int, int],
         duration_seconds: float,
+        *,
+        include_audio: bool = True,
     ) -> str:
         if requested_size == internal_size:
             return str(source_path)
@@ -10064,9 +10207,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"[bgsrc]scale={internal_size[0]}:{internal_size[1]}:force_original_aspect_ratio=increase,"
             f"crop={internal_size[0]}:{internal_size[1]},setsar=1[bg];"
             f"[fgsrc]scale={requested_size[0]}:{requested_size[1]},setsar=1[fg];"
-            f"[bg][fg]overlay={paste_x}:{paste_y},format=yuv420p[vout];"
-            "[0:a:0]aresample=48000,aformat=channel_layouts=stereo[aout]"
+            f"[bg][fg]overlay={paste_x}:{paste_y},format=yuv420p[vout]"
         )
+        if include_audio:
+            filter_complex += ";[0:a:0]aresample=48000,aformat=channel_layouts=stereo[aout]"
         command = [
             self._ffmpeg_binary(),
             "-y",
@@ -10079,8 +10223,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             filter_complex,
             "-map",
             "[vout]",
-            "-map",
-            "[aout]",
+        ]
+        if include_audio:
+            command.extend([
+                "-map",
+                "[aout]",
+            ])
+        command.extend([
             "-r",
             str(LTX_VIDEO_FPS),
             "-c:v",
@@ -10091,16 +10240,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "18",
             "-pix_fmt",
             "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
+        ])
+        if include_audio:
+            command.extend([
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+            ])
+        command.extend([
             "-movflags",
             "+faststart",
             "-metadata:s:v:0",
             "rotate=0",
             str(target_path),
-        ]
+        ])
         timeout_seconds = int(max(120, min(600, float(duration_seconds or 1.0) * 20)))
         completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout_seconds)
         if completed.returncode != 0:
@@ -10108,7 +10262,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"LTX control-video overscan preparation failed: {stderr}")
         if not target_path.is_file() or target_path.stat().st_size <= 0:
             raise ValueError("LTX control-video overscan preparation did not produce an MP4.")
-        metadata = self._probe_control_video_metadata(target_path)
+        metadata = self._probe_control_video_metadata(target_path, require_audio=include_audio)
         prepared_size = (int(metadata["width"]), int(metadata["height"]))
         if prepared_size != internal_size:
             raise ValueError(
@@ -10119,7 +10273,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "Prepared LTX overscan control video input; "
             f"source={source_path.name!r} target={target_path.name!r} "
             f"requested={requested_size[0]}x{requested_size[1]} internal={internal_size[0]}x{internal_size[1]} "
-            f"duration_seconds={metadata['video_duration_seconds']:.2f} fps={metadata['fps'] if metadata['fps'] is not None else 'unknown'}."
+            f"duration_seconds={metadata['video_duration_seconds']:.2f} fps={metadata['fps'] if metadata['fps'] is not None else 'unknown'} "
+            f"include_audio={include_audio}."
         )
         return str(target_path)
 
@@ -10237,12 +10392,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         raise ValueError(f"LTX control-video job requires exactly one start_image input; got {len(start_image_inputs)}.")
                     if len(control_video_inputs) != 1:
                         raise ValueError(f"LTX control-video job requires exactly one control_video input; got {len(control_video_inputs)}.")
-                    if driving_audio_inputs:
-                        raise ValueError(f"LTX control-video job must not include driving_audio inputs; got {len(driving_audio_inputs)}.")
+                    if len(driving_audio_inputs) > 1:
+                        raise ValueError(f"LTX control-video job supports at most one driving_audio input; got {len(driving_audio_inputs)}.")
                     if end_image_inputs:
                         raise ValueError(f"LTX control-video first pass does not support end_image inputs; got {len(end_image_inputs)}.")
                     control_path = Path(control_video_inputs[0]["path"])
-                    metadata = self._probe_control_video_metadata(control_path)
+                    has_separate_driving_audio = bool(driving_audio_inputs)
+                    metadata = self._probe_control_video_metadata(control_path, require_audio=not has_separate_driving_audio)
+                    driving_audio_metadata = None
+                    if has_separate_driving_audio:
+                        driving_audio_path = Path(driving_audio_inputs[0]["path"])
+                        driving_audio_metadata = self._probe_audio_metadata(driving_audio_path)
                     requested_size = self._ltx_requested_size(settings)
                     internal_size = self._ltx_internal_size(settings)
                     actual_control_size = (int(metadata["width"]), int(metadata["height"]))
@@ -10263,13 +10423,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         requested_size,
                         "LTX control-video start_image",
                     )
+                    audio_duration = (
+                        float(driving_audio_metadata.get("duration_seconds") or 0.0)
+                        if isinstance(driving_audio_metadata, dict)
+                        else float(metadata["audio_duration_seconds"])
+                    )
                     max_available_duration = min(
                         float(metadata["video_duration_seconds"]),
-                        float(metadata["audio_duration_seconds"]),
+                        audio_duration,
                         float(MAX_LTX_VIDEO_DURATION_SECONDS),
                     )
                     if max_available_duration < 1.0:
-                        raise ValueError("Control video must contain at least one second of overlapping video and audio.")
+                        raise ValueError("LTX control-video job must contain at least one second of overlapping video and driving audio.")
                     requested_duration = self._coerce_int(settings.get("duration_seconds"), MAX_LTX_VIDEO_DURATION_SECONDS, 1, MAX_LTX_VIDEO_DURATION_SECONDS)
                     effective_duration = max(1, min(requested_duration, int(max_available_duration)))
                     if effective_duration != requested_duration:
@@ -10292,6 +10457,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         requested_size,
                         internal_size,
                         float(metadata["video_duration_seconds"]),
+                        include_audio=not has_separate_driving_audio,
                     )
                     settings["image_start"] = [overscan_start_path]
                     settings["image_end"] = None
@@ -10301,10 +10467,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         str(Path(overscan_control_path).resolve()),
                     ]
                     settings["_midom_input_video_sha256s"] = [str(control_video_inputs[0].get("sha256") or "").strip().lower()]
-                    settings["audio_guide"] = None
+                    settings["audio_guide"] = driving_audio_inputs[0]["path"] if has_separate_driving_audio else None
                     settings["audio_guide2"] = None
                     settings["image_prompt_type"] = "S"
-                    settings["audio_prompt_type"] = "K"
+                    settings["audio_prompt_type"] = "A" if has_separate_driving_audio else "K"
                     control_mode = str(settings.get("_midom_control_video_mode") or "")
                     settings["video_prompt_type"] = LTX_CONTROL_VIDEO_MODES.get(control_mode, settings.get("video_prompt_type") or "VG")
                     self._log(
@@ -10317,6 +10483,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"internal_size={internal_size[0]}x{internal_size[1]} "
                         f"control_video_size={metadata['width']}x{metadata['height']} "
                         f"control_video_fps={metadata['fps'] if metadata['fps'] is not None else 'unknown'} "
+                        f"driving_audio_source={'separate_input' if has_separate_driving_audio else 'control_video_embedded'} "
+                        f"driving_audio={(Path(driving_audio_inputs[0]['path']).name if has_separate_driving_audio else None)!r} "
+                        f"driving_audio_duration={audio_duration:.2f} "
                         f"duration_seconds={settings.get('duration_seconds')} "
                         f"video_length={settings.get('video_length')} "
                         f"image_prompt_type={settings.get('image_prompt_type')!r} "
