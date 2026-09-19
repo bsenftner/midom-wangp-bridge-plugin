@@ -328,7 +328,7 @@ Midom remains responsible for poster generation, captions, moderation, approval,
 - Durable Storyboard FFmpeg processing for paired Midom projects.
 - Used by Multi-Camera Storyboards and Media Storyboards when Midom routes eligible operations to a paired worker.
 - Lets card-level and assembly-level video work continue after a browser tab is closed or refreshed.
-- Produces exactly one H.264/AAC MP4 artifact per job.
+- Produces one typed artifact per job. Most operations return H.264/AAC MP4; driving-audio preparation returns MP3.
 - Uses the existing claimed-job input download route and canonical `inputs[].input_id` values.
 - Validates downloaded input MIME types by input role before processing.
 - Reports progress while FFmpeg runs, applies subprocess timeouts, and terminates FFmpeg on cancellation.
@@ -343,8 +343,10 @@ Currently advertised operation types include:
 - `optimize_video`
 - `replace_video_soundtrack`
 - `segmented_media_segment_normalize`
+- `segmented_media_extract_range`
+- `prepare_control_guided_video_inputs`
+- `prepare_driving_audio`
 - `multicam_seekable_mp4`
-- `multicam_ai_video_take_prepare`
 - `mediastoryboard_card_pass_through_take`
 - `mediastoryboard_card_local_video_take`
 - `mediastoryboard_card_trim_take`
@@ -381,6 +383,7 @@ Storyboard soundtrack replacement support includes:
 - Accepting either audio files or video containers with audio streams for `source_audio` and `soundtrack_audio`.
 - Mapping only the audio stream from video-container audio-role inputs.
 - Honoring video start offset, soundtrack start offset, requested duration, and optional head/tail silence.
+- Tolerating raw segmented WebM `source_video` and `source_audio` inputs for pass-through card renders when Midom supplies per-input or download-header source duration metadata.
 
 Segmented capture normalization support includes:
 
@@ -388,6 +391,31 @@ Segmented capture normalization support includes:
 - Exact `1280x720` or `720x1280` output using scale-to-cover crop when requested by Midom.
 - Preserving source audio when present, with silent AAC fill when needed for compatibility.
 - Tolerating raw segmented WebM files that lack readable container duration metadata by using Midom-supplied per-input or download-header duration metadata.
+
+Segmented range extraction support includes:
+
+- Combining ordered raw capture segment ranges into one continuous, seekable MP4 preview.
+- Preserving source audio when present and synthesizing silence only for no-audio segments.
+- Matching Midom segment metadata to downloaded inputs by input id/dbfile id rather than download order.
+- Tolerating raw segmented WebM files that lack readable container duration metadata by using per-segment Midom timing metadata.
+
+Control-guided video input preparation support includes:
+
+- Assembling ordered `control_video_source` ranges into one normalized MP4 control video.
+- Assembling ordered `driving_audio_source` ranges independently when Midom declares a separate driving-audio artifact.
+- Returning typed artifacts: artifact index `0` role `control_video`, and optional artifact index `1` role `driving_audio`.
+- Using Midom-supplied source duration metadata for raw segmented WebM files that lack readable container duration metadata.
+- Keeping this as deterministic media preparation only; it does not call WanGP AI generation models.
+
+Driving-audio preparation support includes:
+
+- Assembling ordered `driving_audio_source` ranges into one MP3 for audio-guided video models.
+- Accepting audio files or video containers with audio streams, including raw segmented WebM captures.
+- Trimming each source with Midom-provided source-local offsets, resetting timestamps, normalizing to 48 kHz stereo, and concatenating in declared sequence.
+- Adding bounded head/tail silence once around the completed audio sequence when requested.
+- Returning one typed artifact: artifact index `0`, role `driving_audio`, MIME type `audio/mpeg`.
+- Using Midom-supplied source duration metadata for raw segmented WebM files that lack readable container duration metadata.
+- Keeping this as deterministic audio preparation only; it does not call LongCat, LTX, or any other AI generation model.
 
 ## WanGP Asset Requirements
 

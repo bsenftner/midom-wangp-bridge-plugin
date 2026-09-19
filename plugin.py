@@ -255,6 +255,65 @@ QWEN_MULTI_ANGLE_DISTANCES = {
     "full_body": "wide shot",
 }
 ALLOWED_EVENT_INPUT_KINDS = {"source_video", "overlay_png", "bumper_image"}
+CONTROL_GUIDED_INPUT_PREPARATION_OPERATION = "prepare_control_guided_video_inputs"
+CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION = "control_guided_input_preparation_v1"
+PREPARE_DRIVING_AUDIO_OPERATION = "prepare_driving_audio"
+PREPARE_DRIVING_AUDIO_CONTRACT_VERSION = "driving_audio_preparation_v1"
+PREPARE_DRIVING_AUDIO_RECIPE_KEYS = {
+    "operation_type",
+    "operation",
+    "contract_version",
+    "profile_id",
+    "editorial_duration_seconds",
+    "prepared_duration_seconds",
+    "duration_seconds",
+    "audio_codec",
+    "audio_sample_rate_hz",
+    "audio_channels",
+    "audio_bitrate",
+    "head_seconds",
+    "tail_seconds",
+    "padding_mode",
+    "outputs",
+    "artifacts",
+    "declared_artifacts",
+}
+CONTROL_GUIDED_ALLOWED_FPS = {24, 25, 30, 50, 60}
+CONTROL_GUIDED_ALLOWED_FIT_MODES = {"contain", "cover", "stretch", "content_detect_then_cover"}
+CONTROL_GUIDED_ALLOWED_VIDEO_CODECS = {"h264", "hevc", "vp9", "av1"}
+CONTROL_GUIDED_ALLOWED_PIXEL_FORMATS = {"yuv420p", "yuv420p10le"}
+CONTROL_GUIDED_ALLOWED_EMBEDDED_AUDIO = {"none", "preserve_source", "selected_soundtrack"}
+CONTROL_GUIDED_ALLOWED_AUDIO_CODECS = {"aac", "opus", "pcm_s16le"}
+CONTROL_GUIDED_ALLOWED_SAMPLE_RATES = {16000, 24000, 44100, 48000}
+CONTROL_GUIDED_ALLOWED_TAIL_AUDIO_MODES = {"silence", "extend_source", "none"}
+CONTROL_GUIDED_RECIPE_KEYS = {
+    "operation_type",
+    "operation",
+    "contract_version",
+    "profile_id",
+    "output_width",
+    "output_height",
+    "target_width",
+    "target_height",
+    "width",
+    "height",
+    "fps",
+    "fit_mode",
+    "video_codec",
+    "pixel_format",
+    "embedded_audio",
+    "audio_codec",
+    "audio_sample_rate_hz",
+    "head_seconds",
+    "tail_seconds",
+    "tail_audio_mode",
+    "editorial_duration_seconds",
+    "prepared_duration_seconds",
+    "duration_seconds",
+    "outputs",
+    "artifacts",
+    "declared_artifacts",
+}
 STORYBOARD_FFMPEG_OPERATION_TYPES = {
     "multicam_card_overlay_take",
     "multicam_card_pass_through_take",
@@ -265,8 +324,10 @@ STORYBOARD_FFMPEG_OPERATION_TYPES = {
     "optimize_video",
     "replace_video_soundtrack",
     "segmented_media_segment_normalize",
+    "segmented_media_extract_range",
+    PREPARE_DRIVING_AUDIO_OPERATION,
+    CONTROL_GUIDED_INPUT_PREPARATION_OPERATION,
     "multicam_seekable_mp4",
-    "multicam_ai_video_take_prepare",
     "mediastoryboard_card_pass_through_take",
     "mediastoryboard_card_local_video_take",
     "mediastoryboard_card_trim_take",
@@ -289,8 +350,9 @@ STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES = {
     "optimize_video",
     "replace_video_soundtrack",
     "segmented_media_segment_normalize",
+    "segmented_media_extract_range",
     "multicam_seekable_mp4",
-    "multicam_ai_video_take_prepare",
+    CONTROL_GUIDED_INPUT_PREPARATION_OPERATION,
     "mediastoryboard_card_pass_through_take",
     "mediastoryboard_card_trim_take",
     "mediastoryboard_card_edge_trim_take",
@@ -304,6 +366,7 @@ STORYBOARD_VIDEO_INPUT_KINDS = {
     "segment_video",
     "overlay_video",
     "control_video",
+    "control_video_source",
 }
 STORYBOARD_IMAGE_INPUT_KINDS = {
     "image",
@@ -320,6 +383,7 @@ STORYBOARD_AUDIO_INPUT_KINDS = {
     "source_audio",
     "soundtrack_audio",
     "driving_audio",
+    "driving_audio_source",
     "narration_audio",
 }
 ALLOWED_STORYBOARD_INPUT_KINDS = STORYBOARD_VIDEO_INPUT_KINDS | STORYBOARD_IMAGE_INPUT_KINDS | STORYBOARD_AUDIO_INPUT_KINDS
@@ -1611,7 +1675,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "max_input_bytes": MAX_EVENT_VIDEO_INPUT_BYTES,
             "max_duration_seconds": MAX_EVENT_VIDEO_DURATION_SECONDS,
             "supported_output_profiles": [EVENT_VIDEO_OUTPUT_PROFILE],
-            "output_mime_types": ["video/mp4"],
+            "output_mime_types": ["video/mp4", "audio/mpeg"],
             "input_mime_types": {
                 "source_video": source_mime_types,
                 "overlay_png": ["image/png"],
@@ -1698,6 +1762,39 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "h264_aac_mp4_faststart",
                     "silent_audio_fill",
                 ],
+                "segmented_media_extract_range": [
+                    "ordered_segment_ranges",
+                    "cross_segment_extract",
+                    "source_duration_fallback",
+                    "scale_to_cover_crop",
+                    "exact_target_dimensions",
+                    "fps_normalize",
+                    "audio_preserve_or_silence_per_segment",
+                    "h264_aac_mp4_faststart",
+                ],
+                PREPARE_DRIVING_AUDIO_OPERATION: [
+                    PREPARE_DRIVING_AUDIO_CONTRACT_VERSION,
+                    "ordered_audio_ranges",
+                    "cross_segment_audio",
+                    "source_duration_fallback",
+                    "audio_stream_validation",
+                    "mp3_48khz_stereo",
+                    "bounded_silence_padding",
+                    "typed_artifact_roles",
+                ],
+                CONTROL_GUIDED_INPUT_PREPARATION_OPERATION: [
+                    CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION,
+                    "ordered_visual_ranges",
+                    "ordered_audio_ranges",
+                    "independent_visual_audio_sequences",
+                    "source_duration_fallback",
+                    "content_detect_then_cover",
+                    "h264_aac_mp4_faststart",
+                    "selected_soundtrack",
+                    "separate_driving_audio_artifact",
+                    "silent_tail",
+                    "typed_artifact_roles",
+                ],
                 "multicam_card_local_video_take": [
                     "one_image",
                     "two_image_fade",
@@ -1715,7 +1812,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "h264_aac_mp4_faststart",
                 ],
             },
-            "output_mime_types": ["video/mp4"],
+            "output_mime_types": ["video/mp4", "audio/mpeg"],
             "input_mime_types": {
                 "video": source_mime_types,
                 "source_video": source_mime_types,
@@ -1724,6 +1821,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "card_video": source_mime_types,
                 "segment_video": source_mime_types,
                 "overlay_video": source_mime_types,
+                "control_video_source": source_mime_types,
                 "image": sorted(ALLOWED_IMAGE_MIME_TYPES),
                 "source_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
                 "overlay_image": sorted(ALLOWED_IMAGE_MIME_TYPES),
@@ -1736,7 +1834,52 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "source_audio": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
                 "soundtrack_audio": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
                 "driving_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
+                "driving_audio_source": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
                 "narration_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
+            },
+            "contracts": {
+                PREPARE_DRIVING_AUDIO_OPERATION: {
+                    "contract_version": PREPARE_DRIVING_AUDIO_CONTRACT_VERSION,
+                    "output_roles": ["driving_audio"],
+                    "required_output_roles": ["driving_audio"],
+                    "optional_output_roles": [],
+                    "output_mime_types_by_role": {
+                        "driving_audio": ["audio/mpeg"],
+                    },
+                    "recipe": {
+                        "audio_codec": ["mp3"],
+                        "audio_sample_rate_hz": [48000],
+                        "audio_channels": [2],
+                        "audio_bitrate": ["192k"],
+                        "head_seconds": {"min": 0, "max": 5},
+                        "tail_seconds": {"min": 0, "max": 5},
+                        "padding_mode": ["silence"],
+                    },
+                },
+                CONTROL_GUIDED_INPUT_PREPARATION_OPERATION: {
+                    "contract_version": CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION,
+                    "output_roles": ["control_video", "driving_audio"],
+                    "required_output_roles": ["control_video"],
+                    "optional_output_roles": ["driving_audio"],
+                    "output_mime_types_by_role": {
+                        "control_video": ["video/mp4"],
+                        "driving_audio": ["audio/mpeg", "audio/wav"],
+                    },
+                    "recipe": {
+                        "output_width": {"min": 64, "max": 4096},
+                        "output_height": {"min": 64, "max": 4096},
+                        "fps": sorted(CONTROL_GUIDED_ALLOWED_FPS),
+                        "fit_mode": sorted(CONTROL_GUIDED_ALLOWED_FIT_MODES),
+                        "video_codec": ["h264"],
+                        "pixel_format": ["yuv420p"],
+                        "embedded_audio": ["none", "selected_soundtrack"],
+                        "audio_codec": ["aac"],
+                        "audio_sample_rate_hz": sorted(CONTROL_GUIDED_ALLOWED_SAMPLE_RATES),
+                        "head_seconds": {"min": 0, "max": 5},
+                        "tail_seconds": {"min": 0, "max": 5},
+                        "tail_audio_mode": ["none", "silence"],
+                    },
+                },
             },
         }
 
@@ -2699,6 +2842,271 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             or ""
         ).strip()
 
+    def _control_guided_output_declarations(self, job: dict[str, Any], processing: dict[str, Any]) -> list[dict[str, Any]]:
+        output = job.get("output") if isinstance(job.get("output"), dict) else {}
+        declarations = None
+        for payload in (job, output, processing):
+            for key in ("artifacts", "outputs", "declared_artifacts"):
+                value = payload.get(key) if isinstance(payload, dict) else None
+                if isinstance(value, list) and value:
+                    declarations = value
+                    break
+            if declarations is not None:
+                break
+        if declarations is None:
+            output_count = self._coerce_int(output.get("count"), 1, 1, 2)
+            declarations = [
+                {"artifact_index": 0, "role": "control_video", "mime_type": "video/mp4"},
+            ]
+            if output_count == 2:
+                declarations.append({"artifact_index": 1, "role": "driving_audio", "mime_type": "audio/mpeg"})
+        parsed = []
+        seen_indexes = set()
+        seen_roles = set()
+        for index, declaration in enumerate(declarations):
+            if not isinstance(declaration, dict):
+                raise ValueError("Control-guided prepared output declarations must be JSON objects.")
+            artifact_index = self._coerce_int(declaration.get("artifact_index", declaration.get("index", index)), index, 0, 10)
+            role = str(declaration.get("role") or "").strip().lower()
+            mime_type = str(declaration.get("mime_type") or declaration.get("mime") or "").strip().lower()
+            if role not in {"control_video", "driving_audio"}:
+                raise ValueError(f"Unsupported control-guided prepared output role: {role or 'missing'}")
+            if artifact_index in seen_indexes:
+                raise ValueError(f"Duplicate control-guided prepared output artifact_index: {artifact_index}")
+            if role in seen_roles:
+                raise ValueError(f"Duplicate control-guided prepared output role: {role}")
+            if role == "control_video":
+                if artifact_index != 0:
+                    raise ValueError("Control-guided control_video output must use artifact_index 0.")
+                if mime_type not in {"", "video/mp4"}:
+                    raise ValueError(f"Control-guided control_video output must declare video/mp4; got {mime_type}.")
+                mime_type = "video/mp4"
+            elif role == "driving_audio":
+                if artifact_index != 1:
+                    raise ValueError("Control-guided driving_audio output must use artifact_index 1.")
+                if mime_type not in {"audio/mpeg", "audio/wav", "audio/x-wav", ""}:
+                    raise ValueError(f"Control-guided driving_audio output must declare audio/mpeg or audio/wav; got {mime_type}.")
+                mime_type = "audio/mpeg" if not mime_type else ("audio/wav" if mime_type == "audio/x-wav" else mime_type)
+            parsed.append({"artifact_index": artifact_index, "role": role, "mime_type": mime_type})
+            seen_indexes.add(artifact_index)
+            seen_roles.add(role)
+        parsed = sorted(parsed, key=lambda item: int(item["artifact_index"]))
+        if not parsed or parsed[0]["role"] != "control_video" or parsed[0]["artifact_index"] != 0:
+            raise ValueError("Control-guided prepared outputs must declare artifact_index 0 role=control_video.")
+        if len(parsed) > 2:
+            raise ValueError("Control-guided input preparation supports at most two output artifacts.")
+        return parsed
+
+    def _prepare_driving_audio_output_declarations(self, job: dict[str, Any], processing: dict[str, Any]) -> list[dict[str, Any]]:
+        output = job.get("output") if isinstance(job.get("output"), dict) else {}
+        declarations = None
+        for payload in (job, output, processing):
+            for key in ("artifacts", "outputs", "declared_artifacts"):
+                value = payload.get(key) if isinstance(payload, dict) else None
+                if isinstance(value, list) and value:
+                    declarations = value
+                    break
+            if declarations is not None:
+                break
+        if declarations is None:
+            declarations = [{"artifact_index": 0, "role": "driving_audio", "mime_type": "audio/mpeg"}]
+        if len(declarations) != 1 or not isinstance(declarations[0], dict):
+            raise ValueError("prepare_driving_audio must declare exactly one output artifact.")
+        declaration = declarations[0]
+        artifact_index = self._coerce_int(declaration.get("artifact_index", declaration.get("index", 0)), 0, 0, 10)
+        role = str(declaration.get("role") or "").strip().lower()
+        mime_type = str(declaration.get("mime_type") or declaration.get("mime") or "").strip().lower()
+        if not mime_type:
+            mime_types = declaration.get("mime_types")
+            if isinstance(mime_types, list) and mime_types:
+                mime_type = str(mime_types[0] or "").strip().lower()
+        if artifact_index != 0:
+            raise ValueError(f"prepare_driving_audio output must use artifact_index 0; got {artifact_index}.")
+        if role != "driving_audio":
+            raise ValueError(f"prepare_driving_audio output role must be driving_audio; got {role or 'missing'}.")
+        if mime_type not in {"", "audio/mpeg", "audio/mp3"}:
+            raise ValueError(f"prepare_driving_audio output must declare audio/mpeg; got {mime_type}.")
+        return [{"artifact_index": 0, "role": "driving_audio", "mime_type": "audio/mpeg"}]
+
+    def _validate_prepare_driving_audio_recipe(self, processing: dict[str, Any], output_declarations: list[dict[str, Any]]) -> dict[str, Any]:
+        unknown_keys = sorted(
+            key
+            for key in processing.keys()
+            if key not in PREPARE_DRIVING_AUDIO_RECIPE_KEYS
+            and not str(key).startswith("_")
+            and key not in {
+                "mediaassemblyjobid",
+                "mediaassembly_operation",
+                "storyboard_type",
+                "storyboard_id",
+                "card_id",
+                "take_id",
+                "options",
+                "mediaassembly_input",
+            }
+        )
+        if unknown_keys:
+            raise ValueError(f"Unsupported prepare_driving_audio field(s): {', '.join(unknown_keys)}")
+        contract_version = str(processing.get("contract_version") or PREPARE_DRIVING_AUDIO_CONTRACT_VERSION).strip()
+        if contract_version != PREPARE_DRIVING_AUDIO_CONTRACT_VERSION:
+            raise ValueError(f"Unsupported prepare_driving_audio contract_version: {contract_version}")
+        if output_declarations != [{"artifact_index": 0, "role": "driving_audio", "mime_type": "audio/mpeg"}]:
+            raise ValueError("prepare_driving_audio requires artifact_index 0 role=driving_audio mime_type=audio/mpeg.")
+        audio_codec = str(processing.get("audio_codec") or "mp3").strip().lower()
+        if audio_codec not in {"mp3", "mpeg", "audio/mpeg"}:
+            raise ValueError(f"prepare_driving_audio supports only MP3 output; got audio_codec={audio_codec!r}.")
+        sample_rate = self._coerce_int(processing.get("audio_sample_rate_hz"), 48000, 1, 192000)
+        if sample_rate != 48000:
+            raise ValueError(f"prepare_driving_audio supports only 48000 Hz output; got {sample_rate}.")
+        channels = self._coerce_int(processing.get("audio_channels"), 2, 1, 8)
+        if channels != 2:
+            raise ValueError(f"prepare_driving_audio supports only stereo output; got {channels} channel(s).")
+        bitrate = str(processing.get("audio_bitrate") or "192k").strip().lower()
+        if bitrate != "192k":
+            raise ValueError(f"prepare_driving_audio supports only audio_bitrate=192k; got {bitrate!r}.")
+        head_seconds = self._coerce_float(processing.get("head_seconds"), 0.0, 0.0, 5.0)
+        tail_seconds = self._coerce_float(processing.get("tail_seconds"), 0.0, 0.0, 5.0)
+        padding_mode = str(processing.get("padding_mode") or "silence").strip().lower()
+        if padding_mode != "silence":
+            raise ValueError(f"prepare_driving_audio supports only silence padding; got {padding_mode!r}.")
+        editorial_duration = self._optional_positive_float(
+            self._first_present(processing, "editorial_duration_seconds", "duration_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        return {
+            "operation_type": PREPARE_DRIVING_AUDIO_OPERATION,
+            "contract_version": contract_version,
+            "profile_id": str(processing.get("profile_id") or "audio_guided_driving_audio_mp3_v1").strip(),
+            "editorial_duration_seconds": editorial_duration,
+            "audio_codec": "mp3",
+            "audio_sample_rate_hz": 48000,
+            "audio_channels": 2,
+            "audio_bitrate": "192k",
+            "head_seconds": head_seconds,
+            "tail_seconds": tail_seconds,
+            "padding_mode": "silence",
+        }
+
+    def _validate_control_guided_recipe(self, processing: dict[str, Any], output_declarations: list[dict[str, Any]]) -> dict[str, Any]:
+        unknown_keys = sorted(
+            key
+            for key in processing.keys()
+            if key not in CONTROL_GUIDED_RECIPE_KEYS
+            and not str(key).startswith("_")
+            and key not in {
+                "mediaassemblyjobid",
+                "mediaassembly_operation",
+                "storyboard_type",
+                "storyboard_id",
+                "card_id",
+                "take_id",
+                "options",
+                "mediaassembly_input",
+            }
+        )
+        if unknown_keys:
+            raise ValueError(f"Unsupported control-guided input preparation field(s): {', '.join(unknown_keys)}")
+        contract_version = str(processing.get("contract_version") or CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION).strip()
+        if contract_version != CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION:
+            raise ValueError(f"Unsupported control-guided input preparation contract_version: {contract_version}")
+        output_width = self._coerce_int(
+            self._first_present(processing, "output_width", "target_width", "width"),
+            0,
+            64,
+            4096,
+        )
+        output_height = self._coerce_int(
+            self._first_present(processing, "output_height", "target_height", "height"),
+            0,
+            64,
+            4096,
+        )
+        fps = self._coerce_int(processing.get("fps"), 30, 1, 240)
+        if fps not in CONTROL_GUIDED_ALLOWED_FPS:
+            raise ValueError(f"Unsupported control-guided input preparation fps: {fps}")
+        fit_mode = str(processing.get("fit_mode") or "content_detect_then_cover").strip().lower()
+        if fit_mode not in CONTROL_GUIDED_ALLOWED_FIT_MODES:
+            raise ValueError(f"Unsupported control-guided input preparation fit_mode: {fit_mode}")
+        video_codec = str(processing.get("video_codec") or "h264").strip().lower()
+        if video_codec not in CONTROL_GUIDED_ALLOWED_VIDEO_CODECS:
+            raise ValueError(f"Unsupported control-guided input preparation video_codec: {video_codec}")
+        if video_codec != "h264":
+            raise ValueError("Control-guided input preparation first pass supports video_codec=h264 only.")
+        pixel_format = str(processing.get("pixel_format") or "yuv420p").strip().lower()
+        if pixel_format not in CONTROL_GUIDED_ALLOWED_PIXEL_FORMATS:
+            raise ValueError(f"Unsupported control-guided input preparation pixel_format: {pixel_format}")
+        if pixel_format != "yuv420p":
+            raise ValueError("Control-guided input preparation first pass supports pixel_format=yuv420p only.")
+        embedded_audio = str(processing.get("embedded_audio") or "selected_soundtrack").strip().lower()
+        if embedded_audio not in CONTROL_GUIDED_ALLOWED_EMBEDDED_AUDIO:
+            raise ValueError(f"Unsupported control-guided input preparation embedded_audio: {embedded_audio}")
+        if embedded_audio == "preserve_source":
+            raise ValueError("Control-guided input preparation first pass supports embedded_audio=none or selected_soundtrack.")
+        audio_codec = str(processing.get("audio_codec") or "aac").strip().lower()
+        if audio_codec not in CONTROL_GUIDED_ALLOWED_AUDIO_CODECS:
+            raise ValueError(f"Unsupported control-guided input preparation audio_codec: {audio_codec}")
+        if audio_codec != "aac":
+            raise ValueError("Control-guided input preparation first pass supports audio_codec=aac for embedded MP4 audio.")
+        sample_rate = self._coerce_int(processing.get("audio_sample_rate_hz"), 48000, 1, 192000)
+        if sample_rate not in CONTROL_GUIDED_ALLOWED_SAMPLE_RATES:
+            raise ValueError(f"Unsupported control-guided input preparation audio_sample_rate_hz: {sample_rate}")
+        head_seconds = self._coerce_float(processing.get("head_seconds"), 0.0, 0.0, 5.0)
+        tail_seconds = self._coerce_float(processing.get("tail_seconds"), 0.0, 0.0, 5.0)
+        tail_audio_mode = str(processing.get("tail_audio_mode") or ("silence" if tail_seconds > 0 else "none")).strip().lower()
+        if tail_audio_mode not in CONTROL_GUIDED_ALLOWED_TAIL_AUDIO_MODES:
+            raise ValueError(f"Unsupported control-guided input preparation tail_audio_mode: {tail_audio_mode}")
+        if tail_audio_mode == "extend_source":
+            raise ValueError("Control-guided input preparation first pass supports tail_audio_mode=none or silence.")
+        has_driving_audio_output = any(item["role"] == "driving_audio" for item in output_declarations)
+        if embedded_audio == "selected_soundtrack" and not has_driving_audio_output:
+            # The embedded MP4 can still contain selected audio without a separate artifact, but the first Midom profile
+            # declares both outputs when it wants the later LTX generation step to use separate driving audio.
+            pass
+        return {
+            "contract_version": contract_version,
+            "profile_id": str(processing.get("profile_id") or "control_guided_ltx_v1").strip(),
+            "output_width": output_width,
+            "output_height": output_height,
+            "fps": fps,
+            "fit_mode": fit_mode,
+            "video_codec": video_codec,
+            "pixel_format": pixel_format,
+            "embedded_audio": embedded_audio,
+            "audio_codec": audio_codec,
+            "audio_sample_rate_hz": sample_rate,
+            "head_seconds": head_seconds,
+            "tail_seconds": tail_seconds,
+            "tail_audio_mode": tail_audio_mode,
+            "editorial_duration_seconds": self._optional_positive_float(processing.get("editorial_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS),
+            "prepared_duration_seconds": self._optional_positive_float(processing.get("prepared_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS),
+        }
+
+    def _validate_control_guided_source_descriptors(self, inputs: list[dict[str, Any]], recipe: dict[str, Any], output_declarations: list[dict[str, Any]]) -> None:
+        visual_count = sum(1 for item in inputs if str(item.get("kind") or "").strip() == "control_video_source")
+        audio_count = sum(1 for item in inputs if str(item.get("kind") or "").strip() == "driving_audio_source")
+        if visual_count < 1:
+            raise ValueError("Control-guided input preparation requires at least one control_video_source input.")
+        requires_audio = recipe["embedded_audio"] == "selected_soundtrack" or any(item["role"] == "driving_audio" for item in output_declarations)
+        if requires_audio and audio_count < 1:
+            raise ValueError("Control-guided input preparation requires driving_audio_source input(s) for selected soundtrack output.")
+        for item in inputs:
+            kind = str(item.get("kind") or "").strip()
+            if kind not in {"control_video_source", "driving_audio_source"}:
+                raise ValueError(f"Unsupported control-guided input preparation input kind: {kind}")
+            self._coerce_input_id(item)
+            self._coerce_int(item.get("sequence", item.get("order", 0)), 0, 0, 100_000)
+            duration = self._optional_positive_float(item.get("source_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            start = self._coerce_float(item.get("source_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            end = self._optional_positive_float(item.get("source_end_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            if duration is None:
+                duration = self._optional_positive_float(item.get("duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+            if end is not None and end <= start:
+                raise ValueError(f"Control-guided input {item.get('input_id')} source_end_seconds must be after source_start_seconds.")
+            if duration is not None and start > duration + 0.05:
+                raise ValueError(f"Control-guided input {item.get('input_id')} source_start_seconds exceeds source_duration_seconds.")
+            if duration is not None and end is not None and end > duration + 0.05:
+                raise ValueError(f"Control-guided input {item.get('input_id')} source_end_seconds exceeds source_duration_seconds.")
+
     def _validate_event_video_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
         family = str(job.get("family") or "").strip().lower()
         if family != "media_processing":
@@ -2791,7 +3199,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_processing_family": "media_processing",
             "_midom_processing_task": EVENT_VIDEO_PROCESSING_TASK,
             "_midom_processor_id": EVENT_VIDEO_PROCESSOR_ID,
-            "_midom_output_count": 1,
+            "_midom_output_count": output_count,
             "_midom_output_format": "mp4",
             "_midom_output_mime_type": "video/mp4",
             "_midom_output_profile": output_profile,
@@ -2830,10 +3238,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             output_count = int(output.get("count") or 1)
         except (TypeError, ValueError):
             raise ValueError(f"Unsupported storyboard output count: {output.get('count')}")
-        if output_count != 1:
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            if output_count != 1:
+                raise ValueError(f"Unsupported prepare_driving_audio output count: {output_count}")
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            if output_count not in {1, 2}:
+                raise ValueError(f"Unsupported control-guided input preparation output count: {output_count}")
+        elif output_count != 1:
             raise ValueError(f"Unsupported storyboard output count: {output_count}")
         output_format = str(output.get("format") or "mp4").strip().lower()
-        if output_format != "mp4":
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
+                raise ValueError(f"Unsupported prepare_driving_audio output format: {output_format}")
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            if output_format not in {"", "mp4", "mixed"}:
+                raise ValueError(f"Unsupported control-guided input preparation output format: {output_format}")
+        elif output_format != "mp4":
             raise ValueError(f"Unsupported storyboard output format: {output_format}")
         processing = job.get("processing") or {}
         if not isinstance(processing, dict):
@@ -2849,8 +3269,20 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             **(nested_operation_payload if isinstance(nested_operation_payload, dict) else {}),
             **{key: value for key, value in processing.items() if key != "operation_payload"},
         }
+        output_declarations: list[dict[str, Any]] = []
+        control_guided_recipe: dict[str, Any] = {}
+        prepare_driving_audio_recipe: dict[str, Any] = {}
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            output_declarations = self._prepare_driving_audio_output_declarations(job, processing)
+            prepare_driving_audio_recipe = self._validate_prepare_driving_audio_recipe(processing, output_declarations)
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            output_declarations = self._control_guided_output_declarations(job, processing)
+            control_guided_recipe = self._validate_control_guided_recipe(processing, output_declarations)
         width = self._coerce_int(output.get("width") or processing.get("target_width") or processing.get("output_width") or processing.get("width"), 0, 0, 4096)
         height = self._coerce_int(output.get("height") or processing.get("target_height") or processing.get("output_height") or processing.get("height"), 0, 0, 4096)
+        if operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            width = int(control_guided_recipe["output_width"])
+            height = int(control_guided_recipe["output_height"])
         if (width == 0) != (height == 0):
             raise ValueError("Storyboard output width and height must be supplied together.")
         trim_start = self._coerce_float(
@@ -2898,7 +3330,24 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 audio_count += 1
                 if kind == "scene_audio":
                     scene_audio_count += 1
-        if operation_type == "multicam_final_assembly":
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            driving_source_count = sum(1 for item in inputs if str(item.get("kind") or "").strip() == "driving_audio_source")
+            if video_count or image_count:
+                raise ValueError("prepare_driving_audio does not accept video or image inputs.")
+            if driving_source_count < 1 or audio_count != driving_source_count:
+                raise ValueError(
+                    "prepare_driving_audio requires one or more driving_audio_source inputs and no other audio kinds; "
+                    f"got driving_audio_source={driving_source_count}, audio_inputs={audio_count}."
+                )
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            self._validate_control_guided_source_descriptors(inputs, control_guided_recipe, output_declarations)
+            if image_count:
+                raise ValueError("Control-guided input preparation does not accept image inputs.")
+            control_source_count = sum(1 for item in inputs if str(item.get("kind") or "").strip() == "control_video_source")
+            driving_source_count = sum(1 for item in inputs if str(item.get("kind") or "").strip() == "driving_audio_source")
+            video_count = control_source_count
+            audio_count = driving_source_count
+        elif operation_type == "multicam_final_assembly":
             if video_count < 1:
                 raise ValueError("Storyboard final assembly requires at least one video input.")
         elif operation_type == "replace_video_soundtrack":
@@ -2917,6 +3366,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             resize_mode = str(processing.get("resize_mode") or "scale_to_cover_crop").strip().lower()
             if resize_mode not in {"scale_to_cover_crop", "cover", "crop"}:
                 raise ValueError(f"Unsupported segmented media segment resize_mode: {resize_mode}")
+        elif operation_type == "segmented_media_extract_range":
+            if video_count < 1 or source_video_count != video_count:
+                raise ValueError(
+                    "Storyboard segmented_media_extract_range requires one or more source_video inputs; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}."
+                )
+            if width <= 0 or height <= 0:
+                raise ValueError("Storyboard segmented_media_extract_range requires target_width and target_height.")
+            segments = processing.get("segments")
+            if not isinstance(segments, list) or not segments:
+                raise ValueError("Storyboard segmented_media_extract_range requires processing.segments.")
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
                 raise ValueError(f"Unsupported storyboard local video take render_mode: {render_mode or 'missing'}")
@@ -2975,15 +3435,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
             "_midom_processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
             "_midom_operation_type": operation_type,
-            "_midom_output_count": 1,
-            "_midom_output_format": "mp4",
-            "_midom_output_mime_type": "video/mp4",
+            "_midom_output_count": output_count,
+            "_midom_output_format": "mp3" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "mp4",
+            "_midom_output_mime_type": "audio/mpeg" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "video/mp4",
             "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), MAX_STORYBOARD_VIDEO_OUTPUT_BYTES, 1, MAX_STORYBOARD_VIDEO_OUTPUT_BYTES),
+            "_midom_output_declarations": output_declarations,
+            "_midom_control_guided_recipe": control_guided_recipe,
+            "_midom_prepare_driving_audio_recipe": prepare_driving_audio_recipe,
             "_midom_processing": {
                 **processing,
+                **prepare_driving_audio_recipe,
+                **control_guided_recipe,
                 "operation_type": operation_type,
                 "output_width": width,
                 "output_height": height,
+                "target_filename": Path(str(job.get("target_filename") or processing.get("target_filename") or "")).name,
                 "trim_start_seconds": trim_start,
                 "trim_duration_seconds": trim_duration,
                 "trim_end_seconds": trim_end,
@@ -4459,6 +4925,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             metadata["video_delivery_adapter"] = str(settings.get("_midom_ltx_delivery_adapter") or "")
             metadata["requested_resolution"] = str(settings.get("_midom_requested_resolution") or "")
             metadata["internal_render_resolution"] = str(settings.get("_midom_ltx_internal_resolution") or settings.get("resolution") or "")
+        if str(settings.get("_midom_video_task") or "").strip().lower() == "control_video_guided_video":
+            metadata["control_video_input_id"] = self._coerce_int(settings.get("_midom_control_video_input_id"), 0, 0, 2_147_483_647)
+            metadata["control_video_source_sha256"] = str(settings.get("_midom_control_video_source_sha256") or "")
+            metadata["control_video_guide_sha256"] = str(settings.get("_midom_control_video_guide_sha256") or "")
+            metadata["control_video_mode"] = str(settings.get("_midom_control_video_mode") or "")
+            metadata["separate_driving_audio"] = bool(settings.get("audio_guide"))
+            if settings.get("_midom_driving_audio_input_id"):
+                metadata["driving_audio_input_id"] = self._coerce_int(settings.get("_midom_driving_audio_input_id"), 0, 0, 2_147_483_647)
+            if settings.get("_midom_driving_audio_sha256"):
+                metadata["driving_audio_sha256"] = str(settings.get("_midom_driving_audio_sha256") or "")
         return metadata
 
     def create_ui(self, api_session):
@@ -5703,7 +6179,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or EVENT_VIDEO_PROCESSOR_ID).strip()
         if processor_id != EVENT_VIDEO_PROCESSOR_ID:
             return f"unsupported processor_id: {processor_id}"
-        output_format = str(summary.get("output_format") or summary.get("format") or "mp4").strip().lower()
+        default_output_format = "mp3" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "mp4"
+        output_format = str(summary.get("output_format") or summary.get("format") or default_output_format).strip().lower()
         if output_format != "mp4":
             return f"unsupported event video output_format: {output_format}"
         output_profile = str(summary.get("output_profile") or summary.get("profile") or EVENT_VIDEO_OUTPUT_PROFILE).strip()
@@ -5750,13 +6227,25 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if processor_id not in {"", *STORYBOARD_FFMPEG_PROCESSOR_IDS}:
             return f"unsupported storyboard processor_id: {processor_id}"
         output_format = str(summary.get("output_format") or summary.get("format") or "mp4").strip().lower()
-        if output_format != "mp4":
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
+                return f"unsupported prepare_driving_audio output_format: {output_format}"
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            if output_format not in {"", "mp4", "mixed"}:
+                return f"unsupported control-guided output_format: {output_format}"
+        elif output_format != "mp4":
             return f"unsupported storyboard output_format: {output_format}"
         try:
             output_count = int(summary.get("output_count") or 1)
         except (TypeError, ValueError):
             return f"invalid storyboard output_count: {summary.get('output_count')}"
-        if output_count != 1:
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            if output_count != 1:
+                return f"unsupported prepare_driving_audio output_count: {output_count}"
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            if output_count not in {1, 2}:
+                return f"unsupported control-guided output_count: {output_count}"
+        elif output_count != 1:
             return f"unsupported storyboard output_count: {output_count}"
         video_count = self._coerce_int(
             summary.get("video_input_count", summary.get("source_video_count", summary.get("input_video_count"))),
@@ -5764,7 +6253,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             0,
             100,
         )
-        if operation_type == "multicam_final_assembly":
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            driving_source_count = self._coerce_int(summary.get("driving_audio_source_count", summary.get("audio_input_count")), 0, 0, 100)
+            if driving_source_count < 1:
+                return "prepare_driving_audio requires driving_audio_source inputs"
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            control_source_count = self._coerce_int(summary.get("control_video_source_count"), video_count, 0, 100)
+            driving_source_count = self._coerce_int(summary.get("driving_audio_source_count", summary.get("audio_input_count")), 0, 0, 100)
+            if control_source_count < 1:
+                return "prepare_control_guided_video_inputs requires control_video_source inputs"
+            if output_count == 2 and driving_source_count < 1:
+                return "prepare_control_guided_video_inputs requires driving_audio_source inputs when output_count=2"
+        elif operation_type == "multicam_final_assembly":
             if video_count < 1:
                 return "final assembly requires video inputs"
         elif operation_type == "replace_video_soundtrack":
@@ -5783,6 +6283,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             resize_mode = str(candidate.get("resize_mode") or processing.get("resize_mode") or summary.get("resize_mode") or "scale_to_cover_crop").strip().lower()
             if resize_mode not in {"scale_to_cover_crop", "cover", "crop"}:
                 return f"segmented_media_segment_normalize unsupported resize_mode: {resize_mode}"
+        elif operation_type == "segmented_media_extract_range":
+            source_video_count = self._coerce_int(summary.get("source_video_count"), video_count, 0, 100)
+            if video_count < 1 or source_video_count != video_count:
+                return (
+                    "segmented_media_extract_range requires one or more source_video inputs; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}"
+                )
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             render_mode = str(
                 candidate.get("render_mode") or processing.get("render_mode") or summary.get("render_mode") or ""
@@ -6034,9 +6541,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             {"reason": "cancel_requested", "message": f"{processing_metadata.get('processing_task', 'Media processing')} was cancelled."},
                         )
                         return
-                    artifact = self._upload_video_artifact(connection, job_id, output_path, 0, settings)
+                    if isinstance(output_path, list):
+                        artifacts = [
+                            self._upload_media_processing_artifact(connection, job_id, artifact_info, settings)
+                            for artifact_info in output_path
+                        ]
+                    else:
+                        artifact = self._upload_video_artifact(connection, job_id, output_path, 0, settings)
+                        artifacts = [artifact]
                     complete_payload = {
-                        "artifacts": [artifact],
+                        "artifacts": artifacts,
                         "backend": "ffmpeg",
                         "model_id": processor_id,
                         "processor_id": processor_id,
@@ -6351,13 +6865,31 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         downloaded_inputs: list[dict[str, Any]],
         temp_dir: str,
         process_handle: LocalProcessJob,
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[Any, dict[str, Any]]:
         processing = settings.get("_midom_processing") or {}
         operation_type = str(settings.get("_midom_operation_type") or "").strip()
         video_inputs = self._storyboard_video_inputs(downloaded_inputs)
         image_inputs = self._storyboard_image_inputs(downloaded_inputs)
         audio_inputs = self._storyboard_audio_inputs(downloaded_inputs)
         render_mode = str(processing.get("render_mode") or "").strip().lower()
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            output_artifacts, result_metadata = self._run_prepare_driving_audio_job(
+                connection,
+                job_id,
+                settings,
+                downloaded_inputs,
+                temp_dir,
+                process_handle,
+                progress_start=5,
+                progress_end=95,
+            )
+            self._set_active_job_status(
+                phase="uploading",
+                status="Driving audio preparation finished; uploading prepared MP3.",
+                progress=96,
+            )
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+            return output_artifacts, result_metadata
         if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             if render_mode == "voice_over_video":
                 if not video_inputs:
@@ -6371,13 +6903,31 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if not video_inputs:
                 raise ValueError("Storyboard FFmpeg Processing requires at least one video input.")
             output_width, output_height = self._storyboard_output_size(video_inputs[0], processing)
-        final_output = Path(temp_dir) / "storyboard-processed.mp4"
+        final_output = self._storyboard_target_output_path(temp_dir, processing)
         self._set_active_job_status(
             phase="processing",
             status=f"Running storyboard FFmpeg operation {operation_type}.",
             progress=3,
         )
         self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        if operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            output_artifacts, result_metadata = self._run_control_guided_input_preparation_job(
+                connection,
+                job_id,
+                settings,
+                downloaded_inputs,
+                temp_dir,
+                process_handle,
+                progress_start=5,
+                progress_end=95,
+            )
+            self._set_active_job_status(
+                phase="uploading",
+                status="Control-guided input preparation finished; uploading prepared artifacts.",
+                progress=96,
+            )
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+            return output_artifacts, result_metadata
         if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             if render_mode == "voice_over_video":
                 primary = self._storyboard_primary_video_input(video_inputs)
@@ -6485,6 +7035,45 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 progress_end=95,
                 status="Normalizing segmented media segment for storyboard use.",
             )
+        elif operation_type == "segmented_media_extract_range":
+            ordered_inputs = self._storyboard_ordered_extract_range_inputs(video_inputs, processing)
+            segment_paths = []
+            progress_cursor = 5
+            progress_span = max(1, 75 // max(1, len(ordered_inputs)))
+            total_seconds = 0.0
+            for index, video_input in enumerate(ordered_inputs):
+                segment_output = Path(temp_dir) / f"segmented-range-part-{index}.mp4"
+                segment_end = min(80, progress_cursor + progress_span)
+                segment_processing = self._storyboard_extract_range_segment_processing(video_input, processing, index)
+                segment_duration = self._storyboard_effective_segment_duration(video_input, segment_processing)
+                total_seconds += segment_duration
+                self._run_storyboard_segment_extract_ffmpeg(
+                    connection,
+                    job_id,
+                    video_input,
+                    segment_output,
+                    output_width,
+                    output_height,
+                    process_handle,
+                    processing=segment_processing,
+                    progress_start=progress_cursor,
+                    progress_end=segment_end,
+                    status=f"Extracting segmented preview part {index + 1} of {len(ordered_inputs)}.",
+                )
+                segment_paths.append(segment_output)
+                progress_cursor = min(81, segment_end + 1)
+            self._concat_event_video_segments(
+                connection,
+                job_id,
+                segment_paths,
+                final_output,
+                total_seconds,
+                process_handle,
+                progress_start=82,
+                progress_end=95,
+                status="Assembling segmented preview MP4.",
+            )
+            video_inputs = ordered_inputs
         elif operation_type == "replace_video_soundtrack":
             primary = self._storyboard_primary_video_input(video_inputs)
             soundtrack_input = self._storyboard_audio_input(downloaded_inputs)
@@ -6555,10 +7144,621 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         }
         if operation_type == "multicam_final_assembly":
             result_metadata["segment_count"] = len(video_inputs)
+        if operation_type == "segmented_media_extract_range":
+            result_metadata["segment_count"] = len(video_inputs)
+            result_metadata["track_key"] = str(processing.get("track_key") or "")
+            result_metadata["start_seconds"] = self._coerce_float(processing.get("start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
         if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             result_metadata["render_mode"] = str(processing.get("render_mode") or "").strip().lower()
             result_metadata["local_take_image_count"] = len(image_inputs)
         return str(final_output), result_metadata
+
+    def _run_prepare_driving_audio_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+        *,
+        progress_start: int,
+        progress_end: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        processing = settings.get("_midom_processing") or {}
+        output_declarations = list(settings.get("_midom_output_declarations") or [])
+        if not output_declarations:
+            output_declarations = self._prepare_driving_audio_output_declarations({"output": {"count": 1}}, processing)
+        recipe = settings.get("_midom_prepare_driving_audio_recipe") if isinstance(settings.get("_midom_prepare_driving_audio_recipe"), dict) else {}
+        audio_inputs = self._control_guided_ordered_inputs(downloaded_inputs, "driving_audio_source")
+        if not audio_inputs:
+            raise ValueError("prepare_driving_audio requires downloaded driving_audio_source inputs.")
+        editorial_duration = self._optional_positive_float(recipe.get("editorial_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if editorial_duration is None:
+            editorial_duration = sum(duration for _start, duration in (self._control_guided_source_range(item) for item in audio_inputs))
+        head_seconds = self._coerce_float(recipe.get("head_seconds"), 0.0, 0.0, 5.0)
+        tail_seconds = self._coerce_float(recipe.get("tail_seconds"), 0.0, 0.0, 5.0)
+        prepared_duration = float(editorial_duration or 0.0) + head_seconds + tail_seconds
+        artifact = output_declarations[0]
+        output_path = Path(temp_dir) / "prepared-driving-audio.mp3"
+        self._log(
+            "Preparing driving audio; "
+            f"job_id={job_id} operation={PREPARE_DRIVING_AUDIO_OPERATION} "
+            f"contract_version={PREPARE_DRIVING_AUDIO_CONTRACT_VERSION} "
+            f"ordered_input_ids={[int(item.get('input_id') or 0) for item in audio_inputs]} "
+            f"head_seconds={head_seconds:.3f} tail_seconds={tail_seconds:.3f}."
+        )
+        self._run_control_guided_audio_assembly_ffmpeg(
+            connection,
+            job_id,
+            audio_inputs,
+            output_path,
+            float(editorial_duration or 0.0),
+            head_seconds,
+            tail_seconds,
+            "silence",
+            process_handle,
+            processing={**processing, **recipe, "audio_sample_rate_hz": 48000, "audio_bitrate": "192k"},
+            output_mime_type="audio/mpeg",
+            progress_start=progress_start,
+            progress_end=progress_end,
+            status="Preparing driving audio MP3.",
+        )
+        audio_metadata = self._validate_prepare_driving_audio_output(
+            output_path,
+            expected_duration=prepared_duration,
+            max_bytes=MAX_AUDIO_BYTES,
+        )
+        audio_ranges = []
+        for index, item in enumerate(audio_inputs):
+            start, duration = self._control_guided_source_range(item)
+            audio_ranges.append({
+                "input_id": int(item.get("input_id") or 0),
+                "sequence": self._coerce_int(item.get("sequence", item.get("order", index)), index, 0, 100_000),
+                "source_start_seconds": float(start),
+                "source_end_seconds": float(start + duration),
+                "source_duration_seconds": self._control_guided_source_duration_seconds(item),
+                "selected_duration_seconds": float(duration),
+                "sha256": str(item.get("sha256") or ""),
+                "duration_source": str((item.get("metadata") or {}).get("duration_source") or ""),
+            })
+        with output_path.open("rb") as reader:
+            output_sha256 = hashlib.sha256(reader.read()).hexdigest()
+        self._log(
+            "Prepared driving audio output; "
+            f"job_id={job_id} duration_seconds={float(audio_metadata.get('duration_seconds') or 0.0):.3f} "
+            f"sha256={output_sha256[:12]}... artifact_index=0 role='driving_audio' mime_type='audio/mpeg'."
+        )
+        return [
+            {
+                "path": str(output_path),
+                "artifact_index": int(artifact["artifact_index"]),
+                "role": "driving_audio",
+                "mime_type": "audio/mpeg",
+                "metadata": audio_metadata,
+            }
+        ], {
+            "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+            "processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+            "operation_type": PREPARE_DRIVING_AUDIO_OPERATION,
+            "contract_version": PREPARE_DRIVING_AUDIO_CONTRACT_VERSION,
+            "profile_id": str(recipe.get("profile_id") or "audio_guided_driving_audio_mp3_v1"),
+            "ffmpeg_encoder": "libmp3lame",
+            "ffmpeg_version": self._ffmpeg_version_string(),
+            "output_duration_seconds": float(audio_metadata.get("duration_seconds") or prepared_duration),
+            "audio_codec": "mp3",
+            "audio_sample_rate_hz": self._coerce_int(audio_metadata.get("sample_rate_hz"), 48000, 1, 192000),
+            "audio_channels": 2,
+            "audio_bitrate": "192k",
+            "head_seconds": head_seconds,
+            "tail_seconds": tail_seconds,
+            "padding_mode": "silence",
+            "audio_source_ranges": audio_ranges,
+            "source_duration_fallback_used": any(
+                str((item.get("metadata") or {}).get("duration_source") or "container") != "container"
+                for item in audio_inputs
+            ),
+            "artifact_roles": [{"artifact_index": 0, "role": "driving_audio", "mime_type": "audio/mpeg"}],
+            "output_sha256": output_sha256,
+            "worker_id": connection.worker_id,
+        }
+
+    def _run_control_guided_input_preparation_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+        *,
+        progress_start: int,
+        progress_end: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        processing = settings.get("_midom_processing") or {}
+        output_declarations = list(settings.get("_midom_output_declarations") or [])
+        if not output_declarations:
+            output_declarations = self._control_guided_output_declarations({"output": {"count": 1}}, processing)
+        output_width = self._coerce_int(processing.get("output_width"), 0, 64, 4096)
+        output_height = self._coerce_int(processing.get("output_height"), 0, 64, 4096)
+        fps = self._coerce_int(processing.get("fps"), 30, 1, 240)
+        head_seconds = self._coerce_float(processing.get("head_seconds"), 0.0, 0.0, 5.0)
+        tail_seconds = self._coerce_float(processing.get("tail_seconds"), 0.0, 0.0, 5.0)
+        embedded_audio = str(processing.get("embedded_audio") or "selected_soundtrack").strip().lower()
+        tail_audio_mode = str(processing.get("tail_audio_mode") or ("silence" if tail_seconds > 0 else "none")).strip().lower()
+        if embedded_audio == "preserve_source":
+            raise ValueError("Control-guided input preparation first pass does not support embedded_audio=preserve_source.")
+        if tail_audio_mode == "extend_source":
+            raise ValueError("Control-guided input preparation first pass supports tail_audio_mode=silence or none.")
+        visual_inputs = self._control_guided_ordered_inputs(downloaded_inputs, "control_video_source")
+        audio_inputs = self._control_guided_ordered_inputs(downloaded_inputs, "driving_audio_source")
+        if not visual_inputs:
+            raise ValueError("Control-guided input preparation requires downloaded control_video_source inputs.")
+        visual_ranges = [self._control_guided_source_range(item) for item in visual_inputs]
+        editorial_duration = self._optional_positive_float(processing.get("editorial_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if editorial_duration is None:
+            editorial_duration = sum(duration for _start, duration in visual_ranges)
+        prepared_duration = self._optional_positive_float(processing.get("prepared_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if prepared_duration is None:
+            prepared_duration = float(editorial_duration or 0.0) + head_seconds + tail_seconds
+        prepared_duration = max(0.1, float(prepared_duration))
+        visual_segment_paths = []
+        visual_progress_span = max(1, 38 // max(1, len(visual_inputs)))
+        progress_cursor = progress_start
+        for index, (video_input, (_range_start, range_duration)) in enumerate(zip(visual_inputs, visual_ranges)):
+            segment_output = Path(temp_dir) / f"control-guided-visual-segment-{index}.mp4"
+            segment_end = min(45, progress_cursor + visual_progress_span)
+            self._run_control_guided_visual_segment_ffmpeg(
+                connection,
+                job_id,
+                video_input,
+                segment_output,
+                output_width,
+                output_height,
+                range_duration,
+                process_handle,
+                processing=processing,
+                progress_start=progress_cursor,
+                progress_end=segment_end,
+                status=f"Preparing control-guided visual segment {index + 1} of {len(visual_inputs)}.",
+            )
+            visual_segment_paths.append(segment_output)
+            progress_cursor = min(46, segment_end + 1)
+        visual_assembled = Path(temp_dir) / "control-guided-visual-assembled.mp4"
+        if len(visual_segment_paths) == 1:
+            visual_assembled = visual_segment_paths[0]
+        else:
+            self._concat_event_video_segments(
+                connection,
+                job_id,
+                visual_segment_paths,
+                visual_assembled,
+                float(editorial_duration or prepared_duration),
+                process_handle,
+                progress_start=46,
+                progress_end=55,
+                status="Assembling control-guided visual ranges.",
+            )
+        driving_audio_declaration = next((item for item in output_declarations if item.get("role") == "driving_audio"), None)
+        driving_audio_path: Optional[Path] = None
+        driving_audio_metadata: Optional[dict[str, Any]] = None
+        if audio_inputs:
+            driving_audio_mime = str((driving_audio_declaration or {}).get("mime_type") or "audio/mpeg")
+            driving_audio_path = Path(temp_dir) / ("control-guided-driving-audio.wav" if driving_audio_mime == "audio/wav" else "control-guided-driving-audio.mp3")
+            self._run_control_guided_audio_assembly_ffmpeg(
+                connection,
+                job_id,
+                audio_inputs,
+                driving_audio_path,
+                float(editorial_duration or prepared_duration),
+                head_seconds,
+                tail_seconds,
+                tail_audio_mode,
+                process_handle,
+                processing=processing,
+                output_mime_type=driving_audio_mime,
+                progress_start=56,
+                progress_end=70,
+                status="Preparing separate control-guided driving audio.",
+            )
+            driving_audio_metadata = self._validate_control_guided_audio_output(
+                driving_audio_path,
+                driving_audio_mime,
+                expected_duration=prepared_duration,
+                max_bytes=MAX_AUDIO_BYTES,
+            )
+        elif embedded_audio == "selected_soundtrack":
+            raise ValueError("Control-guided selected_soundtrack output requires driving_audio_source inputs.")
+        control_video_path = Path(temp_dir) / "control-guided-control-video.mp4"
+        self._run_control_guided_final_video_ffmpeg(
+            connection,
+            job_id,
+            visual_assembled,
+            driving_audio_path,
+            control_video_path,
+            output_width,
+            output_height,
+            prepared_duration,
+            head_seconds,
+            tail_seconds,
+            process_handle,
+            processing=processing,
+            progress_start=71,
+            progress_end=progress_end,
+            status="Muxing prepared control-guided video.",
+        )
+        control_video_metadata = self._validate_control_guided_video_output(
+            control_video_path,
+            expected_width=output_width,
+            expected_height=output_height,
+            expected_duration=prepared_duration,
+            embedded_audio=embedded_audio,
+            max_bytes=self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_STORYBOARD_VIDEO_OUTPUT_BYTES, 1, MAX_STORYBOARD_VIDEO_OUTPUT_BYTES),
+        )
+        artifacts = []
+        for declaration in output_declarations:
+            role = str(declaration["role"])
+            artifact_index = int(declaration["artifact_index"])
+            mime_type = str(declaration["mime_type"])
+            if role == "control_video":
+                artifacts.append({
+                    "path": str(control_video_path),
+                    "artifact_index": artifact_index,
+                    "role": role,
+                    "mime_type": "video/mp4",
+                    "metadata": control_video_metadata,
+                })
+            elif role == "driving_audio":
+                if driving_audio_path is None or driving_audio_metadata is None:
+                    raise ValueError("Control-guided driving_audio output was declared but not produced.")
+                artifacts.append({
+                    "path": str(driving_audio_path),
+                    "artifact_index": artifact_index,
+                    "role": role,
+                    "mime_type": mime_type,
+                    "metadata": driving_audio_metadata,
+                })
+        source_ranges = [
+            {
+                "input_id": int(item.get("input_id") or 0),
+                "kind": str(item.get("kind") or ""),
+                "sequence": self._coerce_int(item.get("sequence", item.get("order", index)), index, 0, 100_000),
+                "source_start_seconds": float(start),
+                "source_end_seconds": float(start + duration),
+                "source_duration_seconds": self._control_guided_source_duration_seconds(item),
+                "selected_duration_seconds": float(duration),
+                "duration_source": str((item.get("metadata") or {}).get("duration_source") or ""),
+            }
+            for index, (item, (start, duration)) in enumerate(zip(visual_inputs, visual_ranges))
+        ]
+        audio_ranges = []
+        for index, item in enumerate(audio_inputs):
+            start, duration = self._control_guided_source_range(item)
+            audio_ranges.append({
+                "input_id": int(item.get("input_id") or 0),
+                "kind": str(item.get("kind") or ""),
+                "sequence": self._coerce_int(item.get("sequence", item.get("order", index)), index, 0, 100_000),
+                "source_start_seconds": float(start),
+                "source_end_seconds": float(start + duration),
+                "source_duration_seconds": self._control_guided_source_duration_seconds(item),
+                "selected_duration_seconds": float(duration),
+                "duration_source": str((item.get("metadata") or {}).get("duration_source") or ""),
+            })
+        self._log(
+            "Prepared control-guided video inputs; "
+            f"job_id={job_id} outputs={[(item['artifact_index'], item['role'], item['mime_type']) for item in artifacts]} "
+            f"output={output_width}x{output_height} fps={fps} editorial_duration={float(editorial_duration or 0.0):.3f} "
+            f"prepared_duration={prepared_duration:.3f} head={head_seconds:.3f} tail={tail_seconds:.3f}."
+        )
+        return artifacts, {
+            "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+            "processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+            "operation_type": CONTROL_GUIDED_INPUT_PREPARATION_OPERATION,
+            "contract_version": CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION,
+            "profile_id": str(processing.get("profile_id") or "control_guided_ltx_v1"),
+            "ffmpeg_encoder": EVENT_VIDEO_H264_ENCODER,
+            "ffmpeg_version": self._ffmpeg_version_string(),
+            "output_width": int(control_video_metadata.get("display_width") or output_width),
+            "output_height": int(control_video_metadata.get("display_height") or output_height),
+            "output_duration_seconds": float(control_video_metadata.get("duration_seconds") or prepared_duration),
+            "fps": fps,
+            "embedded_audio": embedded_audio,
+            "audio_sample_rate_hz": self._coerce_int(processing.get("audio_sample_rate_hz"), 48000, 1, 192000),
+            "head_seconds": head_seconds,
+            "tail_seconds": tail_seconds,
+            "tail_audio_mode": tail_audio_mode,
+            "visual_source_ranges": source_ranges,
+            "audio_source_ranges": audio_ranges,
+            "source_duration_fallback_used": any(
+                str((item.get("metadata") or {}).get("duration_source") or "container") != "container"
+                for item in [*visual_inputs, *audio_inputs]
+            ),
+            "artifact_roles": [
+                {"artifact_index": int(item["artifact_index"]), "role": str(item["role"]), "mime_type": str(item["mime_type"])}
+                for item in artifacts
+            ],
+            "worker_id": connection.worker_id,
+        }
+
+    def _ffmpeg_version_string(self) -> str:
+        try:
+            completed = subprocess.run([self._ffmpeg_binary(), "-version"], check=False, capture_output=True, text=True, timeout=5)
+        except Exception:
+            return ""
+        first_line = str(completed.stdout or completed.stderr or "").splitlines()
+        return first_line[0][:160] if first_line else ""
+
+    def _control_guided_ordered_inputs(self, downloaded_inputs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
+        return sorted(
+            [item for item in downloaded_inputs if str(item.get("kind") or "").strip() == kind],
+            key=lambda item: (
+                self._coerce_int(item.get("sequence", item.get("order", 0)), 0, 0, 100_000),
+                int(item.get("input_id") or 0),
+            ),
+        )
+
+    def _control_guided_source_duration_seconds(self, item: dict[str, Any]) -> float:
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        source_duration = self._optional_positive_float(
+            self._first_present(item, "source_duration_seconds", "duration_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        if source_duration is None:
+            source_duration = self._optional_positive_float(metadata.get("duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if source_duration is None:
+            raise ValueError(f"Control-guided input {item.get('input_id')} source duration could not be read.")
+        return float(source_duration)
+
+    def _control_guided_source_range(self, item: dict[str, Any]) -> tuple[float, float]:
+        source_duration = self._control_guided_source_duration_seconds(item)
+        start = self._coerce_float(item.get("source_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        end = self._optional_positive_float(item.get("source_end_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if end is None:
+            end = float(source_duration)
+        if end <= start:
+            raise ValueError(f"Control-guided input {item.get('input_id')} has an empty source range.")
+        return start, max(0.1, min(float(source_duration), end) - start)
+
+    def _run_control_guided_visual_segment_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        duration: float,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(video_input["path"]))
+        start, _range_duration = self._control_guided_source_range(video_input)
+        fps = self._coerce_int(processing.get("fps"), 30, 1, 240)
+        fit_mode = str(processing.get("fit_mode") or "content_detect_then_cover").strip().lower()
+        if fit_mode == "stretch":
+            video_filter = f"[0:v]scale={output_width}:{output_height},fps={fps},setsar=1,format=yuv420p[vout]"
+        elif fit_mode == "contain":
+            video_filter = (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=decrease,"
+                f"pad={output_width}:{output_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fps={fps},setsar=1,format=yuv420p[vout]"
+            )
+        else:
+            video_filter = (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},fps={fps},setsar=1,format=yuv420p[vout]"
+            )
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+        ]
+        if start > 0:
+            command.extend(["-ss", f"{start:.3f}"])
+        command.extend([
+            "-i",
+            str(source_path),
+            "-f",
+            "lavfi",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-filter_complex",
+            f"{video_filter};[1:a:0]aresample=48000,aformat=channel_layouts=stereo[aout]",
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-r",
+            str(fps),
+            "-t",
+            f"{duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ])
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, duration),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(duration),
+        )
+
+    def _run_control_guided_audio_assembly_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        audio_inputs: list[dict[str, Any]],
+        output_path: Path,
+        editorial_duration: float,
+        head_seconds: float,
+        tail_seconds: float,
+        tail_audio_mode: str,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        output_mime_type: str,
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        if not audio_inputs:
+            raise ValueError("Control-guided audio assembly requires at least one driving_audio_source input.")
+        sample_rate = self._coerce_int(processing.get("audio_sample_rate_hz"), 48000, 1, 192000)
+        command = [self._ffmpeg_binary(), "-y", "-hide_banner", "-v", "error", "-progress", "pipe:1", "-nostats"]
+        filter_parts = []
+        concat_labels = []
+        if head_seconds > 0.001:
+            filter_parts.append(
+                f"anullsrc=channel_layout=stereo:sample_rate={sample_rate},"
+                f"atrim=duration={head_seconds:.3f},asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[ahead]"
+            )
+            concat_labels.append("[ahead]")
+        remaining = float(editorial_duration)
+        for index, audio_input in enumerate(audio_inputs):
+            if remaining <= 0.001:
+                break
+            start, duration = self._control_guided_source_range(audio_input)
+            duration = min(duration, remaining)
+            command.extend(["-i", str(Path(str(audio_input["path"])))])
+            label = f"a{index}"
+            filter_parts.append(
+                f"[{index}:a:0]atrim=start={start:.3f}:duration={duration:.3f},"
+                f"asetpts=PTS-STARTPTS,aresample={sample_rate},aformat=channel_layouts=stereo[{label}]"
+            )
+            concat_labels.append(f"[{label}]")
+            remaining -= duration
+        if remaining > 0.05:
+            raise ValueError(
+                "Control-guided selected audio source ranges are shorter than editorial duration; "
+                f"missing={remaining:.3f}s."
+            )
+        if tail_seconds > 0.001 and tail_audio_mode == "silence":
+            filter_parts.append(
+                f"anullsrc=channel_layout=stereo:sample_rate={sample_rate},"
+                f"atrim=duration={tail_seconds:.3f},asetpts=PTS-STARTPTS,aformat=channel_layouts=stereo[atail]"
+            )
+            concat_labels.append("[atail]")
+        if not concat_labels:
+            raise ValueError("Control-guided audio assembly has no usable audio range.")
+        filter_parts.append(f"{''.join(concat_labels)}concat=n={len(concat_labels)}:v=0:a=1,aformat=channel_layouts=stereo[aout]")
+        if output_mime_type == "audio/wav":
+            codec_args = ["-c:a", "pcm_s16le"]
+        else:
+            codec_args = ["-c:a", "libmp3lame", "-b:a", "192k"]
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[aout]",
+            "-vn",
+            *codec_args,
+            str(output_path),
+        ])
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, editorial_duration + head_seconds + tail_seconds),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(editorial_duration + head_seconds + tail_seconds),
+        )
+
+    def _run_control_guided_final_video_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        visual_path: Path,
+        driving_audio_path: Optional[Path],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        prepared_duration: float,
+        head_seconds: float,
+        tail_seconds: float,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        embedded_audio = str(processing.get("embedded_audio") or "selected_soundtrack").strip().lower()
+        fps = self._coerce_int(processing.get("fps"), 30, 1, 240)
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            str(visual_path),
+        ]
+        filter_parts = [
+            (
+                f"[0:v]tpad=start_mode=clone:start_duration={head_seconds:.3f}:"
+                f"stop_mode=clone:stop_duration={tail_seconds:.3f},"
+                f"trim=duration={prepared_duration:.3f},setpts=PTS-STARTPTS,"
+                f"fps={fps},scale={output_width}:{output_height},setsar=1,format=yuv420p[vout]"
+            )
+        ]
+        map_args = ["-map", "[vout]"]
+        if embedded_audio == "selected_soundtrack":
+            if driving_audio_path is None:
+                raise ValueError("Control-guided selected_soundtrack video requires prepared driving audio.")
+            command.extend(["-i", str(driving_audio_path)])
+            sample_rate = self._coerce_int(processing.get("audio_sample_rate_hz"), 48000, 1, 192000)
+            filter_parts.append(f"[1:a:0]aresample={sample_rate},aformat=channel_layouts=stereo[aout]")
+            map_args.extend(["-map", "[aout]"])
+        elif embedded_audio == "none":
+            map_args.append("-an")
+        else:
+            raise ValueError(f"Unsupported control-guided embedded_audio mode: {embedded_audio}")
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            *map_args,
+            "-r",
+            str(fps),
+            "-t",
+            f"{prepared_duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ])
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, prepared_duration),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(prepared_duration),
+        )
 
     def _storyboard_ordered_assembly_inputs(
         self,
@@ -6590,6 +7790,84 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if not ordered:
             return list(video_inputs)
         return ordered
+
+    def _storyboard_ordered_extract_range_inputs(
+        self,
+        video_inputs: list[dict[str, Any]],
+        processing: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        segments = processing.get("segments")
+        if not isinstance(segments, list) or not segments:
+            raise ValueError("Storyboard segmented_media_extract_range requires processing.segments.")
+        input_by_id: dict[int, dict[str, Any]] = {}
+        for item in video_inputs:
+            for key in ("input_id", "dbfileid", "dbfile_id", "file_id"):
+                try:
+                    value = int(item.get(key) or 0)
+                except (TypeError, ValueError):
+                    value = 0
+                if value > 0:
+                    input_by_id[value] = item
+        ordered = []
+        missing = []
+        for fallback_order, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                raise ValueError("Storyboard segmented_media_extract_range segment entries must be JSON objects.")
+            input_id = self._coerce_int(segment.get("input_id"), 0, 0, 2_147_483_647)
+            dbfile_id = self._coerce_int(segment.get("dbfileid") or segment.get("dbfile_id"), 0, 0, 2_147_483_647)
+            match = input_by_id.get(input_id) if input_id > 0 else None
+            if match is None and dbfile_id > 0:
+                match = input_by_id.get(dbfile_id)
+            if match is None:
+                missing.append(input_id or dbfile_id or f"segment#{fallback_order}")
+                continue
+            order = self._coerce_int(
+                self._first_present(segment, "order", "sequence", "segment_index"),
+                fallback_order,
+                0,
+                100_000,
+            )
+            ordered.append((order, fallback_order, {**match, "_segment_index": fallback_order, "_segment_payload": segment}))
+        if missing:
+            raise ValueError(f"Storyboard segmented_media_extract_range referenced missing input(s): {missing}")
+        ordered.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in ordered]
+
+    def _storyboard_extract_range_segment_processing(
+        self,
+        video_input: dict[str, Any],
+        processing: dict[str, Any],
+        index: int,
+    ) -> dict[str, Any]:
+        segment = video_input.get("_segment_payload") if isinstance(video_input.get("_segment_payload"), dict) else {}
+        trim_start = self._coerce_float(
+            self._first_present(segment, "trim_start_seconds", "start_seconds", "source_start_seconds"),
+            0.0,
+            0.0,
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        trim_duration = self._optional_positive_float(
+            self._first_present(segment, "trim_duration_seconds", "duration_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        trim_end = self._optional_positive_float(
+            self._first_present(segment, "trim_end_seconds", "end_seconds", "source_end_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        if trim_duration is None and trim_end is not None and trim_end > trim_start:
+            trim_duration = trim_end - trim_start
+        if trim_duration is None:
+            raise ValueError(f"Storyboard segmented_media_extract_range segment {index} requires trim_duration_seconds.")
+        return {
+            **processing,
+            "operation_type": "segmented_media_extract_range_segment",
+            "resize_mode": "scale_to_cover_crop",
+            "trim_start_seconds": trim_start,
+            "trim_duration_seconds": trim_duration,
+            "trim_end_seconds": trim_start + trim_duration,
+            "segment_index": self._coerce_int(segment.get("segment_index"), index, 0, 100_000),
+            "source_segment_index": index,
+        }
 
     def _storyboard_segment_processing(
         self,
@@ -6803,6 +8081,100 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             status=status,
             process_handle=process_handle,
             timeout_seconds=self._storyboard_step_timeout(source_duration),
+        )
+
+    def _run_storyboard_segment_extract_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(video_input["path"]))
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        source_duration = float(metadata.get("duration_seconds") or 1.0)
+        trim_start = self._coerce_float(processing.get("trim_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        trim_duration = self._storyboard_trim_duration(source_duration, processing, trim_start)
+        effective_duration = max(0.1, float(trim_duration or max(0.1, source_duration - trim_start)))
+        has_audio = bool(metadata.get("has_audio"))
+        fps = self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120)
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-ss",
+            f"{trim_start:.3f}",
+            "-t",
+            f"{effective_duration:.3f}",
+            "-i",
+            str(source_path),
+        ]
+        audio_label = "0:a:0"
+        if not has_audio:
+            command.extend([
+                "-f",
+                "lavfi",
+                "-t",
+                f"{effective_duration:.3f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ])
+            audio_label = "1:a:0"
+        filter_parts = [
+            (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},"
+                f"fps={fps},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[vout]"
+            ),
+            f"[{audio_label}]aresample=48000,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[aout]",
+        ]
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-r",
+            str(fps),
+            "-t",
+            f"{effective_duration:.3f}",
+            *self._storyboard_encode_args(processing),
+            str(output_path),
+        ])
+        segment_payload = video_input.get("_segment_payload") if isinstance(video_input.get("_segment_payload"), dict) else {}
+        self._log(
+            "Extracting segmented media range part; "
+            f"job_id={job_id} input_id={video_input.get('input_id')} dbfileid={video_input.get('dbfileid') or video_input.get('dbfile_id')} "
+            f"track_key={processing.get('track_key')!r} declared_segment_index={segment_payload.get('segment_index')!r} "
+            f"part_index={processing.get('source_segment_index')} output={output_width}x{output_height} "
+            f"fps={fps} trim_start={trim_start:.3f} trim_duration={effective_duration:.3f} "
+            f"source_duration={source_duration:.3f} has_audio={has_audio}."
+        )
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, effective_duration),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(effective_duration),
         )
 
     def _run_storyboard_replace_soundtrack_ffmpeg(
@@ -7052,6 +8424,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         expected_width: int,
         expected_height: int,
         max_bytes: int,
+        require_audio: bool = True,
     ) -> dict[str, Any]:
         if not path.is_file():
             raise ValueError("Storyboard FFmpeg output MP4 is missing.")
@@ -7082,7 +8455,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         audio_codec = str(metadata.get("audio_codec") or "").lower()
         if video_codec != "h264":
             raise ValueError(f"Storyboard FFmpeg output must use H.264 video; got {video_codec or 'unknown'}.")
-        if audio_codec != "aac":
+        if require_audio and audio_codec != "aac":
             raise ValueError(f"Storyboard FFmpeg output must use AAC audio; got {audio_codec or 'unknown'}.")
         self._log(
             "Validated Storyboard FFmpeg output; "
@@ -7090,6 +8463,93 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"duration_seconds={duration:.2f} bytes={file_size} video_codec={video_codec} audio_codec={audio_codec}."
         )
         return metadata
+
+    def _validate_control_guided_video_output(
+        self,
+        path: Path,
+        *,
+        expected_width: int,
+        expected_height: int,
+        expected_duration: float,
+        embedded_audio: str,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        metadata = self._validate_storyboard_ffmpeg_output(
+            path,
+            expected_width=expected_width,
+            expected_height=expected_height,
+            max_bytes=max_bytes,
+            require_audio=embedded_audio != "none",
+        )
+        duration = float(metadata.get("duration_seconds") or 0.0)
+        if abs(duration - float(expected_duration)) > 0.35:
+            raise ValueError(
+                "Control-guided prepared control_video duration does not match requested prepared duration; "
+                f"expected={float(expected_duration):.3f}s got={duration:.3f}s."
+            )
+        if embedded_audio == "none" and metadata.get("has_audio"):
+            raise ValueError("Control-guided prepared control_video unexpectedly contains audio.")
+        if embedded_audio == "selected_soundtrack" and str(metadata.get("audio_codec") or "").lower() != "aac":
+            raise ValueError("Control-guided prepared control_video must contain selected AAC soundtrack audio.")
+        return metadata
+
+    def _validate_control_guided_audio_output(
+        self,
+        path: Path,
+        mime_type: str,
+        *,
+        expected_duration: float,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        if not path.is_file():
+            raise ValueError("Control-guided prepared driving_audio artifact is missing.")
+        file_size = path.stat().st_size
+        if file_size <= 0 or file_size > max_bytes:
+            raise ValueError(f"Control-guided prepared driving_audio size is outside allowed bounds: {file_size} bytes.")
+        suffix = path.suffix.lower()
+        if mime_type == "audio/mpeg" and suffix != ".mp3":
+            raise ValueError("Control-guided driving_audio audio/mpeg output must use .mp3.")
+        if mime_type == "audio/wav" and suffix != ".wav":
+            raise ValueError("Control-guided driving_audio audio/wav output must use .wav.")
+        metadata = self._probe_audio_metadata(path)
+        duration = float(metadata.get("duration_seconds") or 0.0)
+        if abs(duration - float(expected_duration)) > 0.35:
+            raise ValueError(
+                "Control-guided prepared driving_audio duration does not match requested prepared duration; "
+                f"expected={float(expected_duration):.3f}s got={duration:.3f}s."
+            )
+        self._log(
+            "Validated control-guided driving_audio output; "
+            f"filename={path.name!r} mime_type={mime_type} duration_seconds={duration:.2f} bytes={file_size}."
+        )
+        return {**metadata, "mime_type": mime_type, "bytes": file_size}
+
+    def _validate_prepare_driving_audio_output(
+        self,
+        path: Path,
+        *,
+        expected_duration: float,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        if not path.is_file():
+            raise ValueError("Prepared driving_audio artifact is missing.")
+        file_size = path.stat().st_size
+        if file_size <= 0 or file_size > max_bytes:
+            raise ValueError(f"Prepared driving_audio size is outside allowed bounds: {file_size} bytes.")
+        if path.suffix.lower() != ".mp3":
+            raise ValueError("Prepared driving_audio output must use .mp3.")
+        metadata = self._probe_audio_metadata(path)
+        duration = float(metadata.get("duration_seconds") or 0.0)
+        if abs(duration - float(expected_duration)) > 0.35:
+            raise ValueError(
+                "Prepared driving_audio duration does not match requested duration; "
+                f"expected={float(expected_duration):.3f}s got={duration:.3f}s."
+            )
+        self._log(
+            "Validated prepared driving_audio output; "
+            f"filename={path.name!r} mime_type='audio/mpeg' duration_seconds={duration:.2f} bytes={file_size}."
+        )
+        return {**metadata, "mime_type": "audio/mpeg", "bytes": file_size}
 
     def _run_storyboard_local_video_take_ffmpeg(
         self,
@@ -7965,6 +9425,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             height = self._coerce_int(metadata.get("display_height") or metadata.get("height"), 720, 2, 4096)
         return self._even_video_size(width, height)
 
+    def _storyboard_target_output_path(self, temp_dir: str, processing: dict[str, Any], default_name: str = "storyboard-processed.mp4") -> Path:
+        mediaassembly_input = processing.get("mediaassembly_input") if isinstance(processing.get("mediaassembly_input"), dict) else {}
+        requested_name = Path(str(processing.get("target_filename") or mediaassembly_input.get("filename") or default_name)).name
+        if Path(requested_name).suffix.lower() != ".mp4":
+            requested_name = f"{Path(requested_name).stem or Path(default_name).stem}.mp4"
+        requested_name = re.sub(r"[^A-Za-z0-9._-]+", "-", requested_name).strip(".-") or default_name
+        return Path(temp_dir) / requested_name
+
     def _storyboard_local_take_output_size(self, image_inputs: list[dict[str, Any]], processing: dict[str, Any]) -> tuple[int, int]:
         width = self._coerce_int(processing.get("output_width") or processing.get("width"), 0, 0, 4096)
         height = self._coerce_int(processing.get("output_height") or processing.get("height"), 0, 0, 4096)
@@ -8082,7 +9550,48 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 return min(MAX_STORYBOARD_VIDEO_DURATION_SECONDS, end - start), "header.source_end_seconds-source_start_seconds"
         return None, ""
 
-    def _storyboard_source_audio_duration_fallback(
+    def _storyboard_extract_range_duration_fallback(
+        self,
+        input_descriptor: dict[str, Any],
+        processing: dict[str, Any],
+        response_headers: Any,
+    ) -> tuple[Optional[float], str]:
+        segments = processing.get("segments")
+        if isinstance(segments, list):
+            input_id = self._coerce_int(input_descriptor.get("input_id"), 0, 0, 2_147_483_647)
+            dbfile_id = self._coerce_int(
+                input_descriptor.get("dbfileid") or input_descriptor.get("dbfile_id") or input_descriptor.get("file_id"),
+                0,
+                0,
+                2_147_483_647,
+            )
+            for index, segment in enumerate(segments):
+                if not isinstance(segment, dict):
+                    continue
+                segment_input_id = self._coerce_int(segment.get("input_id"), 0, 0, 2_147_483_647)
+                segment_dbfile_id = self._coerce_int(segment.get("dbfileid") or segment.get("dbfile_id"), 0, 0, 2_147_483_647)
+                if (input_id > 0 and segment_input_id == input_id) or (dbfile_id > 0 and segment_dbfile_id == dbfile_id):
+                    duration = self._optional_positive_float(
+                        self._first_present(segment, "source_duration_seconds", "duration_seconds"),
+                        MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+                    )
+                    if duration is not None:
+                        return duration, f"processing.segments[{index}].source_duration_seconds"
+                    start = self._coerce_float(
+                        self._first_present(segment, "segment_start_seconds", "source_start_seconds"),
+                        0.0,
+                        0.0,
+                        MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+                    )
+                    end = self._optional_positive_float(
+                        self._first_present(segment, "segment_end_seconds", "source_end_seconds"),
+                        MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+                    )
+                    if end is not None and end > start:
+                        return min(MAX_STORYBOARD_VIDEO_DURATION_SECONDS, end - start), f"processing.segments[{index}].segment_end_seconds-segment_start_seconds"
+        return self._storyboard_input_source_duration_fallback(input_descriptor, response_headers)
+
+    def _storyboard_input_source_duration_fallback(
         self,
         input_descriptor: dict[str, Any],
         response_headers: Any,
@@ -8098,6 +9607,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if duration is not None:
                 return duration, source
         return None, ""
+
+    def _storyboard_source_audio_duration_fallback(
+        self,
+        input_descriptor: dict[str, Any],
+        response_headers: Any,
+    ) -> tuple[Optional[float], str]:
+        return self._storyboard_input_source_duration_fallback(input_descriptor, response_headers)
 
     def _storyboard_trim_duration(self, source_duration: float, processing: dict[str, Any], trim_start: float) -> Optional[float]:
         trim_duration = self._optional_positive_float(processing.get("trim_duration_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
@@ -8548,6 +10064,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return " ".join(parts)
 
     def _submit_wangp_job(self, api_session, settings: dict[str, Any], output_count: int, callbacks):
+        self._assert_ltx_control_video_submission_integrity(settings)
         if str(settings.get("_midom_media_type") or "") == "audio":
             self._log(
                 "WanGP audio submit settings; "
@@ -8644,6 +10161,50 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             tasks.append(task)
         self._log(f"Using WanGP submit_manifest for {len(tasks)} outputs.")
         return api_session.submit_manifest(tasks, callbacks=callbacks)
+
+    def _assert_ltx_control_video_submission_integrity(self, settings: dict[str, Any]) -> None:
+        if str(settings.get("_midom_media_type") or "").strip().lower() != "video":
+            return
+        if str(settings.get("_midom_video_task") or "").strip().lower() != "control_video_guided_video":
+            return
+        model_type = str(settings.get("model_type") or "").strip()
+        if model_type not in LTX_VIDEO_MODEL_IDS:
+            return
+        expected_path = str(settings.get("_midom_control_video_guide_path") or "").strip()
+        expected_sha256 = str(settings.get("_midom_control_video_guide_sha256") or "").strip().lower()
+        actual_path = str(settings.get("video_guide") or "").strip()
+        if not expected_path:
+            raise ValueError("LTX control-video submission is missing the prepared control-video guide path.")
+        if not actual_path:
+            raise ValueError("LTX control-video submission is missing video_guide.")
+        expected_resolved = str(Path(expected_path).resolve())
+        actual_resolved = str(Path(actual_path).resolve())
+        if actual_resolved != expected_resolved:
+            raise ValueError(
+                "LTX control-video submission video_guide path changed after preparation; "
+                f"expected={Path(expected_resolved).name!r} actual={Path(actual_resolved).name!r}."
+            )
+        guide_path = Path(actual_resolved)
+        if not guide_path.is_file():
+            raise ValueError(f"LTX control-video submission video_guide file is missing: {guide_path.name}")
+        actual_sha256 = self._sha256_file(guide_path)
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise ValueError(
+                "LTX control-video submission video_guide hash changed after preparation; "
+                f"expected={expected_sha256[:12]}... actual={actual_sha256[:12]}..."
+            )
+        source_sha256 = str(settings.get("_midom_control_video_source_sha256") or "").strip().lower()
+        source_path = Path(str(settings.get("_midom_control_video_source_path") or ""))
+        self._log(
+            "Verified LTX control-video submission input identity; "
+            f"job_id={self._active_job_id} model_type={model_type} "
+            f"control_input_id={settings.get('_midom_control_video_input_id')} "
+            f"source_filename={(source_path.name if str(source_path) else '')!r} "
+            f"source_sha256={source_sha256[:12] + '...' if source_sha256 else 'missing'} "
+            f"video_guide={guide_path.name!r} video_guide_sha256={actual_sha256[:12]}... "
+            f"video_prompt_type={settings.get('video_prompt_type')!r} "
+            f"audio_prompt_type={settings.get('audio_prompt_type')!r}."
+        )
 
     def _wait_for_wangp_result(self, connection: ConnectionContext, job_id: int, job_handle, callbacks):
         next_keepalive_at = time.monotonic() + JOB_KEEPALIVE_SECONDS
@@ -9905,7 +11466,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 max_bytes = MAX_STORYBOARD_IMAGE_INPUT_BYTES
                 category = "image"
             else:
-                if kind in {"source_audio", "soundtrack_audio"}:
+                if kind in {"source_audio", "soundtrack_audio", "driving_audio_source"}:
                     allowed_mime_types = ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES
                     max_bytes = MAX_STORYBOARD_VIDEO_INPUT_BYTES
                 else:
@@ -9956,6 +11517,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             for id_key in ("dbfileid", "dbfile_id", "file_id"):
                 if item.get(id_key) is not None:
                     entry[id_key] = item.get(id_key)
+            for timing_key in ("source_start_seconds", "source_end_seconds", "source_duration_seconds", "duration_seconds"):
+                if item.get(timing_key) is not None:
+                    entry[timing_key] = item.get(timing_key)
             if category == "video":
                 fallback_duration = None
                 fallback_source = ""
@@ -9963,6 +11527,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     fallback_duration, fallback_source = self._storyboard_segment_duration_fallback(
                         item,
                         processing,
+                        response.headers,
+                    )
+                elif operation_type == "segmented_media_extract_range" and kind == "source_video":
+                    fallback_duration, fallback_source = self._storyboard_extract_range_duration_fallback(
+                        item,
+                        processing,
+                        response.headers,
+                    )
+                elif operation_type in {"multicam_card_pass_through_take", CONTROL_GUIDED_INPUT_PREPARATION_OPERATION} and kind in {"source_video", "control_video_source"}:
+                    fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(
+                        item,
                         response.headers,
                     )
                 metadata = self._probe_event_video_metadata(
@@ -9977,9 +11552,29 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"got {duration_seconds:.2f}s."
                     )
                 entry["metadata"] = metadata
-                if fallback_duration is not None and metadata.get("duration_source") != "container":
+                if (
+                    operation_type == "segmented_media_segment_normalize"
+                    and fallback_duration is not None
+                    and metadata.get("duration_source") != "container"
+                ):
                     self._log(
                         "Using Midom supplied segmented media duration fallback; "
+                        f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
+                        f"duration_seconds={duration_seconds:.3f}."
+                    )
+                elif (
+                    operation_type == "segmented_media_extract_range"
+                    and fallback_duration is not None
+                    and metadata.get("duration_source") != "container"
+                ):
+                    self._log(
+                        "Using Midom supplied segmented range source duration fallback; "
+                        f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
+                        f"duration_seconds={duration_seconds:.3f}."
+                    )
+                elif fallback_duration is not None and metadata.get("duration_source") != "container":
+                    self._log(
+                        "Using Midom supplied storyboard source-video duration fallback; "
                         f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
                         f"duration_seconds={duration_seconds:.3f}."
                     )
@@ -10000,8 +11595,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             else:
                 fallback_duration = None
                 fallback_source = ""
-                if operation_type == "multicam_card_pass_through_take" and kind == "source_audio":
-                    fallback_duration, fallback_source = self._storyboard_source_audio_duration_fallback(
+                if operation_type in {"multicam_card_pass_through_take", CONTROL_GUIDED_INPUT_PREPARATION_OPERATION, PREPARE_DRIVING_AUDIO_OPERATION} and kind in {"source_audio", "driving_audio_source"}:
+                    fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(
                         item,
                         response.headers,
                     )
@@ -10012,7 +11607,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 )
                 entry["metadata"] = metadata
                 entry["duration_seconds"] = float(metadata.get("duration_seconds") or 0.0)
-                if fallback_duration is not None and metadata.get("duration_source") != "container":
+                if (
+                    operation_type == PREPARE_DRIVING_AUDIO_OPERATION
+                    and fallback_duration is not None
+                    and metadata.get("duration_source") != "container"
+                ):
+                    self._log(
+                        "Using Midom supplied driving-audio source duration fallback; "
+                        f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
+                        f"duration_seconds={entry['duration_seconds']:.3f}."
+                    )
+                elif fallback_duration is not None and metadata.get("duration_source") != "container":
                     self._log(
                         "Using Midom supplied storyboard source-audio duration fallback; "
                         f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
@@ -10025,7 +11630,35 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"sha256={actual_sha256[:12]}..."
             )
         video_count = sum(1 for item in downloaded if item.get("category") == "video")
-        if operation_type == "multicam_final_assembly":
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            driving_source_count = sum(1 for item in downloaded if item.get("kind") == "driving_audio_source")
+            non_audio_count = sum(1 for item in downloaded if item.get("category") != "audio")
+            audio_count = sum(1 for item in downloaded if item.get("category") == "audio")
+            if non_audio_count:
+                raise ValueError(f"prepare_driving_audio does not accept downloaded non-audio inputs; got {non_audio_count}.")
+            if driving_source_count < 1 or audio_count != driving_source_count:
+                raise ValueError(
+                    "prepare_driving_audio requires downloaded driving_audio_source input(s) and no other audio kinds; "
+                    f"got driving_audio_source={driving_source_count}, audio_inputs={audio_count}."
+                )
+            output_declarations = self._prepare_driving_audio_output_declarations(job, processing)
+            self._validate_prepare_driving_audio_recipe(processing, output_declarations)
+        elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
+            control_source_count = sum(1 for item in downloaded if item.get("kind") == "control_video_source")
+            driving_source_count = sum(1 for item in downloaded if item.get("kind") == "driving_audio_source")
+            image_count = sum(1 for item in downloaded if item.get("category") == "image")
+            if control_source_count < 1:
+                raise ValueError("Control-guided input preparation requires at least one downloaded control_video_source input.")
+            if image_count:
+                raise ValueError(f"Control-guided input preparation does not accept downloaded image inputs; got {image_count}.")
+            raw_processing = job.get("processing") if isinstance(job.get("processing"), dict) else {}
+            output_declarations = self._control_guided_output_declarations(job, processing)
+            recipe = self._validate_control_guided_recipe(processing, output_declarations)
+            if (recipe["embedded_audio"] == "selected_soundtrack" or any(item["role"] == "driving_audio" for item in output_declarations)) and driving_source_count < 1:
+                raise ValueError("Control-guided input preparation requires downloaded driving_audio_source input(s).")
+            if raw_processing is None:
+                raise ValueError("Control-guided input preparation processing payload is missing.")
+        elif operation_type == "multicam_final_assembly":
             if video_count < 1:
                 raise ValueError("Storyboard final assembly requires at least one downloaded video input.")
         elif operation_type == "replace_video_soundtrack":
@@ -10041,6 +11674,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "Storyboard segmented_media_segment_normalize requires exactly one downloaded source_video input; "
                     f"got source_video={source_video_count}, video_inputs={video_count}."
                 )
+        elif operation_type == "segmented_media_extract_range":
+            source_video_count = sum(1 for item in downloaded if item.get("kind") == "source_video")
+            if video_count < 1 or source_video_count != video_count:
+                raise ValueError(
+                    "Storyboard segmented_media_extract_range requires one or more downloaded source_video inputs; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}."
+                )
+            self._storyboard_ordered_extract_range_inputs(
+                [item for item in downloaded if item.get("category") == "video"],
+                processing,
+            )
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             render_mode = str(processing.get("render_mode") or "").strip().lower()
             image_count = sum(1 for item in downloaded if item.get("category") == "image")
@@ -10388,6 +12032,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 end_image_inputs = [item for item in downloaded_inputs if item.get("kind") == "end_image"]
                 control_video_inputs = [item for item in downloaded_inputs if item.get("kind") == "control_video"]
                 if settings.get("_midom_video_task") == "control_video_guided_video":
+                    for stale_key in ("image_start", "image_end", "video_guide", "audio_guide", "audio_guide2"):
+                        settings[stale_key] = None
                     if len(start_image_inputs) != 1:
                         raise ValueError(f"LTX control-video job requires exactly one start_image input; got {len(start_image_inputs)}.")
                     if len(control_video_inputs) != 1:
@@ -10459,15 +12105,36 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         float(metadata["video_duration_seconds"]),
                         include_audio=not has_separate_driving_audio,
                     )
+                    source_control_sha256 = str(control_video_inputs[0].get("sha256") or "").strip().lower()
+                    prepared_control_sha256 = self._sha256_file(Path(overscan_control_path))
+                    if Path(overscan_control_path).resolve() == control_path.resolve() and source_control_sha256 and prepared_control_sha256 != source_control_sha256:
+                        raise ValueError(
+                            "LTX control-video source hash changed before WanGP submission; "
+                            f"expected {source_control_sha256[:12]}..., got {prepared_control_sha256[:12]}..."
+                        )
+                    driving_audio_sha256 = ""
+                    if has_separate_driving_audio:
+                        driving_audio_sha256 = str(driving_audio_inputs[0].get("sha256") or "").strip().lower()
                     settings["image_start"] = [overscan_start_path]
                     settings["image_end"] = None
                     settings["video_guide"] = overscan_control_path
+                    settings["_midom_control_video_input_id"] = int(control_video_inputs[0].get("input_id") or 0)
+                    settings["_midom_control_video_source_path"] = str(control_path.resolve())
+                    settings["_midom_control_video_source_sha256"] = source_control_sha256
+                    settings["_midom_control_video_guide_path"] = str(Path(overscan_control_path).resolve())
+                    settings["_midom_control_video_guide_sha256"] = prepared_control_sha256
                     settings["_midom_input_video_paths"] = [
                         str(control_path.resolve()),
                         str(Path(overscan_control_path).resolve()),
                     ]
-                    settings["_midom_input_video_sha256s"] = [str(control_video_inputs[0].get("sha256") or "").strip().lower()]
+                    settings["_midom_input_video_sha256s"] = [
+                        value
+                        for value in (source_control_sha256, prepared_control_sha256)
+                        if value
+                    ]
                     settings["audio_guide"] = driving_audio_inputs[0]["path"] if has_separate_driving_audio else None
+                    settings["_midom_driving_audio_input_id"] = int(driving_audio_inputs[0].get("input_id") or 0) if has_separate_driving_audio else 0
+                    settings["_midom_driving_audio_sha256"] = driving_audio_sha256
                     settings["audio_guide2"] = None
                     settings["image_prompt_type"] = "S"
                     settings["audio_prompt_type"] = "A" if has_separate_driving_audio else "K"
@@ -10478,12 +12145,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"model_id={model_type} "
                         f"image_start={Path(overscan_start_path).name!r} "
                         f"video_guide={Path(overscan_control_path).name!r} "
+                        f"control_input_id={settings.get('_midom_control_video_input_id')} "
+                        f"control_source_sha256={source_control_sha256[:12] + '...' if source_control_sha256 else 'missing'} "
+                        f"control_guide_sha256={prepared_control_sha256[:12]}... "
                         f"control_mode={control_mode!r} "
                         f"requested_size={requested_size[0]}x{requested_size[1]} "
                         f"internal_size={internal_size[0]}x{internal_size[1]} "
                         f"control_video_size={metadata['width']}x{metadata['height']} "
                         f"control_video_fps={metadata['fps'] if metadata['fps'] is not None else 'unknown'} "
                         f"driving_audio_source={'separate_input' if has_separate_driving_audio else 'control_video_embedded'} "
+                        f"driving_audio_input_id={settings.get('_midom_driving_audio_input_id')} "
+                        f"driving_audio_sha256={driving_audio_sha256[:12] + '...' if driving_audio_sha256 else 'none'} "
                         f"driving_audio={(Path(driving_audio_inputs[0]['path']).name if has_separate_driving_audio else None)!r} "
                         f"driving_audio_duration={audio_duration:.2f} "
                         f"duration_seconds={settings.get('duration_seconds')} "
@@ -10897,6 +12569,88 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "artifact_id": int(payload.get("artifact_id")),
             "file_id": int(payload.get("file_id")),
             "artifact_index": int(payload.get("artifact_index", artifact_index)),
+        }
+
+    def _upload_media_processing_artifact(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        artifact_info: dict[str, Any],
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._ensure_job_flow_enabled()
+        path = Path(str(artifact_info.get("path") or ""))
+        if not path.is_file():
+            raise ValueError("Media processing artifact path does not exist.")
+        artifact_index = self._coerce_int(artifact_info.get("artifact_index"), 0, 0, 100)
+        role = str(artifact_info.get("role") or "").strip().lower()
+        mime_type = str(artifact_info.get("mime_type") or mimetypes.guess_type(path.name)[0] or "application/octet-stream").strip().lower()
+        if not role:
+            raise ValueError("Media processing artifact role is required for typed upload.")
+        file_size = path.stat().st_size
+        if mime_type == "video/mp4":
+            max_bytes = self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_STORYBOARD_VIDEO_OUTPUT_BYTES, 1, MAX_STORYBOARD_VIDEO_OUTPUT_BYTES)
+            if file_size <= 0 or file_size > max_bytes:
+                raise ValueError(f"Media processing video artifact size is outside allowed bounds: {file_size} bytes")
+            with path.open("rb") as reader:
+                data = reader.read()
+            if not self._looks_like_mp4(data):
+                raise ValueError("Media processing video artifact does not look like MP4 bytes.")
+        elif mime_type in {"audio/mpeg", "audio/wav"}:
+            if file_size <= 0 or file_size > MAX_AUDIO_BYTES:
+                raise ValueError(f"Media processing audio artifact size is outside allowed bounds: {file_size} bytes")
+            with path.open("rb") as reader:
+                data = reader.read()
+        else:
+            raise ValueError(f"Unsupported media processing typed artifact MIME type: {mime_type}")
+        sha256 = hashlib.sha256(data).hexdigest()
+        self._log(
+            "Uploading media processing artifact; "
+            f"job_id={job_id} artifact_index={artifact_index} role={role!r} "
+            f"filename={path.name!r} mime_type={mime_type} bytes={file_size} sha256={sha256[:12]}..."
+        )
+        with path.open("rb") as reader:
+            response = requests.post(
+                f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{int(job_id)}/artifacts",
+                headers=self._headers(connection),
+                data={
+                    "artifact_index": str(int(artifact_index)),
+                    "role": role,
+                    "sha256": sha256,
+                    "mime_type": mime_type,
+                    "filename": path.name,
+                },
+                files={"file": (path.name, reader, mime_type)},
+                timeout=UPLOAD_TIMEOUT_SECONDS,
+            )
+        if response.status_code >= 400:
+            message = self._midom_error_message(response)
+            self._log(
+                "Media processing artifact upload rejected by Midom; "
+                f"job_id={job_id} artifact_index={artifact_index} role={role!r} "
+                f"http_status={response.status_code} message={message!r}.",
+                force=True,
+            )
+            raise ValueError(f"Midom rejected media processing artifact upload with HTTP {response.status_code}: {message}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Media processing artifact upload response was not a JSON object.")
+        uploaded_role = str(payload.get("role") or role).strip().lower()
+        uploaded_index = int(payload.get("artifact_index", artifact_index))
+        if uploaded_index != artifact_index:
+            raise ValueError(f"Midom returned artifact_index {uploaded_index}, expected {artifact_index}.")
+        if uploaded_role != role:
+            raise ValueError(f"Midom returned artifact role {uploaded_role!r}, expected {role!r}.")
+        self._log(
+            "Media processing artifact upload accepted; "
+            f"job_id={job_id} artifact_index={uploaded_index} role={uploaded_role!r} "
+            f"artifact_id={payload.get('artifact_id')} file_id={payload.get('file_id')}."
+        )
+        return {
+            "artifact_id": int(payload.get("artifact_id")),
+            "file_id": int(payload.get("file_id")),
+            "artifact_index": uploaded_index,
+            "role": uploaded_role,
         }
 
     def _upload_video_artifact(

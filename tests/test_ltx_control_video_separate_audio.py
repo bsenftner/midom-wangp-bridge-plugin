@@ -3,6 +3,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "plugin.py"
 
@@ -33,6 +35,8 @@ def plugin_instance(module):
     plugin = module.AwsWorkerBridgePlugin.__new__(module.AwsWorkerBridgePlugin)
     plugin._log = lambda *args, **kwargs: None
     plugin._find_lora_relative_path = lambda *args, **kwargs: None
+    plugin._lora_hash_cache = {}
+    plugin._active_job_id = None
     return plugin
 
 
@@ -163,3 +167,61 @@ def test_ltx_control_video_apply_inputs_uses_separate_driving_audio(tmp_path):
     assert settings["audio_guide"] == str(audio_path)
     assert settings["audio_prompt_type"] == "A"
     assert settings["video_prompt_type"] == module.LTX_CONTROL_VIDEO_MODES["human_motion"]
+    assert settings["_midom_control_video_source_sha256"] == "abc"
+    assert settings["_midom_control_video_guide_path"] == str(overscan_control_path.resolve())
+    assert settings["_midom_control_video_guide_sha256"] == plugin._sha256_file(overscan_control_path)
+    assert settings["_midom_input_video_sha256s"] == ["abc", plugin._sha256_file(overscan_control_path)]
+
+
+def test_ltx_control_video_submit_rejects_substituted_video_guide(tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    job = ltx_control_job(module)
+    settings = plugin._validate_ltx_control_video_job(
+        job,
+        1,
+        module.LTX23_VIDEO_MODEL_ID,
+        job["generation"],
+    )
+
+    prepared_control_path = tmp_path / "control-overscan.mp4"
+    stale_control_path = tmp_path / "old-control-overscan.mp4"
+    prepared_control_path.write_bytes(b"current")
+    stale_control_path.write_bytes(b"stale")
+
+    settings.update({
+        "video_guide": str(stale_control_path),
+        "_midom_control_video_guide_path": str(prepared_control_path.resolve()),
+        "_midom_control_video_guide_sha256": plugin._sha256_file(prepared_control_path),
+        "_midom_control_video_source_path": str((tmp_path / "control.mp4").resolve()),
+        "_midom_control_video_source_sha256": "bf39132fe129aacbe1dd9936180883dc4ffcb7d97ae3048b627ed46857491282",
+        "_midom_control_video_input_id": 2909,
+    })
+
+    with pytest.raises(ValueError, match="video_guide path changed"):
+        plugin._assert_ltx_control_video_submission_integrity(settings)
+
+
+def test_ltx_control_video_submit_accepts_current_video_guide(tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    job = ltx_control_job(module)
+    settings = plugin._validate_ltx_control_video_job(
+        job,
+        1,
+        module.LTX23_VIDEO_MODEL_ID,
+        job["generation"],
+    )
+
+    prepared_control_path = tmp_path / "control-overscan.mp4"
+    prepared_control_path.write_bytes(b"current")
+    settings.update({
+        "video_guide": str(prepared_control_path),
+        "_midom_control_video_guide_path": str(prepared_control_path.resolve()),
+        "_midom_control_video_guide_sha256": plugin._sha256_file(prepared_control_path),
+        "_midom_control_video_source_path": str((tmp_path / "control.mp4").resolve()),
+        "_midom_control_video_source_sha256": "bf39132fe129aacbe1dd9936180883dc4ffcb7d97ae3048b627ed46857491282",
+        "_midom_control_video_input_id": 2909,
+    })
+
+    plugin._assert_ltx_control_video_submission_integrity(settings)
