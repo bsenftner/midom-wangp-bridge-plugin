@@ -8105,6 +8105,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         trim_duration = self._storyboard_trim_duration(source_duration, processing, trim_start)
         effective_duration = max(0.1, float(trim_duration or max(0.1, source_duration - trim_start)))
         has_audio = bool(metadata.get("has_audio"))
+        expected_audio = self._coerce_bool(processing.get("expected_audio"), False)
+        if expected_audio and not has_audio:
+            raise ValueError(
+                "Storyboard segmented_media_extract_range expected source audio but the source segment has no audio stream; "
+                f"input_id={video_input.get('input_id')}."
+            )
         fps = self._coerce_int(processing.get("fps"), STORYBOARD_OUTPUT_FPS, 1, 120)
         command = [
             self._ffmpeg_binary(),
@@ -10641,8 +10647,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return value if value > 0 else 0.0
 
         video_duration = _duration_seconds(video_stream) or _duration_seconds(format_block)
-        audio_duration = _duration_seconds(audio_stream) if isinstance(audio_stream, dict) else 0.0
-        if audio_duration <= 0 and isinstance(audio_stream, dict):
+        has_audio_stream = isinstance(audio_stream, dict)
+        audio_duration = _duration_seconds(audio_stream) if has_audio_stream else 0.0
+        if audio_duration <= 0 and has_audio_stream:
             audio_duration = _duration_seconds(format_block)
         if video_duration <= 0:
             raise ValueError("Control video duration could not be read.")
@@ -10732,9 +10739,20 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 duration_source = str(duration_fallback_source or "fallback")
             else:
                 raise ValueError("Event source video duration could not be read.")
-        audio_duration = _duration_seconds(audio_stream) if isinstance(audio_stream, dict) else 0.0
-        if audio_duration <= 0 and isinstance(audio_stream, dict):
+        has_audio_stream = isinstance(audio_stream, dict)
+        audio_duration = _duration_seconds(audio_stream) if has_audio_stream else 0.0
+        audio_duration_source = "stream" if audio_duration > 0 else ""
+        if audio_duration <= 0 and has_audio_stream:
             audio_duration = _duration_seconds(format_block)
+            audio_duration_source = "container" if audio_duration > 0 else ""
+        if audio_duration <= 0 and has_audio_stream:
+            try:
+                fallback_duration = float(duration_fallback_seconds or 0.0)
+            except (TypeError, ValueError):
+                fallback_duration = 0.0
+            if fallback_duration > 0:
+                audio_duration = fallback_duration
+                audio_duration_source = str(duration_fallback_source or "fallback")
         orientation = "portrait" if display_height > display_width else "landscape"
         fps_text = str(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate") or "").strip()
         fps = 0.0
@@ -10757,8 +10775,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "orientation": orientation,
             "duration_seconds": duration,
             "duration_source": duration_source,
-            "has_audio": isinstance(audio_stream, dict) and audio_duration > 0,
+            "has_audio": has_audio_stream,
             "audio_duration_seconds": audio_duration,
+            "audio_duration_source": audio_duration_source,
             "video_codec": str(video_stream.get("codec_name") or "").strip().lower(),
             "audio_codec": str(audio_stream.get("codec_name") or "").strip().lower() if isinstance(audio_stream, dict) else "",
             "rotation_degrees": rotation,
@@ -10768,6 +10787,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "Probed Event source video; "
             f"filename={path.name!r} stored_size={width}x{height} display_size={display_width}x{display_height} "
             f"orientation={orientation} duration_seconds={duration:.2f} has_audio={metadata['has_audio']} "
+            f"audio_duration_seconds={audio_duration:.2f} audio_duration_source={audio_duration_source!r} "
             f"rotation_degrees={rotation} fps={metadata['fps'] if metadata['fps'] is not None else 'unknown'} "
             f"duration_source={duration_source!r}."
         )

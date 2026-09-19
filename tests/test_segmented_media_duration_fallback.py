@@ -97,6 +97,47 @@ def test_segmented_media_probe_accepts_missing_container_duration_with_fallback(
     assert metadata["display_height"] == 720
 
 
+def test_segmented_media_probe_preserves_audio_stream_with_missing_duration(monkeypatch, tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    path = tmp_path / "segment-with-opus.webm"
+    path.write_bytes(b"fake-webm")
+
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "vp9",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": "30/1",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "opus",
+                "sample_rate": "48000",
+            },
+        ],
+        "format": {},
+    }
+
+    completed = types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: completed)
+
+    metadata = plugin._probe_event_video_metadata(
+        path,
+        duration_fallback_seconds=30.0,
+        duration_fallback_source="input.source_duration_seconds",
+    )
+
+    assert metadata["duration_seconds"] == 30.0
+    assert metadata["duration_source"] == "input.source_duration_seconds"
+    assert metadata["has_audio"] is True
+    assert metadata["audio_duration_seconds"] == 30.0
+    assert metadata["audio_duration_source"] == "input.source_duration_seconds"
+    assert metadata["audio_codec"] == "opus"
+
+
 def test_storyboard_source_audio_fallback_does_not_use_processing_duration():
     module = load_plugin_module()
     plugin = plugin_instance(module)
@@ -573,6 +614,111 @@ def test_segmented_extract_ffmpeg_preserves_audio_when_present(tmp_path):
     command_text = " ".join(commands[0])
     assert "anullsrc" not in command_text
     assert "[0:a:0]aresample=48000" in command_text
+
+
+def test_segmented_extract_downloaded_webm_with_audio_stream_maps_source_audio(monkeypatch, tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+
+    class Response:
+        status_code = 200
+        headers = Headers({"Content-Type": "video/webm"})
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size=8192):
+            yield b"fake-webm"
+
+        def close(self):
+            return None
+
+    payload = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "vp9",
+                "width": 1280,
+                "height": 720,
+                "avg_frame_rate": "30/1",
+            },
+            {
+                "codec_type": "audio",
+                "codec_name": "opus",
+                "sample_rate": "48000",
+            },
+        ],
+        "format": {},
+    }
+    completed = types.SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+    monkeypatch.setattr(module.requests, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: completed)
+
+    connection = types.SimpleNamespace(api_base_url="https://midom.test", worker_id=7)
+    plugin._headers = lambda connection: {}
+    job = segmented_extract_job(module)
+    job["processing"]["expected_audio"] = True
+    job["processing"]["preserve_audio_if_possible"] = True
+    job["processing"]["audio_policy_version"] = "preserve_source_audio_v1"
+    job["inputs"] = [job["inputs"][0]]
+    job["processing"]["segments"] = [job["processing"]["segments"][0]]
+    job["processing"]["segments"][0]["source_duration_seconds"] = 30.0
+    commands = []
+    plugin._run_ffmpeg_with_progress = lambda connection, job_id, command, **kwargs: commands.append(command)
+
+    downloaded = plugin._download_storyboard_ffmpeg_processing_inputs(
+        connection,
+        job,
+        str(tmp_path),
+        job["inputs"],
+    )
+
+    assert downloaded[0]["metadata"]["has_audio"] is True
+    assert downloaded[0]["metadata"]["audio_duration_seconds"] == 30.0
+    downloaded[0]["_segment_payload"] = job["processing"]["segments"][0]
+    plugin._run_storyboard_segment_extract_ffmpeg(
+        connection,
+        20,
+        downloaded[0],
+        tmp_path / "out.mp4",
+        1280,
+        720,
+        types.SimpleNamespace(),
+        processing=plugin._storyboard_extract_range_segment_processing(downloaded[0], job["processing"], 0),
+        progress_start=5,
+        progress_end=40,
+        status="extract",
+    )
+
+    command_text = " ".join(commands[0])
+    assert "anullsrc" not in command_text
+    assert "[0:a:0]aresample=48000" in command_text
+
+
+def test_segmented_extract_expected_audio_fails_when_audio_stream_missing(tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    source = tmp_path / "silent-seg.webm"
+    source.write_bytes(b"webm")
+
+    try:
+        plugin._run_storyboard_segment_extract_ffmpeg(
+            types.SimpleNamespace(),
+            20,
+            {"input_id": 123, "path": str(source), "metadata": {"duration_seconds": 30.0, "has_audio": False}},
+            tmp_path / "out.mp4",
+            1280,
+            720,
+            types.SimpleNamespace(),
+            processing={"trim_start_seconds": 0.0, "trim_duration_seconds": 1.0, "fps": 30, "expected_audio": True},
+            progress_start=5,
+            progress_end=40,
+            status="extract",
+        )
+    except ValueError as exc:
+        assert "expected source audio" in str(exc)
+    else:
+        raise AssertionError("Expected segmented extract to fail when expected_audio=true and no audio stream exists.")
 
 
 def test_segmented_extract_ffmpeg_synthesizes_silence_only_when_audio_missing(tmp_path):
