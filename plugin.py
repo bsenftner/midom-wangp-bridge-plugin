@@ -2551,6 +2551,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         settings["video_length"] = 1
         if model_type == SENSENOVA_MODEL_ID:
             self._apply_sensenova_job_settings(settings, job, generation, resolution)
+        else:
+            self._apply_generic_image_prompt_processing_mode(settings, generation)
         self._apply_accelerator_profile(settings, model_type, generation)
         if tool_payload:
             self._apply_curated_image_tool_settings(settings, tool_payload["settings"])
@@ -2568,6 +2570,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             settings["_midom_layer_mode"] = "control_image_decomposition"
             settings["_midom_layer_output_count"] = output_count
         return settings
+
+    def _apply_generic_image_prompt_processing_mode(self, settings: dict[str, Any], generation: dict[str, Any]) -> None:
+        options = generation.get("options") or {}
+        if not isinstance(options, dict):
+            raise ValueError("Image generation.options must be a JSON object when provided.")
+        multi_prompts_gen_type = str(options.get("multi_prompts_gen_type") or "FG").strip().upper()
+        if multi_prompts_gen_type != "FG":
+            raise ValueError(
+                "Midom image jobs represent one generation task and require "
+                f"generation.options.multi_prompts_gen_type='FG'; got {multi_prompts_gen_type!r}."
+            )
+        settings["multi_prompts_gen_type"] = "FG"
+        settings["_midom_prompt_processing_mode"] = "FG"
 
     def _apply_sensenova_job_settings(
         self,
