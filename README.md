@@ -346,6 +346,7 @@ Currently advertised operation types include:
 - `segmented_media_extract_range`
 - `prepare_control_guided_video_inputs`
 - `prepare_driving_audio`
+- `extract_video_frame`
 - `multicam_seekable_mp4`
 - `mediastoryboard_card_pass_through_take`
 - `mediastoryboard_card_local_video_take`
@@ -416,6 +417,16 @@ Driving-audio preparation support includes:
 - Returning one typed artifact: artifact index `0`, role `driving_audio`, MIME type `audio/mpeg`.
 - Using Midom-supplied source duration metadata for raw segmented WebM files that lack readable container duration metadata.
 - Keeping this as deterministic audio preparation only; it does not call LongCat, LTX, or any other AI generation model.
+
+Source video frame extraction support includes:
+
+- Extracting a source-accurate PNG frame from one `source_video` input.
+- Seeking on the original source timeline and decoding to the requested timestamp rather than returning only a nearby keyframe.
+- Honoring FFmpeg autorotation so portrait videos with rotation metadata produce portrait PNGs.
+- Preserving the requested source display dimensions exactly, without resizing to AI-generation presets.
+- Returning one typed artifact: artifact index `0`, role `frame_image`, MIME type `image/png`.
+- Using Midom-supplied source duration metadata for raw WebM files that lack readable container duration metadata.
+- Keeping this as deterministic FFmpeg processing only; it does not call WanGP AI generation models.
 
 ## WanGP Asset Requirements
 

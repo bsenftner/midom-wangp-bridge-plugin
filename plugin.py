@@ -259,6 +259,8 @@ CONTROL_GUIDED_INPUT_PREPARATION_OPERATION = "prepare_control_guided_video_input
 CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION = "control_guided_input_preparation_v1"
 PREPARE_DRIVING_AUDIO_OPERATION = "prepare_driving_audio"
 PREPARE_DRIVING_AUDIO_CONTRACT_VERSION = "driving_audio_preparation_v1"
+EXTRACT_VIDEO_FRAME_OPERATION = "extract_video_frame"
+EXTRACT_VIDEO_FRAME_CONTRACT_VERSION = "video_frame_extraction_v1"
 PREPARE_DRIVING_AUDIO_RECIPE_KEYS = {
     "operation_type",
     "operation",
@@ -325,6 +327,7 @@ STORYBOARD_FFMPEG_OPERATION_TYPES = {
     "replace_video_soundtrack",
     "segmented_media_segment_normalize",
     "segmented_media_extract_range",
+    EXTRACT_VIDEO_FRAME_OPERATION,
     PREPARE_DRIVING_AUDIO_OPERATION,
     CONTROL_GUIDED_INPUT_PREPARATION_OPERATION,
     "multicam_seekable_mp4",
@@ -351,6 +354,7 @@ STORYBOARD_SINGLE_VIDEO_OPERATION_TYPES = {
     "replace_video_soundtrack",
     "segmented_media_segment_normalize",
     "segmented_media_extract_range",
+    EXTRACT_VIDEO_FRAME_OPERATION,
     "multicam_seekable_mp4",
     CONTROL_GUIDED_INPUT_PREPARATION_OPERATION,
     "mediastoryboard_card_pass_through_take",
@@ -1772,6 +1776,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "audio_preserve_or_silence_per_segment",
                     "h264_aac_mp4_faststart",
                 ],
+                EXTRACT_VIDEO_FRAME_OPERATION: [
+                    EXTRACT_VIDEO_FRAME_CONTRACT_VERSION,
+                    "source_timeline_seek",
+                    "decode_to_requested_timestamp",
+                    "autorotate",
+                    "source_display_dimensions",
+                    "source_duration_fallback",
+                    "typed_artifact_roles",
+                    "png_frame_image",
+                ],
                 PREPARE_DRIVING_AUDIO_OPERATION: [
                     PREPARE_DRIVING_AUDIO_CONTRACT_VERSION,
                     "ordered_audio_ranges",
@@ -1812,7 +1826,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "h264_aac_mp4_faststart",
                 ],
             },
-            "output_mime_types": ["video/mp4", "audio/mpeg"],
+            "output_mime_types": ["video/mp4", "audio/mpeg", "image/png"],
             "input_mime_types": {
                 "video": source_mime_types,
                 "source_video": source_mime_types,
@@ -1878,6 +1892,20 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "head_seconds": {"min": 0, "max": 5},
                         "tail_seconds": {"min": 0, "max": 5},
                         "tail_audio_mode": ["none", "silence"],
+                    },
+                },
+                EXTRACT_VIDEO_FRAME_OPERATION: {
+                    "contract_version": EXTRACT_VIDEO_FRAME_CONTRACT_VERSION,
+                    "output_roles": ["frame_image"],
+                    "required_output_roles": ["frame_image"],
+                    "optional_output_roles": [],
+                    "output_mime_types_by_role": {
+                        "frame_image": ["image/png"],
+                    },
+                    "recipe": {
+                        "seek_mode": ["source_timeline"],
+                        "rotation_mode": ["autorotate"],
+                        "output_format": ["png"],
                     },
                 },
             },
@@ -2943,6 +2971,37 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"prepare_driving_audio output must declare audio/mpeg; got {mime_type}.")
         return [{"artifact_index": 0, "role": "driving_audio", "mime_type": "audio/mpeg"}]
 
+    def _extract_video_frame_output_declarations(self, job: dict[str, Any], processing: dict[str, Any]) -> list[dict[str, Any]]:
+        output = job.get("output") if isinstance(job.get("output"), dict) else {}
+        declarations = None
+        for payload in (job, output, processing):
+            for key in ("artifacts", "outputs", "declared_artifacts"):
+                value = payload.get(key) if isinstance(payload, dict) else None
+                if isinstance(value, list) and value:
+                    declarations = value
+                    break
+            if declarations is not None:
+                break
+        if declarations is None:
+            declarations = [{"artifact_index": 0, "role": "frame_image", "mime_type": "image/png"}]
+        if len(declarations) != 1 or not isinstance(declarations[0], dict):
+            raise ValueError("extract_video_frame must declare exactly one output artifact.")
+        declaration = declarations[0]
+        artifact_index = self._coerce_int(declaration.get("artifact_index", declaration.get("index", 0)), 0, 0, 10)
+        role = str(declaration.get("role") or "").strip().lower()
+        mime_type = str(declaration.get("mime_type") or declaration.get("mime") or "").strip().lower()
+        if not mime_type:
+            mime_types = declaration.get("mime_types")
+            if isinstance(mime_types, list) and mime_types:
+                mime_type = str(mime_types[0] or "").strip().lower()
+        if artifact_index != 0:
+            raise ValueError(f"extract_video_frame output must use artifact_index 0; got {artifact_index}.")
+        if role != "frame_image":
+            raise ValueError(f"extract_video_frame output role must be frame_image; got {role or 'missing'}.")
+        if mime_type not in {"", "image/png", "png"}:
+            raise ValueError(f"extract_video_frame output must declare image/png; got {mime_type}.")
+        return [{"artifact_index": 0, "role": "frame_image", "mime_type": "image/png"}]
+
     def _validate_prepare_driving_audio_recipe(self, processing: dict[str, Any], output_declarations: list[dict[str, Any]]) -> dict[str, Any]:
         unknown_keys = sorted(
             key
@@ -3256,6 +3315,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_count != 1:
                 raise ValueError(f"Unsupported prepare_driving_audio output count: {output_count}")
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            if output_count != 1:
+                raise ValueError(f"Unsupported extract_video_frame output count: {output_count}")
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             if output_count not in {1, 2}:
                 raise ValueError(f"Unsupported control-guided input preparation output count: {output_count}")
@@ -3265,6 +3327,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
                 raise ValueError(f"Unsupported prepare_driving_audio output format: {output_format}")
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            if output_format not in {"", "png", "image/png"}:
+                raise ValueError(f"Unsupported extract_video_frame output format: {output_format}")
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             if output_format not in {"", "mp4", "mixed"}:
                 raise ValueError(f"Unsupported control-guided input preparation output format: {output_format}")
@@ -3290,6 +3355,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             output_declarations = self._prepare_driving_audio_output_declarations(job, processing)
             prepare_driving_audio_recipe = self._validate_prepare_driving_audio_recipe(processing, output_declarations)
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            output_declarations = self._extract_video_frame_output_declarations(job, processing)
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             output_declarations = self._control_guided_output_declarations(job, processing)
             control_guided_recipe = self._validate_control_guided_recipe(processing, output_declarations)
@@ -3298,6 +3365,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             width = int(control_guided_recipe["output_width"])
             height = int(control_guided_recipe["output_height"])
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            output_payload = processing.get("output") if isinstance(processing.get("output"), dict) else {}
+            width = self._coerce_int(output.get("width") or output_payload.get("width") or processing.get("output_width") or processing.get("width"), 0, 1, 100_000)
+            height = self._coerce_int(output.get("height") or output_payload.get("height") or processing.get("output_height") or processing.get("height"), 0, 1, 100_000)
+            contract_version = str(processing.get("contract_version") or output.get("contract_version") or "").strip()
+            if contract_version and contract_version != EXTRACT_VIDEO_FRAME_CONTRACT_VERSION:
+                raise ValueError(f"Unsupported extract_video_frame contract_version: {contract_version}")
+            seek_mode = str(processing.get("seek_mode") or "source_timeline").strip().lower()
+            if seek_mode != "source_timeline":
+                raise ValueError(f"Unsupported extract_video_frame seek_mode: {seek_mode}")
+            rotation_mode = str(processing.get("rotation_mode") or "autorotate").strip().lower()
+            if rotation_mode != "autorotate":
+                raise ValueError(f"Unsupported extract_video_frame rotation_mode: {rotation_mode}")
+            output_mime = str(output_payload.get("mime_type") or output.get("mime_type") or "image/png").strip().lower()
+            if output_mime != "image/png":
+                raise ValueError(f"Unsupported extract_video_frame output MIME type: {output_mime}")
         if (width == 0) != (height == 0):
             raise ValueError("Storyboard output width and height must be supplied together.")
         trim_start = self._coerce_float(
@@ -3392,6 +3475,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             segments = processing.get("segments")
             if not isinstance(segments, list) or not segments:
                 raise ValueError("Storyboard segmented_media_extract_range requires processing.segments.")
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            if video_count != 1 or source_video_count != 1:
+                raise ValueError(
+                    "Storyboard extract_video_frame requires exactly one source_video input; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}."
+                )
+            if image_count or audio_count:
+                raise ValueError("Storyboard extract_video_frame accepts only one source_video input.")
+            if width <= 0 or height <= 0:
+                raise ValueError("Storyboard extract_video_frame requires output.width and output.height.")
+            self._coerce_float(
+                processing.get("frame_time_seconds"),
+                0.0,
+                0.0,
+                MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+            )
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
                 raise ValueError(f"Unsupported storyboard local video take render_mode: {render_mode or 'missing'}")
@@ -3442,6 +3541,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"trim_start={trim_start} trim_duration={trim_duration} trim_end={trim_end} "
             f"video_inputs={video_count} image_inputs={image_count} audio_inputs={audio_count}."
         )
+        max_artifact_bytes = MAX_STORYBOARD_VIDEO_OUTPUT_BYTES
+        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+            max_artifact_bytes = MAX_AUDIO_BYTES
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            max_artifact_bytes = MAX_IMAGE_BYTES
         return {
             "model_type": STORYBOARD_FFMPEG_PROCESSOR_ID,
             "_midom_job_id": job_id,
@@ -3451,9 +3555,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
             "_midom_operation_type": operation_type,
             "_midom_output_count": output_count,
-            "_midom_output_format": "mp3" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "mp4",
-            "_midom_output_mime_type": "audio/mpeg" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "video/mp4",
-            "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), MAX_STORYBOARD_VIDEO_OUTPUT_BYTES, 1, MAX_STORYBOARD_VIDEO_OUTPUT_BYTES),
+            "_midom_output_format": "mp3" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "png" if operation_type == EXTRACT_VIDEO_FRAME_OPERATION else "mp4",
+            "_midom_output_mime_type": "audio/mpeg" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "image/png" if operation_type == EXTRACT_VIDEO_FRAME_OPERATION else "video/mp4",
+            "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), max_artifact_bytes, 1, max_artifact_bytes),
             "_midom_output_declarations": output_declarations,
             "_midom_control_guided_recipe": control_guided_recipe,
             "_midom_prepare_driving_audio_recipe": prepare_driving_audio_recipe,
@@ -6245,6 +6349,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
                 return f"unsupported prepare_driving_audio output_format: {output_format}"
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            if output_format not in {"", "png", "image/png"}:
+                return f"unsupported extract_video_frame output_format: {output_format}"
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             if output_format not in {"", "mp4", "mixed"}:
                 return f"unsupported control-guided output_format: {output_format}"
@@ -6257,6 +6364,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_count != 1:
                 return f"unsupported prepare_driving_audio output_count: {output_count}"
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            if output_count != 1:
+                return f"unsupported extract_video_frame output_count: {output_count}"
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             if output_count not in {1, 2}:
                 return f"unsupported control-guided output_count: {output_count}"
@@ -6303,6 +6413,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if video_count < 1 or source_video_count != video_count:
                 return (
                     "segmented_media_extract_range requires one or more source_video inputs; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}"
+                )
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            source_video_count = self._coerce_int(summary.get("source_video_count"), video_count, 0, 10)
+            if video_count != 1 or source_video_count != 1:
+                return (
+                    "extract_video_frame requires exactly one source_video input; "
                     f"got source_video={source_video_count}, video_inputs={video_count}"
                 )
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
@@ -6905,6 +7022,69 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             )
             self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
             return output_artifacts, result_metadata
+        if operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            if not video_inputs:
+                raise ValueError("Storyboard extract_video_frame requires a source_video input.")
+            primary = self._storyboard_primary_video_input(video_inputs)
+            output_width, output_height = self._extract_video_frame_output_size(processing)
+            output_path = self._storyboard_target_image_output_path(temp_dir, processing)
+            self._set_active_job_status(
+                phase="processing",
+                status="Extracting source-accurate video frame.",
+                progress=3,
+            )
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+            self._run_storyboard_extract_video_frame_ffmpeg(
+                connection,
+                job_id,
+                primary,
+                output_path,
+                output_width,
+                output_height,
+                process_handle,
+                processing=processing,
+                progress_start=5,
+                progress_end=95,
+                status="Extracting source-accurate video frame.",
+            )
+            image_metadata = self._validate_storyboard_frame_png_output(
+                output_path,
+                expected_width=output_width,
+                expected_height=output_height,
+                max_bytes=self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_IMAGE_BYTES, 1, MAX_IMAGE_BYTES),
+            )
+            self._set_active_job_status(
+                phase="uploading",
+                status="Video frame extraction finished; uploading PNG.",
+                progress=96,
+            )
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+            return [
+                {
+                    "path": str(output_path),
+                    "artifact_index": 0,
+                    "role": "frame_image",
+                    "mime_type": "image/png",
+                    "metadata": image_metadata,
+                }
+            ], {
+                "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+                "processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+                "operation_type": EXTRACT_VIDEO_FRAME_OPERATION,
+                "contract_version": EXTRACT_VIDEO_FRAME_CONTRACT_VERSION,
+                "ffmpeg_version": self._ffmpeg_version_string(),
+                "frame_time_seconds": self._coerce_float(processing.get("frame_time_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS),
+                "seek_mode": "source_timeline",
+                "rotation_mode": "autorotate",
+                "output_width": int(image_metadata["width"]),
+                "output_height": int(image_metadata["height"]),
+                "source_width": int((primary.get("metadata") or {}).get("display_width") or 0),
+                "source_height": int((primary.get("metadata") or {}).get("display_height") or 0),
+                "source_duration_seconds": float((primary.get("metadata") or {}).get("duration_seconds") or 0.0),
+                "source_duration_fallback_used": str((primary.get("metadata") or {}).get("duration_source") or "container") != "container",
+                "artifact_roles": [{"artifact_index": 0, "role": "frame_image", "mime_type": "image/png"}],
+                "worker_id": connection.worker_id,
+            }
         if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             if render_mode == "voice_over_video":
                 if not video_inputs:
@@ -9454,6 +9634,129 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         requested_name = re.sub(r"[^A-Za-z0-9._-]+", "-", requested_name).strip(".-") or default_name
         return Path(temp_dir) / requested_name
 
+    def _storyboard_target_image_output_path(self, temp_dir: str, processing: dict[str, Any], default_name: str = "storyboard-frame.png") -> Path:
+        mediaassembly_input = processing.get("mediaassembly_input") if isinstance(processing.get("mediaassembly_input"), dict) else {}
+        requested_name = Path(str(processing.get("target_filename") or mediaassembly_input.get("filename") or default_name)).name
+        if Path(requested_name).suffix.lower() != ".png":
+            requested_name = f"{Path(requested_name).stem or Path(default_name).stem}.png"
+        requested_name = re.sub(r"[^A-Za-z0-9._-]+", "-", requested_name).strip(".-") or default_name
+        return Path(temp_dir) / requested_name
+
+    def _extract_video_frame_output_size(self, processing: dict[str, Any]) -> tuple[int, int]:
+        output_payload = processing.get("output") if isinstance(processing.get("output"), dict) else {}
+        width = self._coerce_int(output_payload.get("width") or processing.get("output_width") or processing.get("width"), 0, 1, 100_000)
+        height = self._coerce_int(output_payload.get("height") or processing.get("output_height") or processing.get("height"), 0, 1, 100_000)
+        return int(width), int(height)
+
+    def _run_storyboard_extract_video_frame_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        source_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(source_input.get("path") or ""))
+        if not source_path.is_file():
+            raise ValueError("Storyboard extract_video_frame source video file is missing.")
+        metadata = source_input.get("metadata") if isinstance(source_input.get("metadata"), dict) else {}
+        frame_time = self._coerce_float(processing.get("frame_time_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        source_duration = float(metadata.get("duration_seconds") or 0.0)
+        if source_duration > 0 and frame_time > source_duration + 0.05:
+            raise ValueError(
+                "Storyboard extract_video_frame timestamp exceeds source duration; "
+                f"frame_time_seconds={frame_time:.3f} source_duration_seconds={source_duration:.3f}."
+            )
+        display_width = self._coerce_int(metadata.get("display_width") or metadata.get("width"), 0, 0, 100_000)
+        display_height = self._coerce_int(metadata.get("display_height") or metadata.get("height"), 0, 0, 100_000)
+        if display_width and display_height and (display_width, display_height) != (output_width, output_height):
+            raise ValueError(
+                "Storyboard extract_video_frame output dimensions must match source display dimensions; "
+                f"source_display={display_width}x{display_height} requested={output_width}x{output_height}."
+            )
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-autorotate",
+            "-i",
+            str(source_path),
+            "-ss",
+            f"{frame_time:.6f}",
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-an",
+            "-f",
+            "image2",
+            "-c:v",
+            "png",
+            str(output_path),
+        ]
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=1.0,
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=max(60, min(600, self._storyboard_step_timeout(max(1.0, min(source_duration or 60.0, 60.0))))),
+        )
+
+    def _validate_storyboard_frame_png_output(
+        self,
+        output_path: Path,
+        *,
+        expected_width: int,
+        expected_height: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            raise ValueError("Storyboard extract_video_frame did not produce a PNG artifact.")
+        file_size = output_path.stat().st_size
+        if file_size > max_bytes:
+            raise ValueError(f"Storyboard extract_video_frame PNG exceeds allowed size: {file_size} bytes.")
+        with output_path.open("rb") as reader:
+            header = reader.read(8)
+        if header != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("Storyboard extract_video_frame output is not a PNG file.")
+        try:
+            with Image.open(output_path) as image:
+                width, height = image.size
+                decoded_format = str(image.format or "").upper()
+                image.verify()
+        except Exception as exc:
+            raise ValueError(f"Storyboard extract_video_frame PNG could not be decoded: {exc}") from exc
+        if decoded_format != "PNG":
+            raise ValueError(f"Storyboard extract_video_frame output decoded as {decoded_format or 'unknown'}, expected PNG.")
+        if (int(width), int(height)) != (int(expected_width), int(expected_height)):
+            raise ValueError(
+                "Storyboard extract_video_frame PNG dimensions do not match requested source display dimensions; "
+                f"expected={expected_width}x{expected_height} got={width}x{height}."
+            )
+        return {
+            "width": int(width),
+            "height": int(height),
+            "decoded_format": decoded_format,
+            "bytes": int(file_size),
+        }
+
     def _storyboard_local_take_output_size(self, image_inputs: list[dict[str, Any]], processing: dict[str, Any]) -> tuple[int, int]:
         width = self._coerce_int(processing.get("output_width") or processing.get("width"), 0, 0, 4096)
         height = self._coerce_int(processing.get("output_height") or processing.get("height"), 0, 0, 4096)
@@ -11570,6 +11873,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         processing,
                         response.headers,
                     )
+                elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION and kind == "source_video":
+                    fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(
+                        item,
+                        response.headers,
+                    )
                 elif operation_type in {"multicam_card_pass_through_take", CONTROL_GUIDED_INPUT_PREPARATION_OPERATION} and kind in {"source_video", "control_video_source"}:
                     fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(
                         item,
@@ -11604,6 +11912,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 ):
                     self._log(
                         "Using Midom supplied segmented range source duration fallback; "
+                        f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
+                        f"duration_seconds={duration_seconds:.3f}."
+                    )
+                elif (
+                    operation_type == EXTRACT_VIDEO_FRAME_OPERATION
+                    and fallback_duration is not None
+                    and metadata.get("duration_source") != "container"
+                ):
+                    self._log(
+                        "Using Midom supplied extract-video-frame source duration fallback; "
                         f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
                         f"duration_seconds={duration_seconds:.3f}."
                     )
@@ -11720,6 +12038,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 [item for item in downloaded if item.get("category") == "video"],
                 processing,
             )
+        elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
+            source_video_count = sum(1 for item in downloaded if item.get("kind") == "source_video")
+            image_count = sum(1 for item in downloaded if item.get("category") == "image")
+            audio_count = sum(1 for item in downloaded if item.get("category") == "audio")
+            if video_count != 1 or source_video_count != 1 or image_count or audio_count:
+                raise ValueError(
+                    "Storyboard extract_video_frame requires exactly one downloaded source_video input; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}, image_inputs={image_count}, audio_inputs={audio_count}."
+                )
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             render_mode = str(processing.get("render_mode") or "").strip().lower()
             image_count = sum(1 for item in downloaded if item.get("category") == "image")
@@ -12636,6 +12963,20 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Media processing audio artifact size is outside allowed bounds: {file_size} bytes")
             with path.open("rb") as reader:
                 data = reader.read()
+        elif mime_type == "image/png":
+            if file_size <= 0 or file_size > MAX_IMAGE_BYTES:
+                raise ValueError(f"Media processing image artifact size is outside allowed bounds: {file_size} bytes")
+            with path.open("rb") as reader:
+                data = reader.read()
+            if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("Media processing image artifact does not look like PNG bytes.")
+            try:
+                with Image.open(path) as image:
+                    if str(image.format or "").upper() != "PNG":
+                        raise ValueError("decoded format is not PNG")
+                    image.verify()
+            except Exception as exc:
+                raise ValueError(f"Media processing image artifact could not be decoded as PNG: {exc}") from exc
         else:
             raise ValueError(f"Unsupported media processing typed artifact MIME type: {mime_type}")
         sha256 = hashlib.sha256(data).hexdigest()
