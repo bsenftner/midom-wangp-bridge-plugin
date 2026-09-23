@@ -328,7 +328,7 @@ Midom remains responsible for poster generation, captions, moderation, approval,
 - Durable Storyboard FFmpeg processing for paired Midom projects.
 - Used by Multi-Camera Storyboards and Media Storyboards when Midom routes eligible operations to a paired worker.
 - Lets card-level and assembly-level video work continue after a browser tab is closed or refreshed.
-- Produces one typed artifact per job. Most operations return H.264/AAC MP4; driving-audio preparation returns MP3.
+- Produces one typed artifact per job. Most operations return H.264/AAC MP4; driving-audio and transcription-audio preparation return MP3.
 - Uses the existing claimed-job input download route and canonical `inputs[].input_id` values.
 - Validates downloaded input MIME types by input role before processing.
 - Reports progress while FFmpeg runs, applies subprocess timeouts, and terminates FFmpeg on cancellation.
@@ -342,10 +342,12 @@ Currently advertised operation types include:
 - `multicam_optimize_video`
 - `optimize_video`
 - `replace_video_soundtrack`
+- `overlay_png_on_video`
 - `segmented_media_segment_normalize`
 - `segmented_media_extract_range`
 - `prepare_control_guided_video_inputs`
 - `prepare_driving_audio`
+- `prepare_transcription_audio`
 - `extract_video_frame`
 - `multicam_seekable_mp4`
 - `mediastoryboard_card_pass_through_take`
@@ -386,6 +388,16 @@ Storyboard soundtrack replacement support includes:
 - Honoring video start offset, soundtrack start offset, requested duration, and optional head/tail silence.
 - Tolerating raw segmented WebM `source_video` and `source_audio` inputs for pass-through card renders when Midom supplies per-input or download-header source duration metadata.
 
+Single-video PNG overlay support includes:
+
+- Applying one full-frame `overlay_png` input over one `source_video` input for `overlay_png_on_video`.
+- Scaling the PNG to the base video frame, preserving PNG alpha, and applying the requested opacity.
+- Repeating the PNG overlay for the requested composition duration.
+- Preserving base-video audio only, with compatibility silence when the base has no audio stream.
+- Returning one typed artifact: artifact index `0`, role `video`, MIME type `video/mp4`.
+- Using Midom-supplied source duration metadata for raw WebM files that lack readable container duration metadata.
+- Keeping this as deterministic FFmpeg processing only; it does not call WanGP AI generation models.
+
 Segmented capture normalization support includes:
 
 - Normalizing raw browser capture segments, usually WebM, into storyboard-compatible H.264/AAC MP4.
@@ -417,6 +429,15 @@ Driving-audio preparation support includes:
 - Returning one typed artifact: artifact index `0`, role `driving_audio`, MIME type `audio/mpeg`.
 - Using Midom-supplied source duration metadata for raw segmented WebM files that lack readable container duration metadata.
 - Keeping this as deterministic audio preparation only; it does not call LongCat, LTX, or any other AI generation model.
+
+Transcription-audio preparation support includes:
+
+- Extracting full-duration audio from one `transcription_source` input for Midom's Transcribe Spoken Media workflow.
+- Accepting video containers with audio streams, including raw segmented WebM captures.
+- Encoding one transient MP3 with `libmp3lame`, 16 kHz mono, and 96 kbps.
+- Returning one typed artifact: artifact index `0`, role `transcription_audio`, MIME type `audio/mpeg`.
+- Using Midom-supplied source duration metadata when WebM duration metadata is missing, while still requiring a real audio stream.
+- Keeping this as deterministic FFmpeg preprocessing only; it does not perform speech recognition or create transcript text.
 
 Source video frame extraction support includes:
 

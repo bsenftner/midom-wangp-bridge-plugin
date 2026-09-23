@@ -259,8 +259,12 @@ CONTROL_GUIDED_INPUT_PREPARATION_OPERATION = "prepare_control_guided_video_input
 CONTROL_GUIDED_INPUT_PREPARATION_CONTRACT_VERSION = "control_guided_input_preparation_v1"
 PREPARE_DRIVING_AUDIO_OPERATION = "prepare_driving_audio"
 PREPARE_DRIVING_AUDIO_CONTRACT_VERSION = "driving_audio_preparation_v1"
+PREPARE_TRANSCRIPTION_AUDIO_OPERATION = "prepare_transcription_audio"
+PREPARE_TRANSCRIPTION_AUDIO_CONTRACT_VERSION = "transcription_audio_preparation_v1"
 EXTRACT_VIDEO_FRAME_OPERATION = "extract_video_frame"
 EXTRACT_VIDEO_FRAME_CONTRACT_VERSION = "video_frame_extraction_v1"
+OVERLAY_PNG_ON_VIDEO_OPERATION = "overlay_png_on_video"
+SINGLE_OUTPUT_VIDEO_TRANSFORM_CONTRACT_VERSION = "single_output_video_transform_v1"
 PREPARE_DRIVING_AUDIO_RECIPE_KEYS = {
     "operation_type",
     "operation",
@@ -327,7 +331,9 @@ STORYBOARD_FFMPEG_OPERATION_TYPES = {
     "replace_video_soundtrack",
     "segmented_media_segment_normalize",
     "segmented_media_extract_range",
+    OVERLAY_PNG_ON_VIDEO_OPERATION,
     EXTRACT_VIDEO_FRAME_OPERATION,
+    PREPARE_TRANSCRIPTION_AUDIO_OPERATION,
     PREPARE_DRIVING_AUDIO_OPERATION,
     CONTROL_GUIDED_INPUT_PREPARATION_OPERATION,
     "multicam_seekable_mp4",
@@ -388,6 +394,7 @@ STORYBOARD_AUDIO_INPUT_KINDS = {
     "soundtrack_audio",
     "driving_audio",
     "driving_audio_source",
+    "transcription_source",
     "narration_audio",
 }
 ALLOWED_STORYBOARD_INPUT_KINDS = STORYBOARD_VIDEO_INPUT_KINDS | STORYBOARD_IMAGE_INPUT_KINDS | STORYBOARD_AUDIO_INPUT_KINDS
@@ -1776,6 +1783,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "audio_preserve_or_silence_per_segment",
                     "h264_aac_mp4_faststart",
                 ],
+                OVERLAY_PNG_ON_VIDEO_OPERATION: [
+                    SINGLE_OUTPUT_VIDEO_TRANSFORM_CONTRACT_VERSION,
+                    "base_video_plus_png_overlay",
+                    "scale_overlay_to_base",
+                    "png_alpha",
+                    "overlay_opacity",
+                    "base_audio_preservation",
+                    "source_duration_fallback",
+                    "h264_aac_mp4_faststart",
+                    "typed_artifact_roles",
+                ],
                 EXTRACT_VIDEO_FRAME_OPERATION: [
                     EXTRACT_VIDEO_FRAME_CONTRACT_VERSION,
                     "source_timeline_seek",
@@ -1794,6 +1812,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "audio_stream_validation",
                     "mp3_48khz_stereo",
                     "bounded_silence_padding",
+                    "typed_artifact_roles",
+                ],
+                PREPARE_TRANSCRIPTION_AUDIO_OPERATION: [
+                    PREPARE_TRANSCRIPTION_AUDIO_CONTRACT_VERSION,
+                    "video_audio_extraction",
+                    "source_duration_fallback",
+                    "full_duration_audio",
+                    "mp3_libmp3lame",
+                    "mono_16khz_96kbps",
                     "typed_artifact_roles",
                 ],
                 CONTROL_GUIDED_INPUT_PREPARATION_OPERATION: [
@@ -1849,6 +1876,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "soundtrack_audio": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
                 "driving_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
                 "driving_audio_source": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
+                "transcription_source": sorted(ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES),
                 "narration_audio": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
             },
             "contracts": {
@@ -1868,6 +1896,23 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "head_seconds": {"min": 0, "max": 5},
                         "tail_seconds": {"min": 0, "max": 5},
                         "padding_mode": ["silence"],
+                    },
+                },
+                PREPARE_TRANSCRIPTION_AUDIO_OPERATION: {
+                    "contract_version": PREPARE_TRANSCRIPTION_AUDIO_CONTRACT_VERSION,
+                    "output_roles": ["transcription_audio"],
+                    "required_output_roles": ["transcription_audio"],
+                    "optional_output_roles": [],
+                    "output_mime_types_by_role": {
+                        "transcription_audio": ["audio/mpeg"],
+                    },
+                    "recipe": {
+                        "output_format": ["mp3"],
+                        "audio_codec": ["libmp3lame"],
+                        "sample_rate_hz": [16000],
+                        "channels": [1],
+                        "bitrate_kbps": [96],
+                        "preserve_full_duration": [True],
                     },
                 },
                 CONTROL_GUIDED_INPUT_PREPARATION_OPERATION: {
@@ -1892,6 +1937,25 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "head_seconds": {"min": 0, "max": 5},
                         "tail_seconds": {"min": 0, "max": 5},
                         "tail_audio_mode": ["none", "silence"],
+                    },
+                },
+                OVERLAY_PNG_ON_VIDEO_OPERATION: {
+                    "contract_version": SINGLE_OUTPUT_VIDEO_TRANSFORM_CONTRACT_VERSION,
+                    "output_roles": ["video"],
+                    "required_output_roles": ["video"],
+                    "optional_output_roles": [],
+                    "output_mime_types_by_role": {
+                        "video": ["video/mp4"],
+                    },
+                    "recipe": {
+                        "visual.fit_mode": ["scale_to_base"],
+                        "visual.alpha_mode": ["png_alpha"],
+                        "visual.end_behavior": ["repeat"],
+                        "audio.mode": ["base"],
+                        "output.container": ["mp4"],
+                        "output.video_codec": ["h264"],
+                        "output.audio_codec": ["aac"],
+                        "output.pixel_format": ["yuv420p"],
                     },
                 },
                 EXTRACT_VIDEO_FRAME_OPERATION: {
@@ -2971,6 +3035,37 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"prepare_driving_audio output must declare audio/mpeg; got {mime_type}.")
         return [{"artifact_index": 0, "role": "driving_audio", "mime_type": "audio/mpeg"}]
 
+    def _prepare_transcription_audio_output_declarations(self, job: dict[str, Any], processing: dict[str, Any]) -> list[dict[str, Any]]:
+        output = job.get("output") if isinstance(job.get("output"), dict) else {}
+        declarations = None
+        for payload in (job, output, processing):
+            for key in ("artifacts", "outputs", "declared_artifacts"):
+                value = payload.get(key) if isinstance(payload, dict) else None
+                if isinstance(value, list) and value:
+                    declarations = value
+                    break
+            if declarations is not None:
+                break
+        if declarations is None:
+            declarations = [{"artifact_index": 0, "role": "transcription_audio", "mime_type": "audio/mpeg"}]
+        if len(declarations) != 1 or not isinstance(declarations[0], dict):
+            raise ValueError("prepare_transcription_audio must declare exactly one output artifact.")
+        declaration = declarations[0]
+        artifact_index = self._coerce_int(declaration.get("artifact_index", declaration.get("index", 0)), 0, 0, 10)
+        role = str(declaration.get("role") or "").strip().lower()
+        mime_type = str(declaration.get("mime_type") or declaration.get("mime") or "").strip().lower()
+        if not mime_type:
+            mime_types = declaration.get("mime_types")
+            if isinstance(mime_types, list) and mime_types:
+                mime_type = str(mime_types[0] or "").strip().lower()
+        if artifact_index != 0:
+            raise ValueError(f"prepare_transcription_audio output must use artifact_index 0; got {artifact_index}.")
+        if role != "transcription_audio":
+            raise ValueError(f"prepare_transcription_audio output role must be transcription_audio; got {role or 'missing'}.")
+        if mime_type not in {"", "audio/mpeg", "audio/mp3"}:
+            raise ValueError(f"prepare_transcription_audio output must declare audio/mpeg; got {mime_type}.")
+        return [{"artifact_index": 0, "role": "transcription_audio", "mime_type": "audio/mpeg"}]
+
     def _extract_video_frame_output_declarations(self, job: dict[str, Any], processing: dict[str, Any]) -> list[dict[str, Any]]:
         output = job.get("output") if isinstance(job.get("output"), dict) else {}
         declarations = None
@@ -3001,6 +3096,119 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if mime_type not in {"", "image/png", "png"}:
             raise ValueError(f"extract_video_frame output must declare image/png; got {mime_type}.")
         return [{"artifact_index": 0, "role": "frame_image", "mime_type": "image/png"}]
+
+    def _single_video_output_declarations(self, job: dict[str, Any], processing: dict[str, Any], operation_label: str) -> list[dict[str, Any]]:
+        output = job.get("output") if isinstance(job.get("output"), dict) else {}
+        declarations = None
+        for payload in (job, output, processing):
+            for key in ("artifacts", "outputs", "declared_artifacts"):
+                value = payload.get(key) if isinstance(payload, dict) else None
+                if isinstance(value, list) and value:
+                    declarations = value
+                    break
+            if declarations is not None:
+                break
+        if declarations is None:
+            declarations = [{"artifact_index": 0, "role": "video", "mime_type": "video/mp4"}]
+        if len(declarations) != 1 or not isinstance(declarations[0], dict):
+            raise ValueError(f"{operation_label} must declare exactly one output artifact.")
+        declaration = declarations[0]
+        artifact_index = self._coerce_int(declaration.get("artifact_index", declaration.get("index", 0)), 0, 0, 10)
+        role = str(declaration.get("role") or "").strip().lower()
+        mime_type = str(declaration.get("mime_type") or declaration.get("mime") or "").strip().lower()
+        if not mime_type:
+            mime_types = declaration.get("mime_types")
+            if isinstance(mime_types, list) and mime_types:
+                mime_type = str(mime_types[0] or "").strip().lower()
+        if artifact_index != 0:
+            raise ValueError(f"{operation_label} output must use artifact_index 0; got {artifact_index}.")
+        if role != "video":
+            raise ValueError(f"{operation_label} output role must be video; got {role or 'missing'}.")
+        if mime_type not in {"", "video/mp4", "mp4"}:
+            raise ValueError(f"{operation_label} output must declare video/mp4; got {mime_type}.")
+        return [{"artifact_index": 0, "role": "video", "mime_type": "video/mp4"}]
+
+    def _validate_overlay_png_on_video_recipe(self, processing: dict[str, Any]) -> dict[str, Any]:
+        contract_version = str(processing.get("contract_version") or "").strip()
+        if contract_version and contract_version != SINGLE_OUTPUT_VIDEO_TRANSFORM_CONTRACT_VERSION:
+            raise ValueError(f"Unsupported overlay_png_on_video contract_version: {contract_version}")
+        visual = processing.get("visual") if isinstance(processing.get("visual"), dict) else {}
+        audio = processing.get("audio") if isinstance(processing.get("audio"), dict) else {}
+        output = processing.get("output") if isinstance(processing.get("output"), dict) else {}
+        allowed_visual_keys = {
+            "fit_mode",
+            "x",
+            "y",
+            "opacity",
+            "active_start_seconds",
+            "active_end_seconds",
+            "alpha_mode",
+            "end_behavior",
+        }
+        allowed_audio_keys = {"mode"}
+        allowed_output_keys = {"container", "video_codec", "audio_codec", "pixel_format", "faststart"}
+        extra_visual = sorted(set(visual.keys()) - allowed_visual_keys)
+        extra_audio = sorted(set(audio.keys()) - allowed_audio_keys)
+        extra_output = sorted(set(output.keys()) - allowed_output_keys)
+        if extra_visual:
+            raise ValueError(f"Unsupported overlay_png_on_video visual field(s): {', '.join(extra_visual)}")
+        if extra_audio:
+            raise ValueError(f"Unsupported overlay_png_on_video audio field(s): {', '.join(extra_audio)}")
+        if extra_output:
+            raise ValueError(f"Unsupported overlay_png_on_video output field(s): {', '.join(extra_output)}")
+        fit_mode = str(visual.get("fit_mode") or "scale_to_base").strip().lower()
+        if fit_mode != "scale_to_base":
+            raise ValueError(f"Unsupported overlay_png_on_video visual.fit_mode: {fit_mode}")
+        x = self._coerce_int(visual.get("x"), 0, -4096, 4096)
+        y = self._coerce_int(visual.get("y"), 0, -4096, 4096)
+        if x != 0 or y != 0:
+            raise ValueError("overlay_png_on_video first pass supports only visual.x=0 and visual.y=0.")
+        opacity = self._coerce_float(visual.get("opacity"), 1.0, 0.0, 1.0)
+        active_start = self._coerce_float(visual.get("active_start_seconds"), 0.0, 0.0, MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if active_start != 0.0:
+            raise ValueError("overlay_png_on_video first pass supports only active_start_seconds=0.")
+        active_end = self._optional_positive_float(visual.get("active_end_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        alpha_mode = str(visual.get("alpha_mode") or "png_alpha").strip().lower()
+        if alpha_mode != "png_alpha":
+            raise ValueError(f"Unsupported overlay_png_on_video visual.alpha_mode: {alpha_mode}")
+        end_behavior = str(visual.get("end_behavior") or "repeat").strip().lower()
+        if end_behavior != "repeat":
+            raise ValueError(f"Unsupported overlay_png_on_video visual.end_behavior: {end_behavior}")
+        audio_mode = str(audio.get("mode") or "base").strip().lower()
+        if audio_mode != "base":
+            raise ValueError(f"Unsupported overlay_png_on_video audio.mode: {audio_mode}")
+        container = str(output.get("container") or "mp4").strip().lower()
+        video_codec = str(output.get("video_codec") or "h264").strip().lower()
+        audio_codec = str(output.get("audio_codec") or "aac").strip().lower()
+        pixel_format = str(output.get("pixel_format") or "yuv420p").strip().lower()
+        faststart = self._coerce_bool(output.get("faststart"), True)
+        if container != "mp4":
+            raise ValueError(f"Unsupported overlay_png_on_video output.container: {container}")
+        if video_codec != "h264":
+            raise ValueError(f"Unsupported overlay_png_on_video output.video_codec: {video_codec}")
+        if audio_codec != "aac":
+            raise ValueError(f"Unsupported overlay_png_on_video output.audio_codec: {audio_codec}")
+        if pixel_format != "yuv420p":
+            raise ValueError(f"Unsupported overlay_png_on_video output.pixel_format: {pixel_format}")
+        if not faststart:
+            raise ValueError("overlay_png_on_video requires output.faststart=true.")
+        return {
+            "contract_version": SINGLE_OUTPUT_VIDEO_TRANSFORM_CONTRACT_VERSION,
+            "fit_mode": fit_mode,
+            "x": x,
+            "y": y,
+            "opacity": opacity,
+            "active_start_seconds": active_start,
+            "active_end_seconds": active_end,
+            "alpha_mode": alpha_mode,
+            "end_behavior": end_behavior,
+            "audio_mode": audio_mode,
+            "container": container,
+            "video_codec": video_codec,
+            "audio_codec": audio_codec,
+            "pixel_format": pixel_format,
+            "faststart": faststart,
+        }
 
     def _validate_prepare_driving_audio_recipe(self, processing: dict[str, Any], output_declarations: list[dict[str, Any]]) -> dict[str, Any]:
         unknown_keys = sorted(
@@ -3059,6 +3267,88 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "head_seconds": head_seconds,
             "tail_seconds": tail_seconds,
             "padding_mode": "silence",
+        }
+
+    def _validate_prepare_transcription_audio_recipe(
+        self,
+        processing: dict[str, Any],
+        output_declarations: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        allowed_top_keys = {
+            "operation_type",
+            "operation",
+            "contract_version",
+            "source_kind",
+            "recipe",
+            "outputs",
+            "artifacts",
+            "declared_artifacts",
+            "mediaassemblyjobid",
+            "mediaassembly_operation",
+            "storyboard_type",
+            "storyboard_id",
+            "card_id",
+            "take_id",
+            "options",
+            "mediaassembly_input",
+        }
+        unknown_keys = sorted(
+            key
+            for key in processing.keys()
+            if key not in allowed_top_keys and not str(key).startswith("_")
+        )
+        if unknown_keys:
+            raise ValueError(f"Unsupported prepare_transcription_audio field(s): {', '.join(unknown_keys)}")
+        contract_version = str(processing.get("contract_version") or PREPARE_TRANSCRIPTION_AUDIO_CONTRACT_VERSION).strip()
+        if contract_version != PREPARE_TRANSCRIPTION_AUDIO_CONTRACT_VERSION:
+            raise ValueError(f"Unsupported prepare_transcription_audio contract_version: {contract_version}")
+        if output_declarations != [{"artifact_index": 0, "role": "transcription_audio", "mime_type": "audio/mpeg"}]:
+            raise ValueError("prepare_transcription_audio requires artifact_index 0 role=transcription_audio mime_type=audio/mpeg.")
+        source_kind = str(processing.get("source_kind") or "video").strip().lower()
+        if source_kind not in {"video", "audio"}:
+            raise ValueError(f"Unsupported prepare_transcription_audio source_kind: {source_kind}")
+        recipe = processing.get("recipe")
+        if not isinstance(recipe, dict):
+            raise ValueError("prepare_transcription_audio requires processing.recipe.")
+        allowed_recipe_keys = {
+            "output_format",
+            "audio_codec",
+            "sample_rate_hz",
+            "channels",
+            "bitrate_kbps",
+            "preserve_full_duration",
+        }
+        unknown_recipe_keys = sorted(set(recipe.keys()) - allowed_recipe_keys)
+        if unknown_recipe_keys:
+            raise ValueError(f"Unsupported prepare_transcription_audio recipe field(s): {', '.join(unknown_recipe_keys)}")
+        output_format = str(recipe.get("output_format") or "mp3").strip().lower()
+        audio_codec = str(recipe.get("audio_codec") or "libmp3lame").strip().lower()
+        sample_rate = self._coerce_int(recipe.get("sample_rate_hz"), 16000, 1, 192000)
+        channels = self._coerce_int(recipe.get("channels"), 1, 1, 8)
+        bitrate = self._coerce_int(recipe.get("bitrate_kbps"), 96, 1, 1000)
+        preserve_full_duration = self._coerce_bool(recipe.get("preserve_full_duration"), True)
+        if output_format not in {"mp3", "mpeg", "audio/mpeg"}:
+            raise ValueError(f"prepare_transcription_audio supports only MP3 output; got output_format={output_format!r}.")
+        if audio_codec != "libmp3lame":
+            raise ValueError(f"prepare_transcription_audio supports only audio_codec=libmp3lame; got {audio_codec!r}.")
+        if sample_rate != 16000:
+            raise ValueError(f"prepare_transcription_audio supports only 16000 Hz output; got {sample_rate}.")
+        if channels != 1:
+            raise ValueError(f"prepare_transcription_audio supports only mono output; got {channels} channel(s).")
+        if bitrate != 96:
+            raise ValueError(f"prepare_transcription_audio supports only bitrate_kbps=96; got {bitrate}.")
+        if not preserve_full_duration:
+            raise ValueError("prepare_transcription_audio requires preserve_full_duration=true.")
+        return {
+            "operation_type": PREPARE_TRANSCRIPTION_AUDIO_OPERATION,
+            "contract_version": contract_version,
+            "source_kind": source_kind,
+            "output_format": "mp3",
+            "audio_codec": "libmp3lame",
+            "sample_rate_hz": 16000,
+            "channels": 1,
+            "bitrate_kbps": 96,
+            "preserve_full_duration": True,
         }
 
     def _validate_control_guided_recipe(self, processing: dict[str, Any], output_declarations: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3315,6 +3605,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_count != 1:
                 raise ValueError(f"Unsupported prepare_driving_audio output count: {output_count}")
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            if output_count != 1:
+                raise ValueError(f"Unsupported prepare_transcription_audio output count: {output_count}")
         elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
             if output_count != 1:
                 raise ValueError(f"Unsupported extract_video_frame output count: {output_count}")
@@ -3327,6 +3620,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
                 raise ValueError(f"Unsupported prepare_driving_audio output format: {output_format}")
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
+                raise ValueError(f"Unsupported prepare_transcription_audio output format: {output_format}")
         elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
             if output_format not in {"", "png", "image/png"}:
                 raise ValueError(f"Unsupported extract_video_frame output format: {output_format}")
@@ -3352,11 +3648,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         output_declarations: list[dict[str, Any]] = []
         control_guided_recipe: dict[str, Any] = {}
         prepare_driving_audio_recipe: dict[str, Any] = {}
+        prepare_transcription_audio_recipe: dict[str, Any] = {}
+        overlay_png_recipe: dict[str, Any] = {}
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             output_declarations = self._prepare_driving_audio_output_declarations(job, processing)
             prepare_driving_audio_recipe = self._validate_prepare_driving_audio_recipe(processing, output_declarations)
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            output_declarations = self._prepare_transcription_audio_output_declarations(job, processing)
+            prepare_transcription_audio_recipe = self._validate_prepare_transcription_audio_recipe(processing, output_declarations)
         elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
             output_declarations = self._extract_video_frame_output_declarations(job, processing)
+        elif operation_type == OVERLAY_PNG_ON_VIDEO_OPERATION:
+            output_contract_version = str(output.get("contract_version") or "").strip()
+            if output_contract_version and output_contract_version != SINGLE_OUTPUT_VIDEO_TRANSFORM_CONTRACT_VERSION:
+                raise ValueError(f"Unsupported overlay_png_on_video output contract_version: {output_contract_version}")
+            output_declarations = self._single_video_output_declarations(job, processing, OVERLAY_PNG_ON_VIDEO_OPERATION)
+            overlay_png_recipe = self._validate_overlay_png_on_video_recipe(processing)
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             output_declarations = self._control_guided_output_declarations(job, processing)
             control_guided_recipe = self._validate_control_guided_recipe(processing, output_declarations)
@@ -3437,6 +3744,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "prepare_driving_audio requires one or more driving_audio_source inputs and no other audio kinds; "
                     f"got driving_audio_source={driving_source_count}, audio_inputs={audio_count}."
                 )
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            transcription_source_count = sum(1 for item in inputs if str(item.get("kind") or "").strip() == "transcription_source")
+            if video_count or image_count:
+                raise ValueError("prepare_transcription_audio accepts only transcription_source audio-role inputs.")
+            if transcription_source_count != 1 or audio_count != 1:
+                raise ValueError(
+                    "prepare_transcription_audio requires exactly one transcription_source input; "
+                    f"got transcription_source={transcription_source_count}, audio_inputs={audio_count}."
+                )
+            for item in inputs:
+                role = str(item.get("role") or "").strip().lower()
+                if role and role != "source":
+                    raise ValueError(f"prepare_transcription_audio transcription_source role must be source; got {role!r}.")
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             self._validate_control_guided_source_descriptors(inputs, control_guided_recipe, output_declarations)
             if image_count:
@@ -3491,6 +3811,27 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 0.0,
                 MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
             )
+        elif operation_type == OVERLAY_PNG_ON_VIDEO_OPERATION:
+            overlay_png_count = sum(1 for item in inputs if str(item.get("kind") or "").strip() == "overlay_png")
+            if video_count != 1 or source_video_count != 1:
+                raise ValueError(
+                    "overlay_png_on_video requires exactly one source_video input; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}."
+                )
+            if overlay_png_count != 1 or image_count != 1:
+                raise ValueError(
+                    "overlay_png_on_video requires exactly one overlay_png input and no other images; "
+                    f"got overlay_png={overlay_png_count}, image_inputs={image_count}."
+                )
+            if audio_count:
+                raise ValueError(f"overlay_png_on_video does not accept audio inputs; got {audio_count}.")
+            for item in inputs:
+                kind = str(item.get("kind") or "").strip()
+                role = str(item.get("role") or "").strip().lower()
+                if kind == "source_video" and role and role not in {"base_video", "source", "visual"}:
+                    raise ValueError(f"overlay_png_on_video source_video role must be base_video; got {role!r}.")
+                if kind == "overlay_png" and role and role not in {"overlay_image", "overlay", "image"}:
+                    raise ValueError(f"overlay_png_on_video overlay_png role must be overlay_image; got {role!r}.")
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             if render_mode not in {"one_image", "two_image_fade", "voice_over_video"}:
                 raise ValueError(f"Unsupported storyboard local video take render_mode: {render_mode or 'missing'}")
@@ -3542,7 +3883,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"video_inputs={video_count} image_inputs={image_count} audio_inputs={audio_count}."
         )
         max_artifact_bytes = MAX_STORYBOARD_VIDEO_OUTPUT_BYTES
-        if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
+        if operation_type in {PREPARE_DRIVING_AUDIO_OPERATION, PREPARE_TRANSCRIPTION_AUDIO_OPERATION}:
             max_artifact_bytes = MAX_AUDIO_BYTES
         elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
             max_artifact_bytes = MAX_IMAGE_BYTES
@@ -3555,16 +3896,20 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
             "_midom_operation_type": operation_type,
             "_midom_output_count": output_count,
-            "_midom_output_format": "mp3" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "png" if operation_type == EXTRACT_VIDEO_FRAME_OPERATION else "mp4",
-            "_midom_output_mime_type": "audio/mpeg" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "image/png" if operation_type == EXTRACT_VIDEO_FRAME_OPERATION else "video/mp4",
+            "_midom_output_format": "mp3" if operation_type in {PREPARE_DRIVING_AUDIO_OPERATION, PREPARE_TRANSCRIPTION_AUDIO_OPERATION} else "png" if operation_type == EXTRACT_VIDEO_FRAME_OPERATION else "mp4",
+            "_midom_output_mime_type": "audio/mpeg" if operation_type in {PREPARE_DRIVING_AUDIO_OPERATION, PREPARE_TRANSCRIPTION_AUDIO_OPERATION} else "image/png" if operation_type == EXTRACT_VIDEO_FRAME_OPERATION else "video/mp4",
             "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), max_artifact_bytes, 1, max_artifact_bytes),
             "_midom_output_declarations": output_declarations,
             "_midom_control_guided_recipe": control_guided_recipe,
             "_midom_prepare_driving_audio_recipe": prepare_driving_audio_recipe,
+            "_midom_prepare_transcription_audio_recipe": prepare_transcription_audio_recipe,
+            "_midom_overlay_png_on_video_recipe": overlay_png_recipe,
             "_midom_processing": {
                 **processing,
                 **prepare_driving_audio_recipe,
+                **prepare_transcription_audio_recipe,
                 **control_guided_recipe,
+                **overlay_png_recipe,
                 "operation_type": operation_type,
                 "output_width": width,
                 "output_height": height,
@@ -6298,7 +6643,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or EVENT_VIDEO_PROCESSOR_ID).strip()
         if processor_id != EVENT_VIDEO_PROCESSOR_ID:
             return f"unsupported processor_id: {processor_id}"
-        default_output_format = "mp3" if operation_type == PREPARE_DRIVING_AUDIO_OPERATION else "mp4"
+        default_output_format = "mp3" if operation_type in {PREPARE_DRIVING_AUDIO_OPERATION, PREPARE_TRANSCRIPTION_AUDIO_OPERATION} else "mp4"
         output_format = str(summary.get("output_format") or summary.get("format") or default_output_format).strip().lower()
         if output_format != "mp4":
             return f"unsupported event video output_format: {output_format}"
@@ -6349,6 +6694,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
                 return f"unsupported prepare_driving_audio output_format: {output_format}"
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            if output_format not in {"", "mp3", "mpeg", "audio/mpeg"}:
+                return f"unsupported prepare_transcription_audio output_format: {output_format}"
         elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
             if output_format not in {"", "png", "image/png"}:
                 return f"unsupported extract_video_frame output_format: {output_format}"
@@ -6364,6 +6712,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type == PREPARE_DRIVING_AUDIO_OPERATION:
             if output_count != 1:
                 return f"unsupported prepare_driving_audio output_count: {output_count}"
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            if output_count != 1:
+                return f"unsupported prepare_transcription_audio output_count: {output_count}"
         elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
             if output_count != 1:
                 return f"unsupported extract_video_frame output_count: {output_count}"
@@ -6382,6 +6733,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             driving_source_count = self._coerce_int(summary.get("driving_audio_source_count", summary.get("audio_input_count")), 0, 0, 100)
             if driving_source_count < 1:
                 return "prepare_driving_audio requires driving_audio_source inputs"
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            transcription_source_count = self._coerce_int(summary.get("transcription_source_count"), 0, 0, 10)
+            if transcription_source_count != 1:
+                return f"prepare_transcription_audio requires exactly one transcription_source input; got {transcription_source_count}"
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             control_source_count = self._coerce_int(summary.get("control_video_source_count"), video_count, 0, 100)
             driving_source_count = self._coerce_int(summary.get("driving_audio_source_count", summary.get("audio_input_count")), 0, 0, 100)
@@ -6422,6 +6777,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "extract_video_frame requires exactly one source_video input; "
                     f"got source_video={source_video_count}, video_inputs={video_count}"
                 )
+        elif operation_type == OVERLAY_PNG_ON_VIDEO_OPERATION:
+            source_video_count = self._coerce_int(summary.get("source_video_count"), video_count, 0, 10)
+            overlay_png_count = self._coerce_int(summary.get("overlay_png_count", summary.get("image_input_count")), 1, 0, 10)
+            if video_count != 1 or source_video_count != 1:
+                return (
+                    "overlay_png_on_video requires exactly one source_video input; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}"
+                )
+            if overlay_png_count != 1:
+                return f"overlay_png_on_video requires exactly one overlay_png input; got {overlay_png_count}"
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             render_mode = str(
                 candidate.get("render_mode") or processing.get("render_mode") or summary.get("render_mode") or ""
@@ -7022,6 +7387,24 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             )
             self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
             return output_artifacts, result_metadata
+        if operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            output_artifacts, result_metadata = self._run_prepare_transcription_audio_job(
+                connection,
+                job_id,
+                settings,
+                downloaded_inputs,
+                temp_dir,
+                process_handle,
+                progress_start=5,
+                progress_end=95,
+            )
+            self._set_active_job_status(
+                phase="uploading",
+                status="Transcription audio preparation finished; uploading prepared MP3.",
+                progress=96,
+            )
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+            return output_artifacts, result_metadata
         if operation_type == EXTRACT_VIDEO_FRAME_OPERATION:
             if not video_inputs:
                 raise ValueError("Storyboard extract_video_frame requires a source_video input.")
@@ -7083,6 +7466,77 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "source_duration_seconds": float((primary.get("metadata") or {}).get("duration_seconds") or 0.0),
                 "source_duration_fallback_used": str((primary.get("metadata") or {}).get("duration_source") or "container") != "container",
                 "artifact_roles": [{"artifact_index": 0, "role": "frame_image", "mime_type": "image/png"}],
+                "worker_id": connection.worker_id,
+            }
+        if operation_type == OVERLAY_PNG_ON_VIDEO_OPERATION:
+            if not video_inputs:
+                raise ValueError("overlay_png_on_video requires a source_video input.")
+            overlay_inputs = [item for item in image_inputs if item.get("kind") == "overlay_png"]
+            if len(overlay_inputs) != 1:
+                raise ValueError(f"overlay_png_on_video requires exactly one overlay_png input; got {len(overlay_inputs)}.")
+            primary = self._storyboard_primary_video_input(video_inputs)
+            overlay_png = overlay_inputs[0]
+            output_width, output_height = self._storyboard_output_size(primary, processing)
+            output_path = self._storyboard_target_output_path(temp_dir, processing)
+            self._set_active_job_status(
+                phase="processing",
+                status="Compositing PNG overlay onto source video.",
+                progress=3,
+            )
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+            self._run_storyboard_overlay_png_on_video_ffmpeg(
+                connection,
+                job_id,
+                primary,
+                overlay_png,
+                output_path,
+                output_width,
+                output_height,
+                process_handle,
+                processing=processing,
+                progress_start=5,
+                progress_end=95,
+                status="Compositing PNG overlay onto source video.",
+            )
+            output_metadata = self._validate_storyboard_ffmpeg_output(
+                output_path,
+                expected_width=output_width,
+                expected_height=output_height,
+                max_bytes=self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_STORYBOARD_VIDEO_OUTPUT_BYTES, 1, MAX_STORYBOARD_VIDEO_OUTPUT_BYTES),
+            )
+            self._set_active_job_status(
+                phase="uploading",
+                status="PNG overlay composition finished; uploading MP4.",
+                progress=96,
+            )
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+            artifact = (settings.get("_midom_output_declarations") or [{"artifact_index": 0, "role": "video", "mime_type": "video/mp4"}])[0]
+            return [
+                {
+                    "path": str(output_path),
+                    "artifact_index": int(artifact["artifact_index"]),
+                    "role": "video",
+                    "mime_type": "video/mp4",
+                    "metadata": output_metadata,
+                }
+            ], {
+                "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+                "processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+                "operation_type": OVERLAY_PNG_ON_VIDEO_OPERATION,
+                "contract_version": SINGLE_OUTPUT_VIDEO_TRANSFORM_CONTRACT_VERSION,
+                "ffmpeg_encoder": EVENT_VIDEO_H264_ENCODER,
+                "ffmpeg_version": self._ffmpeg_version_string(),
+                "output_width": int(output_metadata.get("display_width") or output_width),
+                "output_height": int(output_metadata.get("display_height") or output_height),
+                "output_duration_seconds": float(output_metadata.get("duration_seconds") or 0.0),
+                "source_width": int((primary.get("metadata") or {}).get("display_width") or 0),
+                "source_height": int((primary.get("metadata") or {}).get("display_height") or 0),
+                "source_duration_seconds": float((primary.get("metadata") or {}).get("duration_seconds") or 0.0),
+                "source_duration_fallback_used": str((primary.get("metadata") or {}).get("duration_source") or "container") != "container",
+                "overlay_input_id": int(overlay_png.get("input_id") or 0),
+                "overlay_opacity": self._coerce_float(processing.get("opacity"), 1.0, 0.0, 1.0),
+                "audio_mode": "base",
+                "artifact_roles": [{"artifact_index": 0, "role": "video", "mime_type": "video/mp4"}],
                 "worker_id": connection.worker_id,
             }
         if operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
@@ -7454,6 +7908,119 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 for item in audio_inputs
             ),
             "artifact_roles": [{"artifact_index": 0, "role": "driving_audio", "mime_type": "audio/mpeg"}],
+            "output_sha256": output_sha256,
+            "worker_id": connection.worker_id,
+        }
+
+    def _run_prepare_transcription_audio_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+        *,
+        progress_start: int,
+        progress_end: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        processing = settings.get("_midom_processing") or {}
+        output_declarations = list(settings.get("_midom_output_declarations") or [])
+        if not output_declarations:
+            output_declarations = self._prepare_transcription_audio_output_declarations({"output": {"count": 1}}, processing)
+        source_inputs = [item for item in downloaded_inputs if item.get("kind") == "transcription_source"]
+        if len(source_inputs) != 1:
+            raise ValueError(f"prepare_transcription_audio requires exactly one downloaded transcription_source input; got {len(source_inputs)}.")
+        source = source_inputs[0]
+        source_path = Path(str(source.get("path") or ""))
+        if not source_path.is_file():
+            raise ValueError("prepare_transcription_audio source file is missing.")
+        source_metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else self._probe_audio_metadata(source_path)
+        source_duration = float(source_metadata.get("duration_seconds") or 0.0)
+        if source_duration <= 0:
+            raise ValueError("prepare_transcription_audio source duration could not be read.")
+        artifact = output_declarations[0]
+        output_path = Path(temp_dir) / "prepared-transcription-audio.mp3"
+        self._log(
+            "Preparing transcription audio; "
+            f"job_id={job_id} operation={PREPARE_TRANSCRIPTION_AUDIO_OPERATION} "
+            f"contract_version={PREPARE_TRANSCRIPTION_AUDIO_CONTRACT_VERSION} "
+            f"input_id={source.get('input_id')} source_duration_seconds={source_duration:.3f} "
+            f"duration_source={source_metadata.get('duration_source')!r}."
+        )
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            str(source_path),
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-b:a",
+            "96k",
+            str(output_path),
+        ]
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=max(1.0, source_duration),
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status="Preparing transcription audio MP3.",
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(source_duration),
+        )
+        audio_metadata = self._validate_prepare_transcription_audio_output(
+            output_path,
+            source_duration=source_duration,
+            max_bytes=MAX_AUDIO_BYTES,
+        )
+        with output_path.open("rb") as reader:
+            output_sha256 = hashlib.sha256(reader.read()).hexdigest()
+        self._log(
+            "Prepared transcription audio output; "
+            f"job_id={job_id} duration_seconds={float(audio_metadata.get('duration_seconds') or 0.0):.3f} "
+            f"sample_rate_hz={audio_metadata.get('sample_rate_hz')} channels={audio_metadata.get('channels')} "
+            f"sha256={output_sha256[:12]}... artifact_index=0 role='transcription_audio' mime_type='audio/mpeg'."
+        )
+        return [
+            {
+                "path": str(output_path),
+                "artifact_index": int(artifact["artifact_index"]),
+                "role": "transcription_audio",
+                "mime_type": "audio/mpeg",
+                "metadata": audio_metadata,
+            }
+        ], {
+            "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
+            "processor_id": STORYBOARD_FFMPEG_PROCESSOR_ID,
+            "operation_type": PREPARE_TRANSCRIPTION_AUDIO_OPERATION,
+            "contract_version": PREPARE_TRANSCRIPTION_AUDIO_CONTRACT_VERSION,
+            "ffmpeg_encoder": "libmp3lame",
+            "ffmpeg_version": self._ffmpeg_version_string(),
+            "source_input_id": int(source.get("input_id") or 0),
+            "source_duration_seconds": source_duration,
+            "source_duration_fallback_used": str(source_metadata.get("duration_source") or "container") != "container",
+            "source_sha256": str(source.get("sha256") or ""),
+            "output_duration_seconds": float(audio_metadata.get("duration_seconds") or 0.0),
+            "audio_codec": "mp3",
+            "audio_sample_rate_hz": self._coerce_int(audio_metadata.get("sample_rate_hz"), 16000, 1, 192000),
+            "audio_channels": self._coerce_int(audio_metadata.get("channels"), 1, 1, 8),
+            "audio_bitrate": "96k",
+            "preserve_full_duration": True,
+            "artifact_roles": [{"artifact_index": 0, "role": "transcription_audio", "mime_type": "audio/mpeg"}],
             "output_sha256": output_sha256,
             "worker_id": connection.worker_id,
         }
@@ -8618,6 +9185,120 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Overlay matte was provided but could not be applied: {exc}") from exc
             raise
 
+    def _run_storyboard_overlay_png_on_video_ffmpeg(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        video_input: dict[str, Any],
+        overlay_input: dict[str, Any],
+        output_path: Path,
+        output_width: int,
+        output_height: int,
+        process_handle: LocalProcessJob,
+        *,
+        processing: dict[str, Any],
+        progress_start: int,
+        progress_end: int,
+        status: str,
+    ) -> None:
+        source_path = Path(str(video_input.get("path") or ""))
+        overlay_path = Path(str(overlay_input.get("path") or ""))
+        if not source_path.is_file():
+            raise ValueError("overlay_png_on_video source_video file is missing.")
+        if not overlay_path.is_file():
+            raise ValueError("overlay_png_on_video overlay_png file is missing.")
+        metadata = video_input.get("metadata") if isinstance(video_input.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        source_duration = float(metadata.get("duration_seconds") or 0.0)
+        if source_duration <= 0:
+            raise ValueError("overlay_png_on_video source video duration could not be read.")
+        requested_duration = self._optional_positive_float(
+            self._first_present(processing, "duration_seconds", "trim_duration_seconds", "output_duration_seconds"),
+            MAX_STORYBOARD_VIDEO_DURATION_SECONDS,
+        )
+        effective_duration = min(source_duration, float(requested_duration or source_duration))
+        effective_duration = max(0.1, effective_duration)
+        active_end = self._optional_positive_float(processing.get("active_end_seconds"), MAX_STORYBOARD_VIDEO_DURATION_SECONDS)
+        if active_end is not None and active_end > effective_duration + 0.05:
+            raise ValueError(
+                "overlay_png_on_video visual.active_end_seconds exceeds output duration; "
+                f"active_end={active_end:.3f} duration={effective_duration:.3f}."
+            )
+        opacity = self._coerce_float(processing.get("opacity"), 1.0, 0.0, 1.0)
+        command = [
+            self._ffmpeg_binary(),
+            "-y",
+            "-hide_banner",
+            "-v",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            str(source_path),
+            "-loop",
+            "1",
+            "-t",
+            f"{effective_duration:.3f}",
+            "-i",
+            str(overlay_path),
+        ]
+        audio_input_label = "0:a:0"
+        next_input_index = 2
+        if not metadata.get("has_audio"):
+            command.extend([
+                "-f",
+                "lavfi",
+                "-t",
+                f"{effective_duration:.3f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ])
+            audio_input_label = f"{next_input_index}:a:0"
+            next_input_index += 1
+        overlay_enable = ""
+        if active_end is not None:
+            overlay_enable = f":enable='between(t,0,{active_end:.6f})'"
+        filter_parts = [
+            (
+                f"[0:v]scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},setsar=1,format=rgba[vbase]"
+            ),
+            f"[1:v]scale={output_width}:{output_height},format=rgba,colorchannelmixer=aa={opacity:.6f}[ov]",
+            f"[vbase][ov]overlay=0:0:format=auto:eof_action=repeat{overlay_enable},format=yuv420p[vout]",
+            f"[{audio_input_label}]aresample=48000,aformat=channel_layouts=stereo[aout]",
+        ]
+        command.extend([
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[vout]",
+            "-map",
+            "[aout]",
+            "-t",
+            f"{effective_duration:.3f}",
+            *self._event_video_encode_args(),
+            str(output_path),
+        ])
+        self._log(
+            "Running overlay_png_on_video FFmpeg; "
+            f"job_id={job_id} source_input_id={video_input.get('input_id')} "
+            f"overlay_input_id={overlay_input.get('input_id')} output={output_width}x{output_height} "
+            f"duration_seconds={effective_duration:.3f} opacity={opacity:.3f} "
+            f"base_audio={'present' if metadata.get('has_audio') else 'silent_fill'}."
+        )
+        self._run_ffmpeg_with_progress(
+            connection,
+            job_id,
+            command,
+            total_seconds=effective_duration,
+            progress_start=progress_start,
+            progress_end=progress_end,
+            phase="processing",
+            status=status,
+            process_handle=process_handle,
+            timeout_seconds=self._storyboard_step_timeout(effective_duration),
+        )
+
     def _validate_storyboard_ffmpeg_output(
         self,
         path: Path,
@@ -8749,6 +9430,42 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._log(
             "Validated prepared driving_audio output; "
             f"filename={path.name!r} mime_type='audio/mpeg' duration_seconds={duration:.2f} bytes={file_size}."
+        )
+        return {**metadata, "mime_type": "audio/mpeg", "bytes": file_size}
+
+    def _validate_prepare_transcription_audio_output(
+        self,
+        path: Path,
+        *,
+        source_duration: float,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        if not path.is_file():
+            raise ValueError("Prepared transcription_audio artifact is missing.")
+        file_size = path.stat().st_size
+        if file_size <= 0 or file_size > max_bytes:
+            raise ValueError(f"Prepared transcription_audio size is outside allowed bounds: {file_size} bytes.")
+        if path.suffix.lower() != ".mp3":
+            raise ValueError("Prepared transcription_audio output must use .mp3.")
+        metadata = self._probe_audio_metadata(path)
+        duration = float(metadata.get("duration_seconds") or 0.0)
+        if duration <= 0:
+            raise ValueError("Prepared transcription_audio duration could not be read.")
+        if source_duration > 0 and duration > float(source_duration) + 5.0:
+            raise ValueError(
+                "Prepared transcription_audio duration exceeds source duration tolerance; "
+                f"source={float(source_duration):.3f}s output={duration:.3f}s."
+            )
+        sample_rate = self._coerce_int(metadata.get("sample_rate_hz"), 0, 0, 192000)
+        if sample_rate != 16000:
+            raise ValueError(f"Prepared transcription_audio must be 16000 Hz; got {sample_rate}.")
+        channels = self._coerce_int(metadata.get("channels"), 0, 0, 16)
+        if channels != 1:
+            raise ValueError(f"Prepared transcription_audio must be mono; got {channels} channel(s).")
+        self._log(
+            "Validated prepared transcription_audio output; "
+            f"filename={path.name!r} mime_type='audio/mpeg' duration_seconds={duration:.2f} "
+            f"sample_rate_hz={sample_rate} channels={channels} bytes={file_size}."
         )
         return {**metadata, "mime_type": "audio/mpeg", "bytes": file_size}
 
@@ -11185,12 +11902,24 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             sample_rate = int(audio_stream.get("sample_rate") or 0)
         except (TypeError, ValueError):
             sample_rate = 0
+        try:
+            channels = int(audio_stream.get("channels") or 0)
+        except (TypeError, ValueError):
+            channels = 0
+        codec_name = str(audio_stream.get("codec_name") or "").strip().lower()
+        try:
+            bit_rate = int(audio_stream.get("bit_rate") or format_block.get("bit_rate") or 0)
+        except (TypeError, ValueError):
+            bit_rate = 0
         if duration <= 0:
             raise ValueError("Audio input duration could not be read.")
         return {
             "duration_seconds": duration,
             "duration_source": duration_source,
             "sample_rate_hz": sample_rate,
+            "channels": channels,
+            "codec_name": codec_name,
+            "bit_rate": bit_rate,
         }
 
     def _download_job_inputs(self, connection: ConnectionContext, job: dict[str, Any], temp_dir: str) -> list[dict[str, Any]]:
@@ -11804,7 +12533,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 max_bytes = MAX_STORYBOARD_IMAGE_INPUT_BYTES
                 category = "image"
             else:
-                if kind in {"source_audio", "soundtrack_audio", "driving_audio_source"}:
+                if kind in {"source_audio", "soundtrack_audio", "driving_audio_source", "transcription_source"}:
                     allowed_mime_types = ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES
                     max_bytes = MAX_STORYBOARD_VIDEO_INPUT_BYTES
                 else:
@@ -11873,7 +12602,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         processing,
                         response.headers,
                     )
-                elif operation_type == EXTRACT_VIDEO_FRAME_OPERATION and kind == "source_video":
+                elif operation_type in {EXTRACT_VIDEO_FRAME_OPERATION, OVERLAY_PNG_ON_VIDEO_OPERATION} and kind == "source_video":
                     fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(
                         item,
                         response.headers,
@@ -11945,10 +12674,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "Overlay matte was provided but could not be applied: "
                         f"decoded matte format {entry['decoded_format'] or 'unknown'} is not PNG or JPEG."
                     )
+                if operation_type == OVERLAY_PNG_ON_VIDEO_OPERATION and kind == "overlay_png" and entry["decoded_format"] != "PNG":
+                    raise ValueError(f"overlay_png_on_video overlay_png input must decode as PNG; got {entry['decoded_format']}.")
             else:
                 fallback_duration = None
                 fallback_source = ""
-                if operation_type in {"multicam_card_pass_through_take", CONTROL_GUIDED_INPUT_PREPARATION_OPERATION, PREPARE_DRIVING_AUDIO_OPERATION} and kind in {"source_audio", "driving_audio_source"}:
+                if (
+                    operation_type in {"multicam_card_pass_through_take", CONTROL_GUIDED_INPUT_PREPARATION_OPERATION, PREPARE_DRIVING_AUDIO_OPERATION}
+                    and kind in {"source_audio", "driving_audio_source"}
+                ) or (operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION and kind == "transcription_source"):
                     fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(
                         item,
                         response.headers,
@@ -11967,6 +12701,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 ):
                     self._log(
                         "Using Midom supplied driving-audio source duration fallback; "
+                        f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
+                        f"duration_seconds={entry['duration_seconds']:.3f}."
+                    )
+                elif (
+                    operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION
+                    and fallback_duration is not None
+                    and metadata.get("duration_source") != "container"
+                ):
+                    self._log(
+                        "Using Midom supplied transcription source duration fallback; "
                         f"job_id={job_id} input_id={input_id} source={fallback_source!r} "
                         f"duration_seconds={entry['duration_seconds']:.3f}."
                     )
@@ -11996,6 +12740,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 )
             output_declarations = self._prepare_driving_audio_output_declarations(job, processing)
             self._validate_prepare_driving_audio_recipe(processing, output_declarations)
+        elif operation_type == PREPARE_TRANSCRIPTION_AUDIO_OPERATION:
+            transcription_source_count = sum(1 for item in downloaded if item.get("kind") == "transcription_source")
+            non_audio_count = sum(1 for item in downloaded if item.get("category") != "audio")
+            audio_count = sum(1 for item in downloaded if item.get("category") == "audio")
+            if non_audio_count:
+                raise ValueError(f"prepare_transcription_audio accepts only downloaded transcription_source inputs; got non_audio_count={non_audio_count}.")
+            if transcription_source_count != 1 or audio_count != 1:
+                raise ValueError(
+                    "prepare_transcription_audio requires exactly one downloaded transcription_source input; "
+                    f"got transcription_source={transcription_source_count}, audio_inputs={audio_count}."
+                )
+            output_declarations = self._prepare_transcription_audio_output_declarations(job, processing)
+            self._validate_prepare_transcription_audio_recipe(processing, output_declarations)
         elif operation_type == CONTROL_GUIDED_INPUT_PREPARATION_OPERATION:
             control_source_count = sum(1 for item in downloaded if item.get("kind") == "control_video_source")
             driving_source_count = sum(1 for item in downloaded if item.get("kind") == "driving_audio_source")
@@ -12046,6 +12803,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(
                     "Storyboard extract_video_frame requires exactly one downloaded source_video input; "
                     f"got source_video={source_video_count}, video_inputs={video_count}, image_inputs={image_count}, audio_inputs={audio_count}."
+                )
+        elif operation_type == OVERLAY_PNG_ON_VIDEO_OPERATION:
+            source_video_count = sum(1 for item in downloaded if item.get("kind") == "source_video")
+            overlay_png_count = sum(1 for item in downloaded if item.get("kind") == "overlay_png")
+            image_count = sum(1 for item in downloaded if item.get("category") == "image")
+            audio_count = sum(1 for item in downloaded if item.get("category") == "audio")
+            if video_count != 1 or source_video_count != 1 or overlay_png_count != 1 or image_count != 1 or audio_count:
+                raise ValueError(
+                    "overlay_png_on_video requires exactly one downloaded source_video and one downloaded overlay_png; "
+                    f"got source_video={source_video_count}, video_inputs={video_count}, overlay_png={overlay_png_count}, "
+                    f"image_inputs={image_count}, audio_inputs={audio_count}."
                 )
         elif operation_type in STORYBOARD_LOCAL_VIDEO_TAKE_OPERATION_TYPES:
             render_mode = str(processing.get("render_mode") or "").strip().lower()
