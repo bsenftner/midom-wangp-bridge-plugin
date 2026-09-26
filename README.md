@@ -126,6 +126,7 @@ Qwen Image family:
 - `qwen_image_edit_20B`
 - `qwen_image_edit_plus_20B`
 - `qwen_image_edit_plus2_20B`
+- `qwen_image_21_7B`
 - `qwen_image_layered_20B`
 
 Z-Image family:
@@ -147,6 +148,11 @@ Important image behavior:
 - Qwen Image Layered uses one raw control image and returns an ordered layer set.
 - For Qwen Image Layered, artifact index `0` is the source/reconstruction echo and artifact indexes `1..8` are editable decomposition layers.
 - Qwen Edit Plus control images are edit/conditioning inputs, not pure pose/depth guides. A control image with a competing subject can affect subject identity.
+- Qwen Image 2.1 supports text generation, primary-image editing, and up to 10 explicitly ordered reference images in its standard 40-step profile.
+- Qwen Image 2.1 reference modes are `none`, `primary_image_edit`, and `ordered_reference_images`; reference-bearing jobs use zero-based `sequence` values so `<image1>`, `<image2>`, and later references remain deterministic.
+- Qwen Image 2.1 Midom jobs disable WanGP prompt enhancement, RGBA, and KV Cache for the first release. Masks, inpainting, outpainting, control images, and transparent output are not exposed yet.
+- Qwen Image 2.1 renders `1280x720` internally at `1280x736` and `720x1280` internally at `736x1280`, then center-crops to the exact requested dimensions without stretching.
+- The optional Qwen Image 2.1 Viggle Turbo v0.2.1 profile runs at 6 steps and supports at most 3 ordered references. It is reported only when its local LoRA is installed and does not support negative prompts.
 - Z-Image control variants are better suited for structure/layout control from pose, depth, edge, or raw control inputs.
 - SenseNova U1.5 is optimized for high-resolution text-heavy layouts and infographics; the bridge renders Midom delivery sizes through a larger internal render and center-crop/downscale adapter for text quality.
 - SenseNova landscape and portrait delivery currently render internally at `5440x3072` and `3072x5440` respectively, then return the requested Midom-visible size.
@@ -158,6 +164,8 @@ Supported image output types:
 - PNG
 - JPEG
 - WebP
+
+Qwen Image 2.1 first-pass jobs always deliver PNG even if the local WanGP image-output preference is JPEG or WebP.
 
 Curated image resolutions include:
 
@@ -461,6 +469,7 @@ Some capabilities appear only when local runtime support is available:
 - MP3 output appears only when ffmpeg/libmp3lame transcoding is available.
 - LTX Better Audio-Video Sync appears only when the required OmniNFT LoRA is installed.
 - Qwen Lightning accelerator profiles appear only when the required local Qwen accelerator files are installed.
+- Qwen Image 2.1 Fast - 6 steps appears only when the Viggle Turbo v0.2.1 LoRA is installed under WanGP's `loras/qwen21` directory.
 
 ## Basic Use
 

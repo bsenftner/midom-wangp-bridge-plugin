@@ -147,6 +147,30 @@ SENSENOVA_REFERENCE_MODES = {
 SENSENOVA_ACCELERATOR_PROFILE_ID = "sensenova_u1_5_official_8_step"
 SENSENOVA_ACCELERATOR_LORA_DIR = SENSENOVA_MODEL_ID
 SENSENOVA_ACCELERATOR_LORA_FILENAME = "SenseNova-U1.5-8B-MoT-LoRA-8step.safetensors"
+QWEN21_MODEL_ID = "qwen_image_21_7B"
+QWEN21_DISPLAY_NAME = "Qwen Image 2.1 7B"
+QWEN21_MAX_REFERENCE_IMAGES = 10
+QWEN21_VIGGLE_MAX_REFERENCE_IMAGES = 3
+QWEN21_REFERENCE_MODES = {
+    "none",
+    "primary_image_edit",
+    "ordered_reference_images",
+}
+QWEN21_DELIVERY_RESOLUTIONS = {
+    "768x768",
+    "1024x1024",
+    "1280x720",
+    "720x1280",
+}
+QWEN21_INTERNAL_RENDER_RESOLUTIONS = {
+    "768x768": "768x768",
+    "1024x1024": "1024x1024",
+    "1280x720": "1280x736",
+    "720x1280": "736x1280",
+}
+QWEN21_VIGGLE_PROFILE_ID = "qwen21_viggle_turbo_v021_6"
+QWEN21_VIGGLE_LORA_DIR = "qwen21"
+QWEN21_VIGGLE_LORA_FILENAME = "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors"
 QWEN_MULTI_ANGLE_TOOL_ID = "qwen_image_edit_2511_multiple_angles"
 QWEN_MULTI_ANGLE_TOOL_DISPLAY_NAME = "Generate Alternate View"
 QWEN_MULTI_ANGLE_TOOL_VERSION = "1"
@@ -199,6 +223,8 @@ def _image_max_prompt_chars_for_model(model_id: str) -> int:
 def _image_resolutions_for_model(model_id: str) -> set[str]:
     if str(model_id or "") == SENSENOVA_MODEL_ID:
         return set(SENSENOVA_DELIVERY_RESOLUTIONS)
+    if str(model_id or "") == QWEN21_MODEL_ID:
+        return set(QWEN21_DELIVERY_RESOLUTIONS)
     return set(ALLOWED_RESOLUTIONS)
 
 
@@ -516,6 +542,18 @@ MODEL_CAPABILITY_OVERRIDES = {
     "qwen_image_edit_20B": {"family": "qwen", "display_name": "Qwen Image Edit 20B", "image_reference": True, "control": False, "max_reference_images": 3},
     "qwen_image_edit_plus_20B": {"family": "qwen", "display_name": "Qwen Image Edit Plus 20B", "image_reference": True, "control": True, "max_reference_images": 3, "control_modes": ["pose", "depth", "shapes", "recolorize", "raw"]},
     "qwen_image_edit_plus2_20B": {"family": "qwen", "display_name": "Qwen Image Edit Plus2 20B", "image_reference": True, "control": True, "max_reference_images": 3, "control_modes": ["pose", "depth", "shapes", "recolorize", "raw"]},
+    QWEN21_MODEL_ID: {
+        "family": "qwen",
+        "display_name": QWEN21_DISPLAY_NAME,
+        "image_reference": True,
+        "control": False,
+        "inpaint": False,
+        "image_edit": True,
+        "multi_reference_images": True,
+        "ordered_reference_images": True,
+        "prompt_enhancement_by_worker": False,
+        "max_reference_images": QWEN21_MAX_REFERENCE_IMAGES,
+    },
     "qwen_image_layered_20B": {
         "family": "qwen",
         "display_name": "Qwen Image Layered 20B",
@@ -673,6 +711,22 @@ ACCELERATOR_PROFILE_DEFINITIONS = [
         "guidance_scale": 1.0,
         "flow_shift": 3.0,
     },
+    {
+        "profile_id": QWEN21_VIGGLE_PROFILE_ID,
+        "display_name": "Fast - 6 steps",
+        "description": "Use WanGP's recommended Qwen Image 2.1 Viggle Turbo v0.2.1 accelerator.",
+        "quality_tier": "fast",
+        "steps": 6,
+        "model_ids": [QWEN21_MODEL_ID],
+        "lora_dir": QWEN21_VIGGLE_LORA_DIR,
+        "lora_filenames": [QWEN21_VIGGLE_LORA_FILENAME],
+        "loras_multipliers": "1",
+        "guidance_scale": 1.0,
+        "sample_solver": "viggle_v02",
+        "negative_prompt": "",
+        "max_reference_images": QWEN21_VIGGLE_MAX_REFERENCE_IMAGES,
+        "supports_negative_prompt": False,
+    },
 ]
 ACCELERATOR_PROFILE_BY_ID = {
     str(profile["profile_id"]): profile for profile in ACCELERATOR_PROFILE_DEFINITIONS
@@ -742,7 +796,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.3.0"
+        self.version = "0.5.0"
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -1227,6 +1281,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "ordered_layer_outputs",
                 "image_edit",
                 "multi_reference_images",
+                "ordered_reference_images",
                 "prompt_enhancement_by_worker",
                 "native_high_res_render",
             ):
@@ -1234,6 +1289,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     model_capabilities[capability_key] = True
             if model_id == SENSENOVA_MODEL_ID:
                 model_capabilities["prompt_enhancement_by_worker"] = False
+            if model_id == QWEN21_MODEL_ID:
+                model_capabilities["prompt_enhancement_by_worker"] = False
+                model_capabilities["rgba"] = False
             model_limits = {
                 "max_outputs": _image_max_outputs_for_model(model_id),
                 "max_steps": _image_max_steps_for_model(model_id),
@@ -1254,6 +1312,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 }
                 model_limits["native_high_res_render"] = True
                 model_limits["dimension_alignment"] = 32
+            if model_id == QWEN21_MODEL_ID:
+                model_limits["reference_modes"] = sorted(QWEN21_REFERENCE_MODES)
+                model_limits["internal_render_resolutions"] = {
+                    key: QWEN21_INTERNAL_RENDER_RESOLUTIONS[key]
+                    for key in sorted(QWEN21_INTERNAL_RENDER_RESOLUTIONS)
+                }
+                model_limits["dimension_alignment"] = 32
+                model_limits["output_mime_types"] = ["image/png"]
             if metadata.get("output_roles"):
                 model_limits["output_roles"] = list(metadata["output_roles"])
             curated_tools = self._curated_tools_for_model(model_id)
@@ -2130,16 +2196,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return "ffprobe"
 
     def _accelerator_profiles_for_model(self, model_id: str) -> list[dict[str, Any]]:
-        profiles = [
-            {
-                "profile_id": "standard",
-                "display_name": "Standard",
-                "description": "Use normal WanGP generation settings.",
-                "quality_tier": "standard",
-                "available": True,
-                "default": True,
-            }
-        ]
+        standard_profile = {
+            "profile_id": "standard",
+            "display_name": "Standard",
+            "description": "Use normal WanGP generation settings.",
+            "quality_tier": "standard",
+            "available": True,
+            "default": True,
+        }
+        if model_id == QWEN21_MODEL_ID:
+            standard_profile.update({
+                "steps": 40,
+                "max_reference_images": QWEN21_MAX_REFERENCE_IMAGES,
+                "negative_prompt": True,
+            })
+        profiles = [standard_profile]
         for profile in ACCELERATOR_PROFILE_DEFINITIONS:
             if model_id not in set(profile.get("model_ids") or []):
                 continue
@@ -2153,6 +2224,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "steps": int(profile["steps"]),
                 "available": available,
             }
+            if profile.get("max_reference_images") is not None:
+                item["max_reference_images"] = int(profile["max_reference_images"])
+            if profile.get("supports_negative_prompt") is not None:
+                item["negative_prompt"] = bool(profile["supports_negative_prompt"])
             if not available:
                 item["unavailable_reason"] = "required_accelerator_files_not_installed"
             profiles.append(item)
@@ -2391,6 +2466,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             settings["guidance_scale"] = selected["guidance_scale"]
         if selected.get("flow_shift") is not None:
             settings["flow_shift"] = selected["flow_shift"]
+        if selected.get("sample_solver") is not None:
+            settings["sample_solver"] = str(selected["sample_solver"])
+        if selected.get("negative_prompt") is not None:
+            settings["negative_prompt"] = str(selected["negative_prompt"])
         settings["_midom_accelerator_profile_id"] = str(selected["profile_id"])
         self._log(
             "Applied WanGP speed profile; "
@@ -2645,7 +2724,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._apply_sensenova_job_settings(settings, job, generation, resolution)
         else:
             self._apply_generic_image_prompt_processing_mode(settings, generation)
-        self._apply_accelerator_profile(settings, model_type, generation)
+        if model_type == QWEN21_MODEL_ID:
+            self._apply_qwen21_job_settings(settings, job, generation, resolution, negative_prompt)
+        accelerator_profile_id = self._apply_accelerator_profile(settings, model_type, generation)
+        if model_type == QWEN21_MODEL_ID:
+            self._finalize_qwen21_profile_settings(settings, accelerator_profile_id)
         if tool_payload:
             self._apply_curated_image_tool_settings(settings, tool_payload["settings"])
         seed = generation.get("seed")
@@ -2675,6 +2758,146 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             )
         settings["multi_prompts_gen_type"] = "FG"
         settings["_midom_prompt_processing_mode"] = "FG"
+
+    def _apply_qwen21_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+        negative_prompt: str,
+    ) -> None:
+        if not requested_resolution:
+            raise ValueError("Qwen Image 2.1 jobs require explicit output.width and output.height.")
+        output = job.get("output") or {}
+        output_format = str(output.get("format") or "").strip().lower()
+        if output_format != "png":
+            raise ValueError(f"Qwen Image 2.1 first-pass output.format must be 'png'; got {output_format or 'missing'}.")
+        if bool(generation.get("prompt_enhancement_by_worker")):
+            raise ValueError("Qwen Image 2.1 jobs must use the final Midom prompt; worker prompt enhancement is not supported.")
+
+        reference_mode = str(generation.get("reference_mode") or "").strip().lower()
+        if reference_mode not in QWEN21_REFERENCE_MODES:
+            raise ValueError(f"Unsupported Qwen Image 2.1 reference_mode: {reference_mode or 'missing'}")
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Job inputs must be a list.")
+        reference_inputs = []
+        for item in inputs:
+            if not isinstance(item, dict):
+                raise ValueError("Job input descriptor must be a JSON object.")
+            kind = str(item.get("kind") or "").strip()
+            if kind != "reference_image":
+                raise ValueError(f"Qwen Image 2.1 does not support input kind: {kind or 'missing'}")
+            try:
+                sequence = int(item.get("sequence"))
+            except (TypeError, ValueError):
+                raise ValueError("Qwen Image 2.1 reference_image inputs require an integer sequence.")
+            if sequence < 0:
+                raise ValueError("Qwen Image 2.1 reference_image sequence must be zero or greater.")
+            reference_inputs.append((sequence, item))
+
+        sequences = sorted(sequence for sequence, _item in reference_inputs)
+        if sequences != list(range(len(reference_inputs))):
+            raise ValueError("Qwen Image 2.1 reference_image sequences must be unique, contiguous, and begin at zero.")
+        reference_count = len(reference_inputs)
+        if reference_mode == "none" and reference_count:
+            raise ValueError("Qwen Image 2.1 reference_mode=none cannot include reference images.")
+        if reference_mode != "none" and reference_count < 1:
+            raise ValueError(f"Qwen Image 2.1 reference_mode={reference_mode} requires at least one reference image.")
+
+        profile_id = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
+        if profile_id not in {"standard", QWEN21_VIGGLE_PROFILE_ID}:
+            raise ValueError(f"Unsupported accelerator_profile_id for {QWEN21_MODEL_ID}: {profile_id}")
+        max_references = QWEN21_VIGGLE_MAX_REFERENCE_IMAGES if profile_id == QWEN21_VIGGLE_PROFILE_ID else QWEN21_MAX_REFERENCE_IMAGES
+        if reference_count > max_references:
+            raise ValueError(
+                f"Qwen Image 2.1 profile {profile_id} supports at most {max_references} reference images; got {reference_count}."
+            )
+        if profile_id == QWEN21_VIGGLE_PROFILE_ID and negative_prompt:
+            raise ValueError("Qwen Image 2.1 Fast - 6 steps does not support a negative prompt.")
+        requested_steps = generation.get("steps")
+        expected_steps = 6 if profile_id == QWEN21_VIGGLE_PROFILE_ID else 40
+        if requested_steps is not None:
+            try:
+                requested_steps_value = int(requested_steps)
+            except (TypeError, ValueError):
+                raise ValueError(f"Unsupported Qwen Image 2.1 steps value: {requested_steps}")
+            if requested_steps_value != expected_steps:
+                raise ValueError(
+                    f"Qwen Image 2.1 profile {profile_id} requires {expected_steps} steps; got {requested_steps_value}."
+                )
+
+        internal_resolution = QWEN21_INTERNAL_RENDER_RESOLUTIONS.get(requested_resolution)
+        if not internal_resolution:
+            raise ValueError(f"Unsupported Qwen Image 2.1 delivery resolution: {requested_resolution}")
+        settings["resolution"] = internal_resolution
+        settings["prompt_enhancer"] = ""
+        settings["negative_prompt"] = negative_prompt
+        settings["guidance_phases"] = 1
+        settings["remove_background_images_ref"] = 0
+        settings["model_mode"] = 0
+        settings["denoising_strength"] = 1.0
+        settings["_midom_qwen21_reference_mode"] = reference_mode
+        settings["_midom_qwen21_reference_image_count"] = reference_count
+        settings["_midom_requested_resolution"] = requested_resolution
+        settings["_midom_internal_render_resolution"] = internal_resolution
+        settings["_midom_final_output_resolution"] = requested_resolution
+        settings["_midom_image_delivery_adapter"] = (
+            "qwen21_32px_center_crop" if internal_resolution != requested_resolution else ""
+        )
+        settings["_midom_output_mime_type"] = "image/png"
+        settings["_midom_prompt_enhancement_by_worker"] = False
+        settings["_midom_qwen21_requested_profile_id"] = profile_id
+        settings["_midom_qwen21_reference_descriptors"] = [
+            {
+                "input_id": self._coerce_input_id(item),
+                "sequence": sequence,
+            }
+            for sequence, item in sorted(reference_inputs, key=lambda entry: entry[0])
+        ]
+        settings["_midom_qwen21_reference_inputs"] = []
+        settings["image_refs"] = []
+        settings["video_prompt_type"] = {
+            "none": "",
+            "primary_image_edit": "KI",
+            "ordered_reference_images": "I",
+        }[reference_mode]
+        settings["custom_settings"] = {
+            "qwen21_kv_cache": "Disabled",
+            "rgba": "Disabled",
+        }
+        self._log(
+            "Prepared Qwen Image 2.1 job settings; "
+            f"reference_mode={reference_mode!r} reference_count={reference_count} "
+            f"profile_id={profile_id!r} requested_resolution={requested_resolution} "
+            f"internal_render_resolution={internal_resolution}."
+        )
+
+    def _finalize_qwen21_profile_settings(self, settings: dict[str, Any], profile_id: str) -> None:
+        settings["prompt_enhancer"] = ""
+        settings["custom_settings"] = {
+            "qwen21_kv_cache": "Disabled",
+            "rgba": "Disabled",
+        }
+        if profile_id == "standard":
+            settings["num_inference_steps"] = 40
+            settings["guidance_scale"] = 4.0
+            settings["sample_solver"] = "default"
+            settings["activated_loras"] = []
+            settings["loras_multipliers"] = ""
+        elif profile_id == QWEN21_VIGGLE_PROFILE_ID:
+            settings["num_inference_steps"] = 6
+            settings["guidance_scale"] = 1.0
+            settings["sample_solver"] = "viggle_v02"
+            settings["negative_prompt"] = ""
+        else:
+            raise ValueError(f"Unsupported Qwen Image 2.1 accelerator profile: {profile_id}")
+        self._log(
+            "Finalized Qwen Image 2.1 generation profile; "
+            f"profile_id={profile_id!r} steps={settings.get('num_inference_steps')} "
+            f"guidance_scale={settings.get('guidance_scale')} sample_solver={settings.get('sample_solver')!r}."
+        )
 
     def _apply_sensenova_job_settings(
         self,
@@ -5355,6 +5578,36 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             metadata["requested_resolution"] = str(settings.get("_midom_requested_resolution") or "")
             metadata["internal_render_resolution"] = str(settings.get("_midom_internal_render_resolution") or settings.get("resolution") or "")
             metadata["final_output_resolution"] = str(settings.get("_midom_final_output_resolution") or settings.get("_midom_requested_resolution") or "")
+        if str(settings.get("model_type") or "") == QWEN21_MODEL_ID:
+            reference_inputs = settings.get("_midom_qwen21_reference_inputs")
+            if not isinstance(reference_inputs, list):
+                reference_inputs = []
+            metadata["reference_mode"] = str(settings.get("_midom_qwen21_reference_mode") or "none")
+            metadata["reference_image_count"] = self._coerce_int(
+                settings.get("_midom_qwen21_reference_image_count"),
+                len(reference_inputs),
+                0,
+                QWEN21_MAX_REFERENCE_IMAGES,
+            )
+            metadata["ordered_reference_inputs"] = [
+                {
+                    "input_id": self._coerce_int(item.get("input_id"), 0, 0, 2_147_483_647),
+                    "sequence": self._coerce_int(item.get("sequence"), 0, 0, QWEN21_MAX_REFERENCE_IMAGES - 1),
+                    "sha256": str(item.get("sha256") or ""),
+                }
+                for item in reference_inputs
+                if isinstance(item, dict)
+            ]
+            metadata["accelerator_profile_id"] = str(settings.get("_midom_accelerator_profile_id") or "standard")
+            metadata["num_inference_steps"] = self._coerce_int(settings.get("num_inference_steps"), 40, 1, MAX_STEPS)
+            metadata["guidance_scale"] = self._coerce_float(settings.get("guidance_scale"), 4.0, 0.0, 100.0)
+            metadata["sample_solver"] = str(settings.get("sample_solver") or "default")
+            metadata["prompt_processing_mode"] = str(settings.get("_midom_prompt_processing_mode") or "FG")
+            metadata["prompt_enhancement_by_worker"] = False
+            metadata["image_delivery_adapter"] = str(settings.get("_midom_image_delivery_adapter") or "")
+            metadata["requested_resolution"] = str(settings.get("_midom_requested_resolution") or "")
+            metadata["internal_render_resolution"] = str(settings.get("_midom_internal_render_resolution") or settings.get("resolution") or "")
+            metadata["final_output_resolution"] = str(settings.get("_midom_final_output_resolution") or settings.get("_midom_requested_resolution") or "")
         curated_tool_id = str(settings.get("_midom_curated_tool_id") or "").strip()
         if curated_tool_id:
             metadata["curated_tool"] = {
@@ -6402,6 +6655,47 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 ).strip().lower()
                 if view_change_strength not in QWEN_MULTI_ANGLE_VIEW_CHANGE_STRENGTHS:
                     return f"{tool_id} unsupported view_change_strength: {view_change_strength}"
+            if model_id == QWEN21_MODEL_ID:
+                output_format = str(summary.get("output_format") or "png").strip().lower()
+                if output_format != "png":
+                    return f"Qwen Image 2.1 unsupported output_format: {output_format}"
+                reference_count_value = summary.get("reference_image_count")
+                reference_count = None
+                if reference_count_value is not None:
+                    try:
+                        reference_count = int(reference_count_value)
+                    except (TypeError, ValueError):
+                        return f"Qwen Image 2.1 invalid reference_image_count: {reference_count_value}"
+                    if reference_count < 0:
+                        return f"Qwen Image 2.1 invalid reference_image_count: {reference_count}"
+                control_count = self._coerce_int(summary.get("control_image_count"), 0, 0, 100)
+                if control_count:
+                    return f"Qwen Image 2.1 does not support control images; got {control_count}"
+                reference_mode = str(summary.get("reference_mode") or "").strip().lower()
+                if reference_mode and reference_mode not in QWEN21_REFERENCE_MODES:
+                    return f"Qwen Image 2.1 unsupported reference_mode: {reference_mode}"
+                if reference_count is not None:
+                    if reference_mode == "none" and reference_count:
+                        return "Qwen Image 2.1 reference_mode=none cannot include reference images"
+                    if reference_mode in {"primary_image_edit", "ordered_reference_images"} and reference_count < 1:
+                        return f"Qwen Image 2.1 reference_mode={reference_mode} requires a reference image"
+                accelerator_profile_id = str(
+                    summary.get("accelerator_profile_id") or summary.get("speed_profile_id") or "standard"
+                ).strip() or "standard"
+                if accelerator_profile_id not in {"standard", QWEN21_VIGGLE_PROFILE_ID}:
+                    return f"Qwen Image 2.1 unsupported accelerator_profile_id: {accelerator_profile_id}"
+                if accelerator_profile_id == QWEN21_VIGGLE_PROFILE_ID:
+                    profile = ACCELERATOR_PROFILE_BY_ID.get(accelerator_profile_id)
+                    resolved_loras, missing_loras = self._resolve_accelerator_loras(profile or {})
+                    if missing_loras or not resolved_loras:
+                        return f"Qwen Image 2.1 accelerator unavailable: {accelerator_profile_id}"
+                    if reference_count is not None and reference_count > QWEN21_VIGGLE_MAX_REFERENCE_IMAGES:
+                        return (
+                            f"Qwen Image 2.1 accelerator {accelerator_profile_id} supports at most "
+                            f"{QWEN21_VIGGLE_MAX_REFERENCE_IMAGES} reference images; got {reference_count}"
+                        )
+                elif reference_count is not None and reference_count > QWEN21_MAX_REFERENCE_IMAGES:
+                    return f"Qwen Image 2.1 supports at most {QWEN21_MAX_REFERENCE_IMAGES} reference images; got {reference_count}"
         if media_type == "audio" and model_id not in ALLOWED_AUDIO_MODEL_TYPES:
             return f"unsupported audio model_id: {candidate.get('model_id')}"
         if media_type == "video" and model_id not in ALLOWED_VIDEO_MODEL_TYPES:
@@ -7145,6 +7439,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                 artifact_index,
                                 settings.get("_midom_requested_resolution") or settings.get("resolution"),
                                 "center_crop_downscale" if settings.get("_midom_image_delivery_adapter") else "resize",
+                                settings.get("_midom_output_mime_type"),
                             )
                         )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
@@ -11940,12 +12235,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_id = str(job.get("model_id") or job.get("model_type") or "").strip()
         model_meta = MODEL_CAPABILITY_OVERRIDES.get(model_id) or {}
         supported_control_modes = {item["mode_id"] for item in self._control_modes_for_model(model_id)}
-        max_reference_images = self._coerce_int(
-            (job.get("limits") or {}).get("max_reference_images"),
-            int(model_meta.get("max_reference_images") or 0),
-            0,
-            3,
-        )
+        local_max_reference_images = int(model_meta.get("max_reference_images") or 0)
+        if model_id == QWEN21_MODEL_ID:
+            max_reference_images = local_max_reference_images
+        else:
+            max_reference_images = self._coerce_int(
+                (job.get("limits") or {}).get("max_reference_images"),
+                local_max_reference_images,
+                0,
+                local_max_reference_images,
+            )
         max_control_images = self._coerce_int(
             (job.get("limits") or {}).get("max_control_images"),
             MAX_CONTROL_IMAGES if model_meta.get("control") else 0,
@@ -12015,10 +12314,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "mime_type": mime_type,
                 "sha256": actual_sha256,
                 "control_mode": control_mode,
+                **({"sequence": int(item["sequence"])} if model_id == QWEN21_MODEL_ID and kind == "reference_image" else {}),
             })
             self._log(
                 f"Downloaded input; job_id={job_id} input_id={input_id} "
-                f"kind={kind} mime_type={mime_type} bytes={len(data)} sha256={actual_sha256[:12]}..."
+                f"kind={kind} sequence={item.get('sequence') if model_id == QWEN21_MODEL_ID else None} "
+                f"mime_type={mime_type} bytes={len(data)} sha256={actual_sha256[:12]}..."
             )
         if model_id == "qwen_image_layered_20B":
             if reference_count != 0:
@@ -13376,7 +13677,61 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"Model {model_id} does not support ordinary reference images.")
         if control_inputs and not model_meta.get("control"):
             raise ValueError(f"Model {model_id} does not support control images.")
-        if model_id == SENSENOVA_MODEL_ID:
+        if model_id == QWEN21_MODEL_ID:
+            if control_inputs:
+                raise ValueError("Qwen Image 2.1 first-pass jobs do not support control_image inputs.")
+            reference_mode = str(settings.get("_midom_qwen21_reference_mode") or "").strip().lower()
+            ordered_inputs = sorted(
+                [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
+                key=lambda item: int(item.get("sequence", -1)),
+            )
+            sequences = [int(item.get("sequence", -1)) for item in ordered_inputs]
+            if sequences != list(range(len(ordered_inputs))):
+                raise ValueError("Downloaded Qwen Image 2.1 reference inputs have invalid sequence values.")
+            ordered_paths = [item["path"] for item in ordered_inputs]
+            expected_count = self._coerce_int(
+                settings.get("_midom_qwen21_reference_image_count"),
+                len(ordered_paths),
+                0,
+                QWEN21_MAX_REFERENCE_IMAGES,
+            )
+            if len(ordered_paths) != expected_count:
+                raise ValueError(
+                    "Downloaded Qwen Image 2.1 reference count does not match the validated claim; "
+                    f"expected {expected_count}, got {len(ordered_paths)}."
+                )
+            if reference_mode == "none":
+                if ordered_paths:
+                    raise ValueError("Qwen Image 2.1 reference_mode=none cannot include reference images.")
+                settings["image_refs"] = []
+                settings["video_prompt_type"] = ""
+            elif reference_mode == "primary_image_edit":
+                if not ordered_paths:
+                    raise ValueError("Qwen Image 2.1 primary_image_edit requires at least one reference image.")
+                settings["image_refs"] = ordered_paths
+                settings["video_prompt_type"] = "KI"
+            elif reference_mode == "ordered_reference_images":
+                if not ordered_paths:
+                    raise ValueError("Qwen Image 2.1 ordered_reference_images requires at least one reference image.")
+                settings["image_refs"] = ordered_paths
+                settings["video_prompt_type"] = "I"
+            else:
+                raise ValueError(f"Unsupported Qwen Image 2.1 reference_mode: {reference_mode or 'missing'}")
+            settings["_midom_qwen21_reference_inputs"] = [
+                {
+                    "input_id": int(item["input_id"]),
+                    "sequence": int(item["sequence"]),
+                    "sha256": str(item.get("sha256") or ""),
+                }
+                for item in ordered_inputs
+            ]
+            self._log(
+                "Applied Qwen Image 2.1 reference settings; "
+                f"model_id={model_id} reference_mode={reference_mode!r} "
+                f"ordered_inputs={[(item['input_id'], item['sequence']) for item in ordered_inputs]} "
+                f"video_prompt_type={settings.get('video_prompt_type')!r}."
+            )
+        elif model_id == SENSENOVA_MODEL_ID:
             reference_mode = str(settings.get("_midom_sensenova_reference_mode") or "none").strip().lower()
             if control_inputs:
                 raise ValueError("SenseNova U1.5 does not support Midom control_image inputs.")
@@ -13550,6 +13905,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         artifact_index: int,
         expected_resolution: Any = None,
         normalization_mode: str = "resize",
+        required_mime_type: Any = None,
     ) -> dict[str, Any]:
         self._ensure_job_flow_enabled()
         path = Path(file_path)
@@ -13564,6 +13920,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
             raise ValueError(f"Unsupported generated artifact mime type: {mime_type}")
+        required_mime = str(required_mime_type or "").strip().lower()
+        if required_mime and required_mime not in ALLOWED_IMAGE_MIME_TYPES:
+            raise ValueError(f"Unsupported required image artifact MIME type: {required_mime}")
         decoded_width = decoded_height = None
         decoded_format = ""
         normalized_temp_path = None
@@ -13574,17 +13933,23 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         except Exception as exc:
             raise ValueError(f"Generated artifact could not be decoded as an image: {exc}")
         expected_size = self._parse_resolution_size(expected_resolution)
-        if expected_size is not None and (decoded_width, decoded_height) != expected_size:
-            normalized_temp_path = self._normalize_artifact_dimensions(path, expected_size, mime_type, normalization_mode)
+        dimensions_mismatch = expected_size is not None and (decoded_width, decoded_height) != expected_size
+        mime_mismatch = bool(required_mime and mime_type != required_mime)
+        if dimensions_mismatch or mime_mismatch:
+            normalized_size = expected_size or (decoded_width, decoded_height)
+            normalized_mime = required_mime or mime_type
+            normalized_temp_path = self._normalize_artifact_dimensions(path, normalized_size, normalized_mime, normalization_mode)
             self._log(
-                "Normalized generated artifact dimensions before upload; "
+                "Normalized generated artifact before upload; "
                 f"job_id={job_id} artifact_index={artifact_index} "
-                f"original={decoded_width}x{decoded_height} expected={expected_size[0]}x{expected_size[1]} "
+                f"original={decoded_width}x{decoded_height} expected={normalized_size[0]}x{normalized_size[1]} "
+                f"original_mime={mime_type!r} expected_mime={normalized_mime!r} "
                 f"normalization_mode={normalization_mode!r} "
                 f"normalized_file={normalized_temp_path.name!r}.",
                 force=True,
             )
             path = normalized_temp_path
+            mime_type = normalized_mime
             file_size = path.stat().st_size
             with Image.open(path) as image:
                 decoded_width, decoded_height = image.size
