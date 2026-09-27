@@ -852,7 +852,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.7.0"
+        self.version = "0.7.1"
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -3035,6 +3035,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(
                 "Qwen Image 2.1 outpainting requires "
                 f"outpaint_contract_version={QWEN21_OUTPAINT_CONTRACT_VERSION!r}."
+            )
+        outpaint_mode = str(generation.get("outpaint_mode") or "").strip().lower()
+        if outpaint_mode not in {"", "generative_image_outpainting"}:
+            raise ValueError(
+                "Qwen Image 2.1 Preserve Original is no longer supported; "
+                "use the Generative Reframing workflow."
+            )
+        if generation.get("preserve_original_contract_version") or generation.get("preservation_profile_id"):
+            raise ValueError(
+                "Qwen Image 2.1 Preserve Original is no longer supported; "
+                "use the Generative Reframing workflow."
             )
         reference_mode = str(generation.get("reference_mode") or "").strip().lower()
         if reference_mode != "primary_image_edit":
@@ -7281,6 +7292,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         return (
                             "Qwen Image 2.1 outpainting requires contract version "
                             f"{QWEN21_OUTPAINT_CONTRACT_VERSION}"
+                        )
+                    outpaint_mode = str(summary.get("outpaint_mode") or "").strip().lower()
+                    if outpaint_mode not in {"", "generative_image_outpainting"}:
+                        return (
+                            "Qwen Image 2.1 Preserve Original is no longer supported; "
+                            "use Generative Reframing"
+                        )
+                    if summary.get("preserve_original_contract_version") or summary.get("preservation_profile_id"):
+                        return (
+                            "Qwen Image 2.1 Preserve Original is no longer supported; "
+                            "use Generative Reframing"
                         )
                     if reference_mode != "primary_image_edit":
                         return "Qwen Image 2.1 outpainting requires reference_mode=primary_image_edit"

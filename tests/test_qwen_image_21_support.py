@@ -224,6 +224,8 @@ def test_qwen21_capability_reports_first_pass_contract():
         "output_mime_types": ["image/png"],
         "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
     }
+    assert "modes" not in outpaint
+    assert "preserve_original" not in outpaint
     profiles = {item["profile_id"]: item for item in capability["accelerator_profiles"]}
     assert profiles["standard"]["steps"] == 40
     assert profiles["standard"]["max_reference_images"] == 10
@@ -1082,7 +1084,7 @@ def test_qwen21_outpaint_geometry_fixtures(source_size, output_size, expected):
     assert module.AwsWorkerBridgePlugin._qwen21_outpaint_fitted_size(source_size, output_size) == expected
 
 
-def test_qwen21_outpaint_contract_maps_to_unadvertised_red_canvas_recipe():
+def test_qwen21_outpaint_contract_maps_to_red_canvas_recipe():
     module = load_plugin_module()
     settings = plugin_instance(module)._validate_image_job(qwen21_outpaint_job(), 21200)
 
@@ -1104,6 +1106,17 @@ def test_qwen21_outpaint_contract_maps_to_unadvertised_red_canvas_recipe():
     assert settings["sample_solver"] == "default"
     assert settings["prompt"].endswith(module.QWEN21_RED_OUTPAINTING_PROMPT)
     assert settings["prompt"].count(module.QWEN21_RED_OUTPAINTING_PROMPT) == 1
+
+
+def test_qwen21_outpaint_rejects_retired_preserve_original_contract():
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    job = qwen21_outpaint_job()
+    job["generation"]["outpaint_mode"] = "preserve_original"
+    job["generation"]["preserve_original_contract_version"] = "qwen21_preserve_original_outpaint_v1"
+    job["generation"]["preservation_profile_id"] = "exact_source_v1"
+    with pytest.raises(ValueError, match="Preserve Original is no longer supported"):
+        plugin._validate_image_job(job, 212001)
 
 
 def test_qwen21_outpaint_rejects_generation_descriptor_dimension_mismatch():
@@ -1377,3 +1390,53 @@ def test_qwen21_outpaint_candidate_contract_is_gated():
     candidate["summary"]["mask_image_count"] = 0
     candidate["summary"]["accelerator_profile_id"] = module.QWEN21_PRUNA_8_PROFILE_ID
     assert "only accelerator_profile_id=standard" in plugin._candidate_incompatibility_reason(candidate, connection)
+
+
+def test_qwen21_outpaint_candidate_rejects_retired_preserve_original_contract():
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    connection = module.ConnectionContext(
+        connection_id="worker-1",
+        api_base_url="https://midom.test",
+        worker_id=1,
+        worker_token="token",
+        org_id=2,
+        project_id=3,
+        paired_user_id=4,
+        machine_name="GPU",
+        capabilities_revision=1,
+        token_expires_at="",
+        allow_insecure_local_dev=False,
+        allow_insecure_lan_dev=False,
+    )
+    summary = {
+        "image_task": "outpaint",
+        "outpaint_contract_version": "qwen21_outpaint_v1",
+        "outpaint_mode": "preserve_original",
+        "preserve_original_contract_version": "qwen21_preserve_original_outpaint_v1",
+        "preservation_profile_id": "exact_source_v1",
+        "reference_mode": "primary_image_edit",
+        "reference_image_count": 1,
+        "source_image_count": 1,
+        "mask_image_count": 0,
+        "control_image_count": 0,
+        "placement_mode": "explicit_rectangle",
+        "source_scale_mode": "fit_without_crop_no_upscale",
+        "accelerator_profile_id": "standard",
+        "output_count": 1,
+        "output_format": "png",
+    }
+    candidate = {
+        "job_id": 21215,
+        "worker_id": 1,
+        "org_id": 2,
+        "project_id": 3,
+        "requested_by_user_id": 4,
+        "media_type": "image",
+        "model_id": module.QWEN21_MODEL_ID,
+        "summary": summary,
+    }
+
+    assert "Preserve Original is no longer supported" in plugin._candidate_incompatibility_reason(
+        candidate, connection
+    )
