@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import gradio as gr
 import requests
-from PIL import Image
+from PIL import Image, ImageChops, ImageOps
 
 from shared.api import init as init_wangp_session
 from shared.utils.plugins import WAN2GPPlugin
@@ -168,6 +168,14 @@ QWEN21_INTERNAL_RENDER_RESOLUTIONS = {
     "1280x720": "1280x736",
     "720x1280": "736x1280",
 }
+QWEN21_MASKED_EDIT_CONTRACT_VERSION = "qwen21_masked_edit_v1"
+QWEN21_MASK_SEMANTICS = "luminance_white_edit_v1"
+QWEN21_MASKED_EDIT_METHODS = {
+    "masked_denoising": 0,
+    "lanpaint_5": 3,
+}
+QWEN21_MASKED_EDIT_STRENGTH = "balanced"
+QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES = 1
 QWEN21_VIGGLE_PROFILE_ID = "qwen21_viggle_turbo_v021_6"
 QWEN21_VIGGLE_LORA_DIR = "qwen21"
 QWEN21_VIGGLE_LORA_FILENAME = "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors"
@@ -557,7 +565,8 @@ MODEL_CAPABILITY_OVERRIDES = {
         "display_name": QWEN21_DISPLAY_NAME,
         "image_reference": True,
         "control": False,
-        "inpaint": False,
+        "inpaint": True,
+        "masked_edit": True,
         "image_edit": True,
         "multi_reference_images": True,
         "ordered_reference_images": True,
@@ -1326,6 +1335,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "ordered_reference_images",
                 "prompt_enhancement_by_worker",
                 "native_high_res_render",
+                "masked_edit",
             ):
                 if metadata.get(capability_key):
                     model_capabilities[capability_key] = True
@@ -1362,6 +1372,28 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 }
                 model_limits["dimension_alignment"] = 32
                 model_limits["output_mime_types"] = ["image/png"]
+                model_limits["image_tasks"] = ["generate", "edit", "masked_edit"]
+                model_limits["masked_edit"] = {
+                    "contract_version": QWEN21_MASKED_EDIT_CONTRACT_VERSION,
+                    "reference_mode": "primary_image_edit",
+                    "max_supporting_reference_images": QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES,
+                    "methods": sorted(QWEN21_MASKED_EDIT_METHODS),
+                    "edit_strengths": [QWEN21_MASKED_EDIT_STRENGTH],
+                    "mask_semantics": [QWEN21_MASK_SEMANTICS],
+                    "mask_mime_types": ["image/png"],
+                    "mask_pixel_values": [0, 255],
+                    "mask_alpha_semantics": False,
+                    "allow_full_image_edit": True,
+                    "accelerator_profile_ids": ["standard"],
+                    "output_color_mode": "RGB",
+                    "delivery_resolutions": sorted(QWEN21_DELIVERY_RESOLUTIONS),
+                    "dimension_alignment": 32,
+                    "canvas_adapter": {
+                        "source_padding": "edge_replication",
+                        "mask_padding": "black_protected",
+                        "output": "center_crop_to_delivery_size",
+                    },
+                }
             if metadata.get("output_roles"):
                 model_limits["output_roles"] = list(metadata["output_roles"])
             curated_tools = self._curated_tools_for_model(model_id)
@@ -2818,6 +2850,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if bool(generation.get("prompt_enhancement_by_worker")):
             raise ValueError("Qwen Image 2.1 jobs must use the final Midom prompt; worker prompt enhancement is not supported.")
 
+        image_task = str(generation.get("image_task") or "").strip().lower()
+        if image_task == "masked_edit":
+            self._apply_qwen21_masked_edit_job_settings(
+                settings,
+                job,
+                generation,
+                requested_resolution,
+                negative_prompt,
+            )
+            return
+        if image_task not in {"", "generate", "edit", "image_edit"}:
+            raise ValueError(f"Unsupported Qwen Image 2.1 image_task: {image_task}")
+
         reference_mode = str(generation.get("reference_mode") or "").strip().lower()
         if reference_mode not in QWEN21_REFERENCE_MODES:
             raise ValueError(f"Unsupported Qwen Image 2.1 reference_mode: {reference_mode or 'missing'}")
@@ -2914,6 +2959,155 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "Prepared Qwen Image 2.1 job settings; "
             f"reference_mode={reference_mode!r} reference_count={reference_count} "
             f"profile_id={profile_id!r} requested_resolution={requested_resolution} "
+            f"internal_render_resolution={internal_resolution}."
+        )
+
+    def _apply_qwen21_masked_edit_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+        negative_prompt: str,
+    ) -> None:
+        contract_version = str(generation.get("masked_edit_contract_version") or "").strip()
+        if contract_version != QWEN21_MASKED_EDIT_CONTRACT_VERSION:
+            raise ValueError(
+                "Qwen Image 2.1 masked editing requires "
+                f"masked_edit_contract_version={QWEN21_MASKED_EDIT_CONTRACT_VERSION!r}."
+            )
+        reference_mode = str(generation.get("reference_mode") or "").strip().lower()
+        if reference_mode != "primary_image_edit":
+            raise ValueError("Qwen Image 2.1 masked editing requires reference_mode='primary_image_edit'.")
+        method = str(generation.get("masked_edit_method") or "").strip().lower()
+        if method not in QWEN21_MASKED_EDIT_METHODS:
+            raise ValueError(f"Unsupported Qwen Image 2.1 masked_edit_method: {method or 'missing'}")
+        edit_strength = str(generation.get("edit_strength") or "").strip().lower()
+        if edit_strength != QWEN21_MASKED_EDIT_STRENGTH:
+            raise ValueError(
+                "Qwen Image 2.1 first-pass masked editing requires edit_strength='balanced'."
+            )
+        mask_semantics = str(generation.get("mask_semantics") or "").strip()
+        if mask_semantics != QWEN21_MASK_SEMANTICS:
+            raise ValueError(
+                "Qwen Image 2.1 masked editing requires "
+                f"mask_semantics={QWEN21_MASK_SEMANTICS!r}."
+            )
+        allow_full_image_edit = generation.get("allow_full_image_edit")
+        if not isinstance(allow_full_image_edit, bool):
+            raise ValueError("Qwen Image 2.1 masked editing requires boolean allow_full_image_edit.")
+        profile_id = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
+        if profile_id != "standard":
+            raise ValueError(
+                "Qwen Image 2.1 masked editing supports only accelerator_profile_id='standard'."
+            )
+
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Job inputs must be a list.")
+        source_inputs = []
+        supporting_inputs = []
+        reference_inputs = []
+        mask_inputs = []
+        for item in inputs:
+            if not isinstance(item, dict):
+                raise ValueError("Job input descriptor must be a JSON object.")
+            kind = str(item.get("kind") or "").strip()
+            role = str(item.get("role") or "").strip()
+            if kind == "reference_image" and role in {"source_image", "supporting_reference_image"}:
+                try:
+                    sequence = int(item.get("sequence"))
+                except (TypeError, ValueError):
+                    raise ValueError("Masked-edit reference images require an integer sequence.")
+                if sequence < 0:
+                    raise ValueError("Masked-edit reference image sequence must be zero or greater.")
+                if role == "source_image" and sequence != 0:
+                    raise ValueError("Masked-edit source_image requires sequence=0.")
+                if role == "supporting_reference_image" and sequence == 0:
+                    raise ValueError("Masked-edit supporting_reference_image sequence must be greater than zero.")
+                reference_inputs.append((sequence, item))
+                (source_inputs if role == "source_image" else supporting_inputs).append(item)
+            elif kind == "mask_image" and role == "edit_mask":
+                declared_mime = str(item.get("mime_type") or "").split(";", 1)[0].strip().lower()
+                if declared_mime != "image/png":
+                    raise ValueError("Masked-edit edit_mask must declare mime_type='image/png'.")
+                mask_inputs.append(item)
+            else:
+                raise ValueError(
+                    "Qwen Image 2.1 masked editing accepts only reference_image/source_image, "
+                    "reference_image/supporting_reference_image, and mask_image/edit_mask inputs."
+                )
+        if len(source_inputs) != 1:
+            raise ValueError(f"Qwen Image 2.1 masked editing requires exactly one source_image; got {len(source_inputs)}.")
+        if len(mask_inputs) != 1:
+            raise ValueError(f"Qwen Image 2.1 masked editing requires exactly one edit_mask; got {len(mask_inputs)}.")
+        reference_inputs.sort(key=lambda entry: entry[0])
+        sequences = [sequence for sequence, _item in reference_inputs]
+        if sequences != list(range(len(reference_inputs))):
+            raise ValueError("Masked-edit reference sequences must be unique, contiguous, and begin at zero.")
+        reference_count = len(reference_inputs)
+        if len(supporting_inputs) > QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES:
+            raise ValueError(
+                "Qwen Image 2.1 masked editing supports at most "
+                f"{QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES} supporting reference image; "
+                f"got {len(supporting_inputs)}."
+            )
+
+        internal_resolution = QWEN21_INTERNAL_RENDER_RESOLUTIONS.get(requested_resolution)
+        if not internal_resolution:
+            raise ValueError(f"Unsupported Qwen Image 2.1 delivery resolution: {requested_resolution}")
+        settings.update({
+            "resolution": internal_resolution,
+            "image_mode": 2,
+            "prompt_enhancer": "",
+            "negative_prompt": negative_prompt,
+            "guidance_phases": 1,
+            "remove_background_images_ref": 0,
+            "model_mode": QWEN21_MASKED_EDIT_METHODS[method],
+            "denoising_strength": 1.0,
+            "masking_strength": 1.0,
+            "image_refs": [],
+            "video_prompt_type": "VAGI" if supporting_inputs else "VAG",
+            "_midom_image_task": "masked_edit",
+            "_midom_qwen21_reference_mode": reference_mode,
+            "_midom_qwen21_reference_image_count": reference_count,
+            "_midom_qwen21_masked_edit_contract_version": contract_version,
+            "_midom_qwen21_masked_edit_method": method,
+            "_midom_qwen21_edit_strength": edit_strength,
+            "_midom_qwen21_mask_semantics": mask_semantics,
+            "_midom_qwen21_allow_full_image_edit": allow_full_image_edit,
+            "_midom_qwen21_source_input_id": self._coerce_input_id(source_inputs[0]),
+            "_midom_qwen21_mask_input_id": self._coerce_input_id(mask_inputs[0]),
+            "_midom_requested_resolution": requested_resolution,
+            "_midom_internal_render_resolution": internal_resolution,
+            "_midom_final_output_resolution": requested_resolution,
+            "_midom_image_delivery_adapter": (
+                "qwen21_32px_center_crop" if internal_resolution != requested_resolution else ""
+            ),
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": "RGB",
+            "_midom_prompt_enhancement_by_worker": False,
+            "_midom_qwen21_requested_profile_id": "standard",
+            "_midom_qwen21_reference_descriptors": [
+                {
+                    "input_id": self._coerce_input_id(item),
+                    "role": str(item.get("role") or ""),
+                    "sequence": sequence,
+                }
+                for sequence, item in reference_inputs
+            ],
+            "_midom_qwen21_reference_inputs": [],
+            "custom_settings": {
+                "qwen21_kv_cache": "Disabled",
+                "rgba": "Disabled",
+            },
+        })
+        self._log(
+            "Prepared Qwen Image 2.1 masked-edit settings; "
+            f"contract_version={contract_version!r} method={method!r} "
+            f"model_mode={settings['model_mode']} edit_strength={edit_strength!r} "
+            f"reference_count={reference_count} supporting_reference_count={len(supporting_inputs)} "
+            f"allow_full_image_edit={allow_full_image_edit} requested_resolution={requested_resolution} "
             f"internal_render_resolution={internal_resolution}."
         )
 
@@ -5640,6 +5834,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "input_id": self._coerce_int(item.get("input_id"), 0, 0, 2_147_483_647),
                     "sequence": self._coerce_int(item.get("sequence"), 0, 0, QWEN21_MAX_REFERENCE_IMAGES - 1),
                     "sha256": str(item.get("sha256") or ""),
+                    **({"role": str(item.get("role"))} if item.get("role") else {}),
                 }
                 for item in reference_inputs
                 if isinstance(item, dict)
@@ -5654,6 +5849,48 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             metadata["requested_resolution"] = str(settings.get("_midom_requested_resolution") or "")
             metadata["internal_render_resolution"] = str(settings.get("_midom_internal_render_resolution") or settings.get("resolution") or "")
             metadata["final_output_resolution"] = str(settings.get("_midom_final_output_resolution") or settings.get("_midom_requested_resolution") or "")
+            if str(settings.get("_midom_image_task") or "") == "masked_edit":
+                masked_inputs = settings.get("_midom_qwen21_masked_edit_inputs")
+                if not isinstance(masked_inputs, dict):
+                    masked_inputs = {}
+                metadata["image_task"] = "masked_edit"
+                metadata["masked_edit"] = {
+                    "contract_version": str(settings.get("_midom_qwen21_masked_edit_contract_version") or ""),
+                    "mask_semantics": str(settings.get("_midom_qwen21_mask_semantics") or ""),
+                    "method": str(settings.get("_midom_qwen21_masked_edit_method") or ""),
+                    "edit_strength": str(settings.get("_midom_qwen21_edit_strength") or ""),
+                    "allow_full_image_edit": bool(settings.get("_midom_qwen21_allow_full_image_edit")),
+                    "source": dict(masked_inputs.get("source") or {}),
+                    "mask": dict(masked_inputs.get("mask") or {}),
+                    "references": [
+                        {
+                            "input_id": self._coerce_int(item.get("input_id"), 0, 0, 2_147_483_647),
+                            "role": str(item.get("role") or ""),
+                            "sequence": self._coerce_int(
+                                item.get("sequence"),
+                                0,
+                                0,
+                                QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES,
+                            ),
+                            "sha256": str(item.get("sha256") or ""),
+                        }
+                        for item in reference_inputs
+                        if isinstance(item, dict)
+                    ],
+                    "requested_dimensions": str(settings.get("_midom_requested_resolution") or ""),
+                    "internal_dimensions": str(settings.get("_midom_internal_render_resolution") or ""),
+                    "final_output_dimensions": str(settings.get("_midom_final_output_resolution") or ""),
+                    "canvas_adapter": dict(settings.get("_midom_qwen21_canvas_adapter") or {}),
+                    "accelerator_profile_id": str(settings.get("_midom_accelerator_profile_id") or "standard"),
+                    "expanded_bridge_recipe": {
+                        "image_mode": self._coerce_int(settings.get("image_mode"), 2, 0, 2),
+                        "video_prompt_type": str(settings.get("video_prompt_type") or ""),
+                        "model_mode": self._coerce_int(settings.get("model_mode"), 0, 0, 5),
+                        "denoising_strength": self._coerce_float(settings.get("denoising_strength"), 1.0, 0.0, 1.0),
+                        "masking_strength": self._coerce_float(settings.get("masking_strength"), 1.0, 0.0, 1.0),
+                        "output_color_mode": "RGB",
+                    },
+                }
         curated_tool_id = str(settings.get("_midom_curated_tool_id") or "").strip()
         if curated_tool_id:
             metadata["curated_tool"] = {
@@ -6705,6 +6942,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 output_format = str(summary.get("output_format") or "png").strip().lower()
                 if output_format != "png":
                     return f"Qwen Image 2.1 unsupported output_format: {output_format}"
+                image_task = str(summary.get("image_task") or "").strip().lower()
+                is_masked_edit = image_task == "masked_edit"
+                if image_task not in {"", "generate", "edit", "image_edit", "masked_edit"}:
+                    return f"Qwen Image 2.1 unsupported image_task: {image_task}"
                 reference_count_value = summary.get("reference_image_count")
                 reference_count = None
                 if reference_count_value is not None:
@@ -6728,6 +6969,46 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 accelerator_profile_id = str(
                     summary.get("accelerator_profile_id") or summary.get("speed_profile_id") or "standard"
                 ).strip() or "standard"
+                if is_masked_edit:
+                    contract_version = str(summary.get("masked_edit_contract_version") or "").strip()
+                    if contract_version and contract_version != QWEN21_MASKED_EDIT_CONTRACT_VERSION:
+                        return (
+                            "Qwen Image 2.1 masked editing requires contract version "
+                            f"{QWEN21_MASKED_EDIT_CONTRACT_VERSION}"
+                        )
+                    if reference_mode and reference_mode != "primary_image_edit":
+                        return "Qwen Image 2.1 masked editing requires reference_mode=primary_image_edit"
+                    if reference_count is not None and not 1 <= reference_count <= 1 + QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES:
+                        return (
+                            "Qwen Image 2.1 masked editing requires one source and at most "
+                            f"{QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES} supporting reference image; "
+                            f"got {reference_count} total reference images"
+                        )
+                    supporting_count_value = summary.get("supporting_reference_image_count")
+                    if supporting_count_value is not None:
+                        supporting_count = self._coerce_int(supporting_count_value, 0, 0, 100)
+                        if supporting_count > QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES:
+                            return (
+                                "Qwen Image 2.1 masked editing supports at most "
+                                f"{QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES} supporting reference image; "
+                                f"got {supporting_count}"
+                            )
+                    mask_count_value = summary.get("mask_image_count")
+                    if mask_count_value is not None:
+                        mask_count = self._coerce_int(mask_count_value, 0, 0, 100)
+                        if mask_count != 1:
+                            return f"Qwen Image 2.1 masked editing requires one mask image; got {mask_count}"
+                    method = str(summary.get("masked_edit_method") or "").strip().lower()
+                    if method and method not in QWEN21_MASKED_EDIT_METHODS:
+                        return f"Qwen Image 2.1 masked editing unsupported method: {method or 'missing'}"
+                    edit_strength = str(summary.get("edit_strength") or "").strip().lower()
+                    if edit_strength and edit_strength != QWEN21_MASKED_EDIT_STRENGTH:
+                        return "Qwen Image 2.1 masked editing requires edit_strength=balanced"
+                    mask_semantics = str(summary.get("mask_semantics") or "").strip()
+                    if mask_semantics and mask_semantics != QWEN21_MASK_SEMANTICS:
+                        return f"Qwen Image 2.1 masked editing requires mask_semantics={QWEN21_MASK_SEMANTICS}"
+                    if accelerator_profile_id != "standard":
+                        return "Qwen Image 2.1 masked editing supports only accelerator_profile_id=standard"
                 if accelerator_profile_id not in {"standard", *QWEN21_ACCELERATOR_PROFILE_IDS}:
                     return f"Qwen Image 2.1 unsupported accelerator_profile_id: {accelerator_profile_id}"
                 if accelerator_profile_id != "standard":
@@ -7487,6 +7768,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                 settings.get("_midom_requested_resolution") or settings.get("resolution"),
                                 "center_crop_downscale" if settings.get("_midom_image_delivery_adapter") else "resize",
                                 settings.get("_midom_output_mime_type"),
+                                settings.get("_midom_output_color_mode"),
                             )
                         )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
@@ -11479,6 +11761,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"video_sync_profile_id={settings.get('_midom_video_sync_profile_id', 'standard')!r} "
                 f"output_format={settings.get('_midom_output_format')}."
             )
+        elif str(settings.get("_midom_media_type") or "") == "image" and str(settings.get("_midom_image_task") or "") == "masked_edit":
+            self._log(
+                "WanGP Qwen Image 2.1 masked-edit submit settings; "
+                f"contract_version={settings.get('_midom_qwen21_masked_edit_contract_version')!r} "
+                f"method={settings.get('_midom_qwen21_masked_edit_method')!r} "
+                f"edit_strength={settings.get('_midom_qwen21_edit_strength')!r} "
+                f"image_mode={settings.get('image_mode')} model_mode={settings.get('model_mode')} "
+                f"video_prompt_type={settings.get('video_prompt_type')!r} "
+                f"image_guide={Path(str(settings.get('image_guide') or '')).name!r} "
+                f"image_mask={Path(str(settings.get('image_mask') or '')).name!r} "
+                f"resolution={settings.get('resolution')} "
+                f"accelerator_profile_id={settings.get('_midom_accelerator_profile_id')!r}."
+            )
         model_type = str(settings.get("model_type") or "")
         layer_output_count = self._coerce_int(
             settings.get("_midom_layer_output_count"),
@@ -12304,6 +12599,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             max_control_images = 0
         reference_count = 0
         control_count = 0
+        mask_count = 0
+        generation = job.get("generation") if isinstance(job.get("generation"), dict) else {}
+        is_qwen21_masked_edit = (
+            model_id == QWEN21_MODEL_ID
+            and str(generation.get("image_task") or "").strip().lower() == "masked_edit"
+        )
         self._log(
             f"Downloading job inputs; job_id={job_id} descriptors={len(inputs)} "
             f"max_reference_images={max_reference_images} max_control_images={max_control_images}."
@@ -12313,7 +12614,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError("Job input descriptor must be a JSON object.")
             input_id = self._coerce_input_id(item)
             kind = str(item.get("kind") or "reference_image").strip()
-            if kind not in {"reference_image", "control_image"}:
+            if kind not in {"reference_image", "control_image", "mask_image"}:
                 raise ValueError(f"Unsupported job input kind: {kind}")
             if kind == "reference_image":
                 if not model_meta.get("image_reference"):
@@ -12332,6 +12633,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     raise ValueError(f"Unsupported control mode for {model_id}: {control_mode}")
             else:
                 control_mode = ""
+            if kind == "mask_image":
+                if not is_qwen21_masked_edit:
+                    raise ValueError(f"Model {model_id} does not support mask_image inputs for this task.")
+                role = str(item.get("role") or "").strip()
+                if role != "edit_mask":
+                    raise ValueError("Qwen Image 2.1 mask_image input requires role='edit_mask'.")
+                mask_count += 1
+                if mask_count > 1:
+                    raise ValueError("Qwen Image 2.1 masked editing requires exactly one mask_image input.")
             response = requests.get(
                 f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
                 headers=self._headers(connection),
@@ -12342,6 +12652,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
             if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
                 raise ValueError(f"Unsupported input MIME type: {mime_type}")
+            if kind == "mask_image" and mime_type != "image/png":
+                raise ValueError("Qwen Image 2.1 masked-edit mask download must be image/png.")
             data = self._read_limited_response_content(response, input_id, self._max_input_bytes_for_mime(mime_type))
             expected_size = item.get("bytes")
             if expected_size is not None and len(data) != int(expected_size):
@@ -12361,6 +12673,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "mime_type": mime_type,
                 "sha256": actual_sha256,
                 "control_mode": control_mode,
+                "role": str(item.get("role") or "").strip(),
                 **({"sequence": int(item["sequence"])} if model_id == QWEN21_MODEL_ID and kind == "reference_image" else {}),
             })
             self._log(
@@ -12368,6 +12681,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"kind={kind} sequence={item.get('sequence') if model_id == QWEN21_MODEL_ID else None} "
                 f"mime_type={mime_type} bytes={len(data)} sha256={actual_sha256[:12]}..."
             )
+        if is_qwen21_masked_edit and mask_count != 1:
+            raise ValueError(f"Qwen Image 2.1 masked editing requires exactly one mask_image input; got {mask_count}.")
         if model_id == "qwen_image_layered_20B":
             if reference_count != 0:
                 raise ValueError("Qwen Image Layered does not support ordinary reference images.")
@@ -13720,6 +14035,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_meta = MODEL_CAPABILITY_OVERRIDES.get(model_id) or {}
         paths = [item["path"] for item in downloaded_inputs if item.get("kind") == "reference_image"]
         control_inputs = [item for item in downloaded_inputs if item.get("kind") == "control_image"]
+        mask_inputs = [item for item in downloaded_inputs if item.get("kind") == "mask_image"]
         if paths and not model_meta.get("image_reference"):
             raise ValueError(f"Model {model_id} does not support ordinary reference images.")
         if control_inputs and not model_meta.get("control"):
@@ -13727,6 +14043,95 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if model_id == QWEN21_MODEL_ID:
             if control_inputs:
                 raise ValueError("Qwen Image 2.1 first-pass jobs do not support control_image inputs.")
+            if str(settings.get("_midom_image_task") or "").strip().lower() == "masked_edit":
+                ordered_references = sorted(
+                    [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
+                    key=lambda item: int(item.get("sequence", -1)),
+                )
+                sequences = [int(item.get("sequence", -1)) for item in ordered_references]
+                if sequences != list(range(len(ordered_references))):
+                    raise ValueError("Downloaded masked-edit reference inputs have invalid sequence values.")
+                source_inputs = [item for item in ordered_references if item.get("role") == "source_image"]
+                supporting_inputs = [
+                    item for item in ordered_references if item.get("role") == "supporting_reference_image"
+                ]
+                if len(source_inputs) != 1:
+                    raise ValueError(
+                        f"Qwen Image 2.1 masked editing requires exactly one downloaded source image; got {len(source_inputs)}."
+                    )
+                if len(supporting_inputs) > QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES:
+                    raise ValueError(
+                        "Qwen Image 2.1 masked editing supports at most "
+                        f"{QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES} downloaded supporting reference image."
+                    )
+                if len(source_inputs) + len(supporting_inputs) != len(ordered_references):
+                    raise ValueError("Downloaded masked-edit reference input has an unsupported role.")
+                if len(mask_inputs) != 1:
+                    raise ValueError(
+                        f"Qwen Image 2.1 masked editing requires exactly one downloaded mask image; got {len(mask_inputs)}."
+                    )
+                source_input = source_inputs[0]
+                mask_input = mask_inputs[0]
+                if str(source_input.get("role") or "") != "source_image":
+                    raise ValueError("Qwen Image 2.1 masked-edit source input role must be source_image.")
+                if str(mask_input.get("role") or "") != "edit_mask":
+                    raise ValueError("Qwen Image 2.1 masked-edit mask input role must be edit_mask.")
+                if int(source_input.get("input_id") or 0) != int(settings.get("_midom_qwen21_source_input_id") or 0):
+                    raise ValueError("Downloaded Qwen Image 2.1 masked-edit source input does not match the validated claim.")
+                if int(mask_input.get("input_id") or 0) != int(settings.get("_midom_qwen21_mask_input_id") or 0):
+                    raise ValueError("Downloaded Qwen Image 2.1 masked-edit mask input does not match the validated claim.")
+                requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+                internal_size = self._parse_resolution_size(settings.get("_midom_internal_render_resolution"))
+                if requested_size is None or internal_size is None:
+                    raise ValueError("Qwen Image 2.1 masked-edit dimensions are missing or invalid.")
+                prepared = self._prepare_qwen21_masked_edit_inputs(
+                    source_input,
+                    mask_input,
+                    requested_size,
+                    internal_size,
+                    bool(settings.get("_midom_qwen21_allow_full_image_edit")),
+                )
+                settings["image_mode"] = 2
+                settings["image_refs"] = [item["path"] for item in supporting_inputs]
+                settings["image_guide"] = prepared["source_path"]
+                settings["image_mask"] = prepared["mask_path"]
+                settings["video_prompt_type"] = "VAGI" if supporting_inputs else "VAG"
+                settings["_midom_qwen21_reference_inputs"] = [
+                    {
+                        "input_id": int(item["input_id"]),
+                        "role": str(item.get("role") or ""),
+                        "sequence": int(item["sequence"]),
+                        "sha256": str(item.get("sha256") or ""),
+                    }
+                    for item in ordered_references
+                ]
+                settings["_midom_qwen21_masked_edit_inputs"] = {
+                    "source": {
+                        "input_id": int(source_input["input_id"]),
+                        "role": "source_image",
+                        "sequence": 0,
+                        "sha256": str(source_input.get("sha256") or ""),
+                        "prepared_sha256": prepared["source_sha256"],
+                    },
+                    "mask": {
+                        "input_id": int(mask_input["input_id"]),
+                        "role": "edit_mask",
+                        "sequence": None,
+                        "sha256": str(mask_input.get("sha256") or ""),
+                        "prepared_sha256": prepared["mask_sha256"],
+                    },
+                }
+                settings["_midom_qwen21_canvas_adapter"] = prepared["canvas_adapter"]
+                self._log(
+                    "Applied Qwen Image 2.1 masked-edit inputs; "
+                    f"source_input_id={source_input['input_id']} mask_input_id={mask_input['input_id']} "
+                    f"supporting_references={[(item['input_id'], item['sequence']) for item in supporting_inputs]} "
+                    f"requested_size={requested_size[0]}x{requested_size[1]} "
+                    f"internal_size={internal_size[0]}x{internal_size[1]} "
+                    f"method={settings.get('_midom_qwen21_masked_edit_method')!r} "
+                    f"model_mode={settings.get('model_mode')} video_prompt_type={settings.get('video_prompt_type')!r}."
+                )
+                return
             reference_mode = str(settings.get("_midom_qwen21_reference_mode") or "").strip().lower()
             ordered_inputs = sorted(
                 [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
@@ -13889,6 +14294,160 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         return str(target_path)
 
+    def _prepare_qwen21_masked_edit_inputs(
+        self,
+        source_input: dict[str, Any],
+        mask_input: dict[str, Any],
+        requested_size: tuple[int, int],
+        internal_size: tuple[int, int],
+        allow_full_image_edit: bool,
+    ) -> dict[str, Any]:
+        source_path = Path(str(source_input.get("path") or ""))
+        mask_path = Path(str(mask_input.get("path") or ""))
+        if not source_path.is_file() or not mask_path.is_file():
+            raise ValueError("Qwen Image 2.1 masked-edit source or mask file is missing.")
+
+        try:
+            with Image.open(source_path) as source_file:
+                source = ImageOps.exif_transpose(source_file).convert("RGB")
+                source.load()
+        except Exception as exc:
+            raise ValueError(f"Qwen Image 2.1 masked-edit source image could not be decoded: {exc}")
+        if source.size != requested_size:
+            raise ValueError(
+                "Qwen Image 2.1 masked-edit source display dimensions must exactly match the requested output; "
+                f"source={source.size[0]}x{source.size[1]} requested={requested_size[0]}x{requested_size[1]}."
+            )
+
+        try:
+            with Image.open(mask_path) as mask_file:
+                if str(mask_file.format or "").upper() != "PNG":
+                    raise ValueError("mask is not a decoded PNG")
+                mask = ImageOps.exif_transpose(mask_file)
+                mask.load()
+                if mask.size != requested_size:
+                    raise ValueError(
+                        "mask dimensions must exactly match the source and requested output; "
+                        f"mask={mask.size[0]}x{mask.size[1]} requested={requested_size[0]}x{requested_size[1]}"
+                    )
+                if mask.mode not in {"1", "L", "RGB", "RGBA"}:
+                    raise ValueError(f"mask mode {mask.mode!r} is not canonical opaque grayscale")
+                if "A" in mask.getbands():
+                    alpha_extrema = mask.getchannel("A").getextrema()
+                    if alpha_extrema != (255, 255):
+                        raise ValueError("mask alpha must be fully opaque; alpha-only masks are not accepted")
+                mask_rgb = mask.convert("RGB")
+                red, green, blue = mask_rgb.split()
+                if ImageChops.difference(red, green).getbbox() or ImageChops.difference(red, blue).getbbox():
+                    raise ValueError("mask RGB channels must be equal grayscale values")
+                mask_gray = red
+                histogram = mask_gray.histogram()
+                if any(histogram[value] for value in range(1, 255)):
+                    raise ValueError("mask must be binary black/white; gray pixels are not accepted")
+                black_pixels = int(histogram[0])
+                white_pixels = int(histogram[255])
+                if white_pixels <= 0:
+                    raise ValueError("mask must contain editable white pixels")
+                if black_pixels <= 0 and not allow_full_image_edit:
+                    raise ValueError(
+                        "full-white mask requires allow_full_image_edit=true; protected black pixels are otherwise required"
+                    )
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Qwen Image 2.1 masked-edit mask could not be decoded: {exc}")
+
+        requested_width, requested_height = requested_size
+        internal_width, internal_height = internal_size
+        if internal_width < requested_width or internal_height < requested_height:
+            raise ValueError("Qwen Image 2.1 masked-edit internal canvas cannot be smaller than the delivery canvas.")
+        pad_left = (internal_width - requested_width) // 2
+        pad_right = internal_width - requested_width - pad_left
+        pad_top = (internal_height - requested_height) // 2
+        pad_bottom = internal_height - requested_height - pad_top
+        if any((pad_left, pad_right, pad_top, pad_bottom)):
+            prepared_source = self._edge_pad_rgb_image(
+                source,
+                (pad_left, pad_top, pad_right, pad_bottom),
+            )
+            prepared_mask = Image.new("L", internal_size, 0)
+            prepared_mask.paste(mask_gray, (pad_left, pad_top))
+        else:
+            prepared_source = source.copy()
+            prepared_mask = mask_gray.copy()
+
+        source_target = source_path.with_name(
+            f"{source_path.stem}-qwen21-masked-source-{internal_width}x{internal_height}.png"
+        )
+        mask_target = mask_path.with_name(
+            f"{mask_path.stem}-qwen21-masked-mask-{internal_width}x{internal_height}.png"
+        )
+        prepared_source.save(source_target, format="PNG", optimize=True)
+        prepared_mask.save(mask_target, format="PNG", optimize=True)
+
+        def digest(path: Path) -> str:
+            hasher = hashlib.sha256()
+            with path.open("rb") as reader:
+                for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            return hasher.hexdigest()
+
+        adapter = {
+            "adapter_id": "qwen21_masked_edit_canvas_v1",
+            "requested_width": requested_width,
+            "requested_height": requested_height,
+            "internal_width": internal_width,
+            "internal_height": internal_height,
+            "pad_left": pad_left,
+            "pad_right": pad_right,
+            "pad_top": pad_top,
+            "pad_bottom": pad_bottom,
+            "source_padding": "edge_replication",
+            "mask_padding": "black_protected",
+            "output_crop": "center",
+        }
+        self._log(
+            "Prepared Qwen Image 2.1 masked-edit canvas; "
+            f"source={source_path.name!r} mask={mask_path.name!r} "
+            f"requested={requested_width}x{requested_height} internal={internal_width}x{internal_height} "
+            f"padding=left:{pad_left},right:{pad_right},top:{pad_top},bottom:{pad_bottom} "
+            f"black_pixels={black_pixels} white_pixels={white_pixels}."
+        )
+        return {
+            "source_path": str(source_target),
+            "mask_path": str(mask_target),
+            "source_sha256": digest(source_target),
+            "mask_sha256": digest(mask_target),
+            "canvas_adapter": adapter,
+        }
+
+    @staticmethod
+    def _edge_pad_rgb_image(image: Image.Image, padding: tuple[int, int, int, int]) -> Image.Image:
+        left, top, right, bottom = padding
+        width, height = image.size
+        canvas = Image.new("RGB", (width + left + right, height + top + bottom))
+        canvas.paste(image, (left, top))
+        if top:
+            canvas.paste(image.crop((0, 0, width, 1)).resize((width, top)), (left, 0))
+        if bottom:
+            canvas.paste(image.crop((0, height - 1, width, height)).resize((width, bottom)), (left, top + height))
+        if left:
+            canvas.paste(image.crop((0, 0, 1, height)).resize((left, height)), (0, top))
+        if right:
+            canvas.paste(image.crop((width - 1, 0, width, height)).resize((right, height)), (left + width, top))
+        if left and top:
+            canvas.paste(Image.new("RGB", (left, top), image.getpixel((0, 0))), (0, 0))
+        if right and top:
+            canvas.paste(Image.new("RGB", (right, top), image.getpixel((width - 1, 0))), (left + width, 0))
+        if left and bottom:
+            canvas.paste(Image.new("RGB", (left, bottom), image.getpixel((0, height - 1))), (0, top + height))
+        if right and bottom:
+            canvas.paste(
+                Image.new("RGB", (right, bottom), image.getpixel((width - 1, height - 1))),
+                (left + width, top + height),
+            )
+        return canvas
+
     def _load_image_guide(self, path: str) -> Image.Image:
         with Image.open(path) as image:
             loaded = image.convert("RGB").copy()
@@ -13953,6 +14512,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         expected_resolution: Any = None,
         normalization_mode: str = "resize",
         required_mime_type: Any = None,
+        required_color_mode: Any = None,
     ) -> dict[str, Any]:
         self._ensure_job_flow_enabled()
         path = Path(file_path)
@@ -13972,25 +14532,38 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"Unsupported required image artifact MIME type: {required_mime}")
         decoded_width = decoded_height = None
         decoded_format = ""
+        decoded_color_mode = ""
         normalized_temp_path = None
         try:
             with Image.open(path) as image:
                 decoded_width, decoded_height = image.size
                 decoded_format = str(image.format or "").upper()
+                decoded_color_mode = str(image.mode or "").upper()
         except Exception as exc:
             raise ValueError(f"Generated artifact could not be decoded as an image: {exc}")
         expected_size = self._parse_resolution_size(expected_resolution)
         dimensions_mismatch = expected_size is not None and (decoded_width, decoded_height) != expected_size
         mime_mismatch = bool(required_mime and mime_type != required_mime)
-        if dimensions_mismatch or mime_mismatch:
+        required_color = str(required_color_mode or "").strip().upper()
+        if required_color and required_color not in {"RGB", "RGBA"}:
+            raise ValueError(f"Unsupported required image artifact color mode: {required_color}")
+        color_mode_mismatch = bool(required_color and decoded_color_mode != required_color)
+        if dimensions_mismatch or mime_mismatch or color_mode_mismatch:
             normalized_size = expected_size or (decoded_width, decoded_height)
             normalized_mime = required_mime or mime_type
-            normalized_temp_path = self._normalize_artifact_dimensions(path, normalized_size, normalized_mime, normalization_mode)
+            normalized_temp_path = self._normalize_artifact_dimensions(
+                path,
+                normalized_size,
+                normalized_mime,
+                normalization_mode,
+                required_color,
+            )
             self._log(
                 "Normalized generated artifact before upload; "
                 f"job_id={job_id} artifact_index={artifact_index} "
                 f"original={decoded_width}x{decoded_height} expected={normalized_size[0]}x{normalized_size[1]} "
                 f"original_mime={mime_type!r} expected_mime={normalized_mime!r} "
+                f"original_color_mode={decoded_color_mode!r} expected_color_mode={required_color or 'unchanged'!r} "
                 f"normalization_mode={normalization_mode!r} "
                 f"normalized_file={normalized_temp_path.name!r}.",
                 force=True,
@@ -14001,6 +14574,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             with Image.open(path) as image:
                 decoded_width, decoded_height = image.size
                 decoded_format = str(image.format or "").upper()
+                decoded_color_mode = str(image.mode or "").upper()
         if file_size > MAX_IMAGE_BYTES:
             raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
         with path.open("rb") as reader:
@@ -14009,7 +14583,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._log(
             f"Uploading artifact; job_id={job_id} artifact_index={artifact_index} "
             f"filename={path.name!r} mime_type={mime_type} decoded_format={decoded_format!r} "
-            f"dimensions={decoded_width}x{decoded_height} bytes={file_size} sha256={sha256[:12]}..."
+            f"color_mode={decoded_color_mode!r} dimensions={decoded_width}x{decoded_height} "
+            f"bytes={file_size} sha256={sha256[:12]}..."
         )
         try:
             with path.open("rb") as reader:
@@ -14542,13 +15117,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         expected_size: tuple[int, int],
         mime_type: str,
         normalization_mode: str = "resize",
+        required_color_mode: str = "",
     ) -> Path:
         suffix = MIME_EXTENSION.get(mime_type, path.suffix.lower() or ".png")
         temp_file = tempfile.NamedTemporaryFile(prefix="midom-normalized-", suffix=suffix, delete=False)
         normalized_path = Path(temp_file.name)
         temp_file.close()
         with Image.open(path) as image:
-            normalized = image.convert("RGB") if mime_type == "image/jpeg" else image.convert("RGBA")
+            color_mode = str(required_color_mode or "").strip().upper()
+            normalized = image.convert("RGB") if mime_type == "image/jpeg" or color_mode == "RGB" else image.convert("RGBA")
             if normalization_mode == "center_crop_downscale":
                 normalized = self._resize_image_center_crop(normalized, expected_size)
             else:
