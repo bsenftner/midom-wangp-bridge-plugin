@@ -171,6 +171,16 @@ QWEN21_INTERNAL_RENDER_RESOLUTIONS = {
 QWEN21_VIGGLE_PROFILE_ID = "qwen21_viggle_turbo_v021_6"
 QWEN21_VIGGLE_LORA_DIR = "qwen21"
 QWEN21_VIGGLE_LORA_FILENAME = "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors"
+QWEN21_PRUNA_8_PROFILE_ID = "qwen21_pruna_v01_8"
+QWEN21_PRUNA_5_PROFILE_ID = "qwen21_pruna_v01_5"
+QWEN21_PRUNA_8_LORA_FILENAME = "p_qwen_image_2.1_8step_v0.1.safetensors"
+QWEN21_PRUNA_5_LORA_FILENAME = "p_qwen_image_2.1_5step_v0.1.safetensors"
+QWEN21_ACCELERATED_MAX_REFERENCE_IMAGES = 3
+QWEN21_ACCELERATOR_PROFILE_IDS = {
+    QWEN21_VIGGLE_PROFILE_ID,
+    QWEN21_PRUNA_8_PROFILE_ID,
+    QWEN21_PRUNA_5_PROFILE_ID,
+}
 QWEN_MULTI_ANGLE_TOOL_ID = "qwen_image_edit_2511_multiple_angles"
 QWEN_MULTI_ANGLE_TOOL_DISPLAY_NAME = "Generate Alternate View"
 QWEN_MULTI_ANGLE_TOOL_VERSION = "1"
@@ -727,6 +737,38 @@ ACCELERATOR_PROFILE_DEFINITIONS = [
         "max_reference_images": QWEN21_VIGGLE_MAX_REFERENCE_IMAGES,
         "supports_negative_prompt": False,
     },
+    {
+        "profile_id": QWEN21_PRUNA_8_PROFILE_ID,
+        "display_name": "Balanced fast - 8 steps",
+        "description": "Use WanGP's recommended Qwen Image 2.1 Pruna v0.1 accelerator for a balance of speed and quality.",
+        "quality_tier": "balanced_fast",
+        "steps": 8,
+        "model_ids": [QWEN21_MODEL_ID],
+        "lora_dir": QWEN21_VIGGLE_LORA_DIR,
+        "lora_filenames": [QWEN21_PRUNA_8_LORA_FILENAME],
+        "loras_multipliers": "1",
+        "guidance_scale": 1.0,
+        "sample_solver": "pruna",
+        "negative_prompt": "",
+        "max_reference_images": QWEN21_ACCELERATED_MAX_REFERENCE_IMAGES,
+        "supports_negative_prompt": False,
+    },
+    {
+        "profile_id": QWEN21_PRUNA_5_PROFILE_ID,
+        "display_name": "Very fast - 5 steps",
+        "description": "Use WanGP's Qwen Image 2.1 Pruna v0.1 accelerator for the shortest Pruna generation time with lower expected quality.",
+        "quality_tier": "very_fast",
+        "steps": 5,
+        "model_ids": [QWEN21_MODEL_ID],
+        "lora_dir": QWEN21_VIGGLE_LORA_DIR,
+        "lora_filenames": [QWEN21_PRUNA_5_LORA_FILENAME],
+        "loras_multipliers": "1",
+        "guidance_scale": 1.0,
+        "sample_solver": "pruna",
+        "negative_prompt": "",
+        "max_reference_images": QWEN21_ACCELERATED_MAX_REFERENCE_IMAGES,
+        "supports_negative_prompt": False,
+    },
 ]
 ACCELERATOR_PROFILE_BY_ID = {
     str(profile["profile_id"]): profile for profile in ACCELERATOR_PROFILE_DEFINITIONS
@@ -796,7 +838,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.5.0"
+        self.version = "0.6.0"
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -2807,17 +2849,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"Qwen Image 2.1 reference_mode={reference_mode} requires at least one reference image.")
 
         profile_id = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
-        if profile_id not in {"standard", QWEN21_VIGGLE_PROFILE_ID}:
+        if profile_id not in {"standard", *QWEN21_ACCELERATOR_PROFILE_IDS}:
             raise ValueError(f"Unsupported accelerator_profile_id for {QWEN21_MODEL_ID}: {profile_id}")
-        max_references = QWEN21_VIGGLE_MAX_REFERENCE_IMAGES if profile_id == QWEN21_VIGGLE_PROFILE_ID else QWEN21_MAX_REFERENCE_IMAGES
+        profile = ACCELERATOR_PROFILE_BY_ID.get(profile_id) if profile_id != "standard" else None
+        max_references = int(profile.get("max_reference_images") or QWEN21_MAX_REFERENCE_IMAGES) if profile else QWEN21_MAX_REFERENCE_IMAGES
         if reference_count > max_references:
             raise ValueError(
                 f"Qwen Image 2.1 profile {profile_id} supports at most {max_references} reference images; got {reference_count}."
             )
-        if profile_id == QWEN21_VIGGLE_PROFILE_ID and negative_prompt:
-            raise ValueError("Qwen Image 2.1 Fast - 6 steps does not support a negative prompt.")
+        if profile and profile.get("supports_negative_prompt") is False and negative_prompt:
+            raise ValueError(f"Qwen Image 2.1 profile {profile_id} does not support a negative prompt.")
         requested_steps = generation.get("steps")
-        expected_steps = 6 if profile_id == QWEN21_VIGGLE_PROFILE_ID else 40
+        expected_steps = int(profile.get("steps") or 40) if profile else 40
         if requested_steps is not None:
             try:
                 requested_steps_value = int(requested_steps)
@@ -2886,11 +2929,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             settings["sample_solver"] = "default"
             settings["activated_loras"] = []
             settings["loras_multipliers"] = ""
-        elif profile_id == QWEN21_VIGGLE_PROFILE_ID:
-            settings["num_inference_steps"] = 6
-            settings["guidance_scale"] = 1.0
-            settings["sample_solver"] = "viggle_v02"
-            settings["negative_prompt"] = ""
+        elif profile_id in QWEN21_ACCELERATOR_PROFILE_IDS:
+            profile = ACCELERATOR_PROFILE_BY_ID.get(profile_id)
+            if not profile:
+                raise ValueError(f"Unsupported Qwen Image 2.1 accelerator profile: {profile_id}")
+            settings["num_inference_steps"] = int(profile["steps"])
+            settings["guidance_scale"] = float(profile["guidance_scale"])
+            settings["sample_solver"] = str(profile["sample_solver"])
+            settings["negative_prompt"] = str(profile.get("negative_prompt") or "")
         else:
             raise ValueError(f"Unsupported Qwen Image 2.1 accelerator profile: {profile_id}")
         self._log(
@@ -6682,17 +6728,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 accelerator_profile_id = str(
                     summary.get("accelerator_profile_id") or summary.get("speed_profile_id") or "standard"
                 ).strip() or "standard"
-                if accelerator_profile_id not in {"standard", QWEN21_VIGGLE_PROFILE_ID}:
+                if accelerator_profile_id not in {"standard", *QWEN21_ACCELERATOR_PROFILE_IDS}:
                     return f"Qwen Image 2.1 unsupported accelerator_profile_id: {accelerator_profile_id}"
-                if accelerator_profile_id == QWEN21_VIGGLE_PROFILE_ID:
+                if accelerator_profile_id != "standard":
                     profile = ACCELERATOR_PROFILE_BY_ID.get(accelerator_profile_id)
                     resolved_loras, missing_loras = self._resolve_accelerator_loras(profile or {})
                     if missing_loras or not resolved_loras:
                         return f"Qwen Image 2.1 accelerator unavailable: {accelerator_profile_id}"
-                    if reference_count is not None and reference_count > QWEN21_VIGGLE_MAX_REFERENCE_IMAGES:
+                    max_references = int((profile or {}).get("max_reference_images") or QWEN21_MAX_REFERENCE_IMAGES)
+                    if reference_count is not None and reference_count > max_references:
                         return (
                             f"Qwen Image 2.1 accelerator {accelerator_profile_id} supports at most "
-                            f"{QWEN21_VIGGLE_MAX_REFERENCE_IMAGES} reference images; got {reference_count}"
+                            f"{max_references} reference images; got {reference_count}"
                         )
                 elif reference_count is not None and reference_count > QWEN21_MAX_REFERENCE_IMAGES:
                     return f"Qwen Image 2.1 supports at most {QWEN21_MAX_REFERENCE_IMAGES} reference images; got {reference_count}"

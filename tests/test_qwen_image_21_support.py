@@ -75,6 +75,23 @@ def enable_viggle(plugin, module):
     )
 
 
+def qwen21_accelerator_filename(module, profile_id):
+    return {
+        module.QWEN21_VIGGLE_PROFILE_ID: module.QWEN21_VIGGLE_LORA_FILENAME,
+        module.QWEN21_PRUNA_8_PROFILE_ID: module.QWEN21_PRUNA_8_LORA_FILENAME,
+        module.QWEN21_PRUNA_5_PROFILE_ID: module.QWEN21_PRUNA_5_LORA_FILENAME,
+    }[profile_id]
+
+
+def enable_qwen21_accelerators(plugin, module):
+    plugin._resolve_accelerator_loras = lambda profile: (
+        [qwen21_accelerator_filename(module, profile["profile_id"])]
+        if profile.get("profile_id") in module.QWEN21_ACCELERATOR_PROFILE_IDS
+        else [],
+        [],
+    )
+
+
 def test_qwen21_capability_reports_first_pass_contract():
     module = load_plugin_module()
     plugin = plugin_instance(module)
@@ -88,10 +105,7 @@ def test_qwen21_capability_reports_first_pass_contract():
         "media_type": "video",
         "display_name": display_name,
     }
-    plugin._resolve_accelerator_loras = lambda profile: (
-        [module.QWEN21_VIGGLE_LORA_FILENAME] if profile.get("profile_id") == module.QWEN21_VIGGLE_PROFILE_ID else [],
-        [],
-    )
+    enable_qwen21_accelerators(plugin, module)
 
     capability = next(
         item for item in plugin._capabilities()["models"]
@@ -113,6 +127,14 @@ def test_qwen21_capability_reports_first_pass_contract():
     assert profiles[module.QWEN21_VIGGLE_PROFILE_ID]["steps"] == 6
     assert profiles[module.QWEN21_VIGGLE_PROFILE_ID]["max_reference_images"] == 3
     assert profiles[module.QWEN21_VIGGLE_PROFILE_ID]["negative_prompt"] is False
+    assert profiles[module.QWEN21_PRUNA_8_PROFILE_ID]["steps"] == 8
+    assert profiles[module.QWEN21_PRUNA_8_PROFILE_ID]["max_reference_images"] == 3
+    assert profiles[module.QWEN21_PRUNA_8_PROFILE_ID]["negative_prompt"] is False
+    assert profiles[module.QWEN21_PRUNA_8_PROFILE_ID]["available"] is True
+    assert profiles[module.QWEN21_PRUNA_5_PROFILE_ID]["steps"] == 5
+    assert profiles[module.QWEN21_PRUNA_5_PROFILE_ID]["max_reference_images"] == 3
+    assert profiles[module.QWEN21_PRUNA_5_PROFILE_ID]["negative_prompt"] is False
+    assert profiles[module.QWEN21_PRUNA_5_PROFILE_ID]["available"] is True
 
 
 def test_qwen21_standard_text_generation_settings_are_deterministic():
@@ -183,6 +205,30 @@ def test_qwen21_viggle_applies_complete_profile():
     assert settings["negative_prompt"] == ""
 
 
+@pytest.mark.parametrize(
+    ("profile_id", "steps", "lora_filename"),
+    [
+        ("qwen21_pruna_v01_8", 8, "p_qwen_image_2.1_8step_v0.1.safetensors"),
+        ("qwen21_pruna_v01_5", 5, "p_qwen_image_2.1_5step_v0.1.safetensors"),
+    ],
+)
+def test_qwen21_pruna_applies_complete_profile(profile_id, steps, lora_filename):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    enable_qwen21_accelerators(plugin, module)
+    settings = plugin._validate_image_job(
+        qwen21_job("ordered_reference_images", 3, profile_id),
+        21021,
+    )
+
+    assert settings["num_inference_steps"] == steps
+    assert settings["guidance_scale"] == 1.0
+    assert settings["sample_solver"] == "pruna"
+    assert settings["activated_loras"] == [lora_filename]
+    assert settings["loras_multipliers"] == "1"
+    assert settings["negative_prompt"] == ""
+
+
 def test_qwen21_viggle_is_reported_unavailable_without_lora():
     module = load_plugin_module()
     plugin = plugin_instance(module)
@@ -192,6 +238,26 @@ def test_qwen21_viggle_is_reported_unavailable_without_lora():
 
     assert profiles[module.QWEN21_VIGGLE_PROFILE_ID]["available"] is False
     assert profiles[module.QWEN21_VIGGLE_PROFILE_ID]["unavailable_reason"] == "required_accelerator_files_not_installed"
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "lora_filename"),
+    [
+        ("qwen21_pruna_v01_8", "p_qwen_image_2.1_8step_v0.1.safetensors"),
+        ("qwen21_pruna_v01_5", "p_qwen_image_2.1_5step_v0.1.safetensors"),
+    ],
+)
+def test_qwen21_pruna_is_reported_unavailable_without_lora(profile_id, lora_filename):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    plugin._resolve_accelerator_loras = lambda profile: (
+        ([], [lora_filename]) if profile.get("profile_id") == profile_id else ([], [])
+    )
+
+    profiles = {item["profile_id"]: item for item in plugin._accelerator_profiles_for_model(module.QWEN21_MODEL_ID)}
+
+    assert profiles[profile_id]["available"] is False
+    assert profiles[profile_id]["unavailable_reason"] == "required_accelerator_files_not_installed"
 
 
 @pytest.mark.parametrize(
@@ -250,6 +316,26 @@ def test_qwen21_profile_specific_reference_and_negative_prompt_limits():
 
     with pytest.raises(ValueError, match="at most 10 reference images"):
         plugin._validate_image_job(qwen21_job("ordered_reference_images", 11), 2110)
+
+
+@pytest.mark.parametrize("profile_id", ["qwen21_pruna_v01_8", "qwen21_pruna_v01_5"])
+def test_qwen21_pruna_reference_negative_prompt_and_step_limits(profile_id):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    enable_qwen21_accelerators(plugin, module)
+
+    with pytest.raises(ValueError, match="at most 3 reference images"):
+        plugin._validate_image_job(qwen21_job("ordered_reference_images", 4, profile_id), 21081)
+
+    job = qwen21_job("ordered_reference_images", 1, profile_id)
+    job["negative_prompt"] = "unwanted text"
+    with pytest.raises(ValueError, match="does not support a negative prompt"):
+        plugin._validate_image_job(job, 21082)
+
+    job = qwen21_job("ordered_reference_images", 1, profile_id)
+    job["generation"]["steps"] = 40
+    with pytest.raises(ValueError, match="requires (5|8) steps"):
+        plugin._validate_image_job(job, 21083)
 
 
 def test_qwen21_rejects_non_png_and_worker_prompt_enhancement():
@@ -378,6 +464,27 @@ def test_qwen21_generation_metadata_records_profile_references_and_adapter():
     assert metadata["sample_solver"] == "default"
 
 
+def test_qwen21_generation_metadata_records_pruna_recipe():
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    enable_qwen21_accelerators(plugin, module)
+    settings = plugin._validate_image_job(
+        qwen21_job("primary_image_edit", 1, module.QWEN21_PRUNA_8_PROFILE_ID),
+        21161,
+    )
+
+    metadata = plugin._build_generation_metadata(
+        settings,
+        types.SimpleNamespace(),
+        ["result-seed123.png"],
+    )
+
+    assert metadata["accelerator_profile_id"] == module.QWEN21_PRUNA_8_PROFILE_ID
+    assert metadata["num_inference_steps"] == 8
+    assert metadata["guidance_scale"] == 1.0
+    assert metadata["sample_solver"] == "pruna"
+
+
 def test_qwen21_candidate_compatibility_enforces_viggle_limit():
     module = load_plugin_module()
     plugin = plugin_instance(module)
@@ -416,5 +523,54 @@ def test_qwen21_candidate_compatibility_enforces_viggle_limit():
 
     reason = plugin._candidate_incompatibility_reason(candidate, connection)
 
+    assert reason is not None
+    assert "at most 3 reference images" in reason
+
+
+@pytest.mark.parametrize("profile_id", ["qwen21_pruna_v01_8", "qwen21_pruna_v01_5"])
+def test_qwen21_candidate_compatibility_enforces_pruna_availability_and_limit(profile_id):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    connection = module.ConnectionContext(
+        connection_id="worker-1",
+        api_base_url="https://midom.test",
+        worker_id=1,
+        worker_token="token",
+        org_id=2,
+        project_id=3,
+        paired_user_id=4,
+        machine_name="GPU",
+        capabilities_revision=1,
+        token_expires_at="",
+        allow_insecure_local_dev=False,
+        allow_insecure_lan_dev=False,
+    )
+    candidate = {
+        "job_id": 21171,
+        "worker_id": 1,
+        "org_id": 2,
+        "project_id": 3,
+        "requested_by_user_id": 4,
+        "media_type": "image",
+        "model_id": module.QWEN21_MODEL_ID,
+        "summary": {
+            "output_count": 1,
+            "output_format": "png",
+            "reference_mode": "ordered_reference_images",
+            "reference_image_count": 4,
+            "control_image_count": 0,
+            "accelerator_profile_id": profile_id,
+        },
+    }
+    plugin._resolve_accelerator_loras = lambda profile: (
+        [],
+        [qwen21_accelerator_filename(module, profile_id)],
+    )
+
+    reason = plugin._candidate_incompatibility_reason(candidate, connection)
+    assert reason == f"Qwen Image 2.1 accelerator unavailable: {profile_id}"
+
+    enable_qwen21_accelerators(plugin, module)
+    reason = plugin._candidate_incompatibility_reason(candidate, connection)
     assert reason is not None
     assert "at most 3 reference images" in reason

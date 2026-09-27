@@ -153,6 +153,8 @@ Important image behavior:
 - Qwen Image 2.1 Midom jobs disable WanGP prompt enhancement, RGBA, and KV Cache for the first release. Masks, inpainting, outpainting, control images, and transparent output are not exposed yet.
 - Qwen Image 2.1 renders `1280x720` internally at `1280x736` and `720x1280` internally at `736x1280`, then center-crops to the exact requested dimensions without stretching.
 - The optional Qwen Image 2.1 Viggle Turbo v0.2.1 profile runs at 6 steps and supports at most 3 ordered references. It is reported only when its local LoRA is installed and does not support negative prompts.
+- The optional Qwen Image 2.1 Pruna v0.1 profiles run at 8 steps for balanced speed and quality or 5 steps for the shortest Pruna runtime. Both support at most 3 ordered references, use WanGP's Pruna scheduler, and do not support negative prompts.
+- Qwen Image 2.1 accelerator profiles remain limited to the current generation and ordered-reference workflows. Masks, outpainting, RGBA, structural control, and higher-resolution accelerator combinations are not advertised without separate validation.
 - Z-Image control variants are better suited for structure/layout control from pose, depth, edge, or raw control inputs.
 - SenseNova U1.5 is optimized for high-resolution text-heavy layouts and infographics; the bridge renders Midom delivery sizes through a larger internal render and center-crop/downscale adapter for text quality.
 - SenseNova landscape and portrait delivery currently render internally at `5440x3072` and `3072x5440` respectively, then return the requested Midom-visible size.
@@ -470,6 +472,7 @@ Some capabilities appear only when local runtime support is available:
 - LTX Better Audio-Video Sync appears only when the required OmniNFT LoRA is installed.
 - Qwen Lightning accelerator profiles appear only when the required local Qwen accelerator files are installed.
 - Qwen Image 2.1 Fast - 6 steps appears only when the Viggle Turbo v0.2.1 LoRA is installed under WanGP's `loras/qwen21` directory.
+- Qwen Image 2.1 Pruna 8-step and 5-step profiles appear independently when their matching `p_qwen_image_2.1_*step_v0.1.safetensors` files are installed under WanGP's `loras/qwen21` directory.
 
 ## Basic Use
 
