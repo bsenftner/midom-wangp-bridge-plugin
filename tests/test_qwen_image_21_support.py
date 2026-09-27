@@ -104,6 +104,50 @@ def qwen21_masked_edit_job(
     return job
 
 
+def qwen21_outpaint_job(
+    source_size=(1024, 1024),
+    resolution=(1280, 720),
+    placement=None,
+    output_count=1,
+):
+    source_width, source_height = source_size
+    output_width, output_height = resolution
+    if source_width <= output_width and source_height <= output_height:
+        fitted_width, fitted_height = source_width, source_height
+    elif output_width * source_height <= output_height * source_width:
+        fitted_width = output_width
+        fitted_height = max(1, int(round(source_height * output_width / source_width)))
+    else:
+        fitted_height = output_height
+        fitted_width = max(1, int(round(source_width * output_height / source_height)))
+    if placement is None:
+        placement = {
+            "x": (output_width - fitted_width) // 2,
+            "y": (output_height - fitted_height) // 2,
+            "width": fitted_width,
+            "height": fitted_height,
+        }
+    job = qwen21_job("primary_image_edit", 1, "standard", resolution)
+    job["prompt"] = "Continue the room naturally beyond the existing photograph."
+    job["output"]["count"] = output_count
+    job["generation"].update({
+        "image_task": "outpaint",
+        "outpaint_contract_version": "qwen21_outpaint_v1",
+        "placement_mode": "explicit_rectangle",
+        "source_scale_mode": "fit_without_crop_no_upscale",
+        "source_width": source_width,
+        "source_height": source_height,
+        "source_placement": dict(placement),
+        "prompt_enhancement_by_worker": False,
+    })
+    job["inputs"][0].update({
+        "role": "source_image",
+        "source_width": source_width,
+        "source_height": source_height,
+    })
+    return job
+
+
 def enable_viggle(plugin, module):
     plugin._resolve_accelerator_loras = lambda profile: (
         [module.QWEN21_VIGGLE_LORA_FILENAME],
@@ -154,6 +198,7 @@ def test_qwen21_capability_reports_first_pass_contract():
     assert capability["capabilities"]["control"] is False
     assert capability["capabilities"]["inpaint"] is True
     assert capability["capabilities"]["masked_edit"] is True
+    assert capability["capabilities"]["outpaint"] is True
     assert capability["capabilities"]["rgba"] is False
     assert capability["limits"]["max_reference_images"] == 10
     assert capability["limits"]["output_mime_types"] == ["image/png"]
@@ -166,6 +211,19 @@ def test_qwen21_capability_reports_first_pass_contract():
     assert masked_edit["mask_semantics"] == ["luminance_white_edit_v1"]
     assert masked_edit["accelerator_profile_ids"] == ["standard"]
     assert masked_edit["output_color_mode"] == "RGB"
+    assert capability["limits"]["image_tasks"] == ["generate", "edit", "masked_edit", "outpaint"]
+    outpaint = capability["limits"]["outpaint"]
+    assert outpaint == {
+        "contract_version": "qwen21_outpaint_v1",
+        "reference_mode": "primary_image_edit",
+        "max_source_images": 1,
+        "placement_modes": ["explicit_rectangle"],
+        "source_scale_modes": ["fit_without_crop_no_upscale"],
+        "accelerator_profile_ids": ["standard"],
+        "output_modes": ["rgb"],
+        "output_mime_types": ["image/png"],
+        "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+    }
     profiles = {item["profile_id"]: item for item in capability["accelerator_profiles"]}
     assert profiles["standard"]["steps"] == 40
     assert profiles["standard"]["max_reference_images"] == 10
@@ -1005,3 +1063,317 @@ def test_qwen21_candidate_compatibility_enforces_pruna_availability_and_limit(pr
     reason = plugin._candidate_incompatibility_reason(candidate, connection)
     assert reason is not None
     assert "at most 3 reference images" in reason
+
+
+@pytest.mark.parametrize(
+    ("source_size", "output_size", "expected"),
+    [
+        ((1024, 1024), (1280, 720), (720, 720)),
+        ((720, 1280), (1280, 720), (405, 720)),
+        ((1280, 720), (720, 1280), (720, 405)),
+        ((320, 200), (1280, 720), (320, 200)),
+        ((2000, 1000), (1280, 720), (1280, 640)),
+        ((1016, 1280), (1280, 720), (572, 720)),
+    ],
+)
+def test_qwen21_outpaint_geometry_fixtures(source_size, output_size, expected):
+    module = load_plugin_module()
+
+    assert module.AwsWorkerBridgePlugin._qwen21_outpaint_fitted_size(source_size, output_size) == expected
+
+
+def test_qwen21_outpaint_contract_maps_to_unadvertised_red_canvas_recipe():
+    module = load_plugin_module()
+    settings = plugin_instance(module)._validate_image_job(qwen21_outpaint_job(), 21200)
+
+    assert settings["_midom_image_task"] == "outpaint"
+    assert settings["_midom_qwen21_outpaint_contract_version"] == "qwen21_outpaint_v1"
+    assert settings["_midom_qwen21_outpaint_requested_placement"] == {
+        "x": 280,
+        "y": 0,
+        "width": 720,
+        "height": 720,
+    }
+    assert settings["resolution"] == "1280x736"
+    assert settings["image_mode"] == 1
+    assert settings["video_prompt_type"] == "KI"
+    assert settings["video_guide_outpainting"] == ""
+    assert settings["video_guide_outpainting_ratio"] == ""
+    assert settings["num_inference_steps"] == 40
+    assert settings["guidance_scale"] == 4.0
+    assert settings["sample_solver"] == "default"
+    assert settings["prompt"].endswith(module.QWEN21_RED_OUTPAINTING_PROMPT)
+    assert settings["prompt"].count(module.QWEN21_RED_OUTPAINTING_PROMPT) == 1
+
+
+def test_qwen21_outpaint_rejects_generation_descriptor_dimension_mismatch():
+    module = load_plugin_module()
+    job = qwen21_outpaint_job()
+    job["generation"]["source_width"] = 1000
+
+    with pytest.raises(ValueError, match="generation source dimensions must match"):
+        plugin_instance(module)._validate_image_job(job, 21200)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("outpaint_contract_version", "old", "outpaint_contract_version"),
+        ("reference_mode", "ordered_reference_images", "reference_mode"),
+        ("placement_mode", "preset", "placement_mode"),
+        ("source_scale_mode", "stretch", "source_scale_mode"),
+        ("accelerator_profile_id", "qwen21_pruna_v01_8", "only accelerator_profile_id='standard'"),
+    ],
+)
+def test_qwen21_outpaint_rejects_contract_drift(field, value, message):
+    module = load_plugin_module()
+    job = qwen21_outpaint_job()
+    job["generation"][field] = value
+
+    with pytest.raises(ValueError, match=message):
+        plugin_instance(module)._validate_image_job(job, 21201)
+
+
+def test_qwen21_outpaint_rejects_wrong_input_geometry_and_combinations():
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+
+    job = qwen21_outpaint_job()
+    job["inputs"][0]["role"] = "supporting_reference_image"
+    with pytest.raises(ValueError, match="role='source_image'"):
+        plugin._validate_image_job(job, 21202)
+
+    job = qwen21_outpaint_job()
+    job["inputs"].append({
+        "kind": "mask_image",
+        "role": "edit_mask",
+        "input_id": 2000,
+        "mime_type": "image/png",
+    })
+    with pytest.raises(ValueError, match="exactly one source_image"):
+        plugin._validate_image_job(job, 21203)
+
+    job = qwen21_outpaint_job()
+    job["generation"]["source_placement"]["width"] = 719
+    with pytest.raises(ValueError, match="expected 720x720"):
+        plugin._validate_image_job(job, 21204)
+
+    job = qwen21_outpaint_job()
+    job["generation"]["source_placement"]["x"] = 600
+    with pytest.raises(ValueError, match="exceeds the output width"):
+        plugin._validate_image_job(job, 21205)
+
+    job = qwen21_outpaint_job()
+    job["generation"]["source_placement"]["x"] = 1.5
+    with pytest.raises(ValueError, match="must be an integer"):
+        plugin._validate_image_job(job, 21206)
+
+    with pytest.raises(ValueError, match="nonzero outpainting margin"):
+        plugin._validate_image_job(
+            qwen21_outpaint_job(source_size=(1024, 1024), resolution=(1024, 1024)),
+            21207,
+        )
+
+
+def test_qwen21_outpaint_prepares_exact_internal_canvas_and_submission(tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    job = qwen21_outpaint_job()
+    settings = plugin._validate_image_job(job, 21208)
+    source_path = tmp_path / "source.png"
+    Image.new("RGB", (1024, 1024), (10, 20, 200)).save(source_path)
+    source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    downloaded = [{
+        "kind": "reference_image",
+        "role": "source_image",
+        "input_id": 1000,
+        "sequence": 0,
+        "path": str(source_path),
+        "sha256": source_sha256,
+    }]
+
+    plugin._apply_inputs_to_settings(settings, downloaded, job)
+
+    assert settings["video_prompt_type"] == "KI"
+    assert settings["video_guide_outpainting"] == ""
+    assert settings["video_guide_outpainting_ratio"] == ""
+    assert "image_guide" not in settings
+    assert len(settings["image_refs"]) == 1
+    canvas_path = Path(settings["image_refs"][0])
+    assert canvas_path.is_file()
+    with Image.open(canvas_path) as canvas:
+        assert canvas.mode == "RGB"
+        assert canvas.size == (1280, 736)
+        assert canvas.getpixel((0, 0)) == (255, 0, 0)
+        assert canvas.getpixel((279, 8)) == (255, 0, 0)
+        assert canvas.getpixel((280, 8)) == (10, 20, 200)
+        assert canvas.getpixel((999, 727)) == (10, 20, 200)
+        assert canvas.getpixel((1000, 727)) == (255, 0, 0)
+    assert settings["_midom_qwen21_outpaint_resolved_placement"] == {
+        "x": 280,
+        "y": 0,
+        "width": 720,
+        "height": 720,
+    }
+    assert settings["_midom_qwen21_outpaint_internal_placement"] == {
+        "x": 280,
+        "y": 8,
+        "width": 720,
+        "height": 720,
+    }
+    assert settings["_midom_qwen21_outpaint_input"]["sha256"] == source_sha256
+    assert settings["_midom_qwen21_outpaint_input"]["prepared_canvas_sha256"] == hashlib.sha256(
+        canvas_path.read_bytes()
+    ).hexdigest()
+
+    submitted = {}
+
+    class FakeSession:
+        def submit_task(self, task, callbacks=None):
+            submitted.update(task)
+            return types.SimpleNamespace(done=True)
+
+    plugin._submit_wangp_job(FakeSession(), settings, 1, callbacks=types.SimpleNamespace())
+
+    assert submitted["image_refs"] == [str(canvas_path)]
+    assert submitted["video_prompt_type"] == "KI"
+    assert submitted["video_guide_outpainting"] == ""
+    assert submitted["resolution"] == "1280x736"
+    assert not any(key.startswith("_midom_") for key in submitted)
+
+
+def test_qwen21_outpaint_uses_exif_oriented_source_dimensions(tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    placement = {"x": 0, "y": 0, "width": 50, "height": 100}
+    job = qwen21_outpaint_job(
+        source_size=(50, 100),
+        resolution=(768, 768),
+        placement=placement,
+    )
+    settings = plugin._validate_image_job(job, 21209)
+    source_path = tmp_path / "rotated-source.jpg"
+    source = Image.new("RGB", (100, 50), (40, 120, 200))
+    exif = source.getexif()
+    exif[274] = 6
+    source.save(source_path, format="JPEG", exif=exif)
+    downloaded = [{
+        "kind": "reference_image",
+        "role": "source_image",
+        "input_id": 1000,
+        "sequence": 0,
+        "path": str(source_path),
+        "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+    }]
+
+    plugin._apply_inputs_to_settings(settings, downloaded, job)
+
+    assert settings["_midom_qwen21_outpaint_input"]["display_width"] == 50
+    assert settings["_midom_qwen21_outpaint_input"]["display_height"] == 100
+    with Image.open(settings["image_refs"][0]) as canvas:
+        assert canvas.getpixel((0, 0)) != (255, 0, 0)
+        assert canvas.getpixel((50, 0)) == (255, 0, 0)
+
+
+def test_qwen21_outpaint_rejects_downloaded_display_dimension_mismatch(tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    job = qwen21_outpaint_job(source_size=(640, 480), resolution=(1280, 720))
+    settings = plugin._validate_image_job(job, 21210)
+    source_path = tmp_path / "wrong-size.png"
+    Image.new("RGB", (641, 480), "blue").save(source_path)
+
+    with pytest.raises(ValueError, match="do not match the claim descriptor"):
+        plugin._apply_inputs_to_settings(settings, [{
+            "kind": "reference_image",
+            "role": "source_image",
+            "input_id": 1000,
+            "sequence": 0,
+            "path": str(source_path),
+            "sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        }], job)
+
+
+def test_qwen21_outpaint_generation_metadata_records_geometry_and_recipe(tmp_path):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    job = qwen21_outpaint_job()
+    settings = plugin._validate_image_job(job, 21211)
+    source_path = tmp_path / "source.png"
+    Image.new("RGB", (1024, 1024), "blue").save(source_path)
+    source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    plugin._apply_inputs_to_settings(settings, [{
+        "kind": "reference_image",
+        "role": "source_image",
+        "input_id": 1000,
+        "sequence": 0,
+        "path": str(source_path),
+        "sha256": source_sha256,
+    }], job)
+
+    metadata = plugin._build_generation_metadata(settings, types.SimpleNamespace(), ["result-seed123.png"])
+
+    assert metadata["image_task"] == "outpaint"
+    outpaint = metadata["outpaint"]
+    assert outpaint["contract_version"] == "qwen21_outpaint_v1"
+    assert outpaint["recipe_version"] == "qwen21_red_canvas_v1"
+    assert outpaint["source"]["input_id"] == 1000
+    assert outpaint["source"]["sha256"] == source_sha256
+    assert outpaint["requested_placement"] == outpaint["resolved_placement"]
+    assert outpaint["internal_placement"]["y"] == 8
+    assert outpaint["canvas_adapter"]["crop_top"] == 8
+    assert outpaint["accelerator_profile_id"] == "standard"
+    assert outpaint["expanded_bridge_recipe"]["video_guide_outpainting"] == ""
+    assert outpaint["expanded_bridge_recipe"]["num_inference_steps"] == 40
+
+
+def test_qwen21_outpaint_candidate_contract_is_gated():
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    connection = module.ConnectionContext(
+        connection_id="worker-1",
+        api_base_url="https://midom.test",
+        worker_id=1,
+        worker_token="token",
+        org_id=2,
+        project_id=3,
+        paired_user_id=4,
+        machine_name="GPU",
+        capabilities_revision=1,
+        token_expires_at="",
+        allow_insecure_local_dev=False,
+        allow_insecure_lan_dev=False,
+    )
+    candidate = {
+        "job_id": 21212,
+        "worker_id": 1,
+        "org_id": 2,
+        "project_id": 3,
+        "requested_by_user_id": 4,
+        "media_type": "image",
+        "model_id": module.QWEN21_MODEL_ID,
+        "summary": {
+            "image_task": "outpaint",
+            "outpaint_contract_version": "qwen21_outpaint_v1",
+            "reference_mode": "primary_image_edit",
+            "reference_image_count": 1,
+            "source_image_count": 1,
+            "mask_image_count": 0,
+            "control_image_count": 0,
+            "placement_mode": "explicit_rectangle",
+            "source_scale_mode": "fit_without_crop_no_upscale",
+            "accelerator_profile_id": "standard",
+            "output_count": 1,
+            "output_format": "png",
+        },
+    }
+
+    assert plugin._candidate_incompatibility_reason(candidate, connection) is None
+    candidate["summary"]["source_image_count"] = 2
+    assert "source_image_count=1" in plugin._candidate_incompatibility_reason(candidate, connection)
+    candidate["summary"]["source_image_count"] = 1
+    candidate["summary"]["mask_image_count"] = 1
+    assert "does not support mask images" in plugin._candidate_incompatibility_reason(candidate, connection)
+    candidate["summary"]["mask_image_count"] = 0
+    candidate["summary"]["accelerator_profile_id"] = module.QWEN21_PRUNA_8_PROFILE_ID
+    assert "only accelerator_profile_id=standard" in plugin._candidate_incompatibility_reason(candidate, connection)

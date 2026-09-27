@@ -176,6 +176,11 @@ QWEN21_MASKED_EDIT_METHODS = {
 }
 QWEN21_MASKED_EDIT_STRENGTH = "balanced"
 QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES = 1
+QWEN21_OUTPAINT_CONTRACT_VERSION = "qwen21_outpaint_v1"
+QWEN21_OUTPAINT_PLACEMENT_MODE = "explicit_rectangle"
+QWEN21_OUTPAINT_SOURCE_SCALE_MODE = "fit_without_crop_no_upscale"
+QWEN21_OUTPAINT_RECIPE_VERSION = "qwen21_red_canvas_v1"
+QWEN21_RED_OUTPAINTING_PROMPT = "Remove the red paddings on the sides and show what's behind them."
 QWEN21_VIGGLE_PROFILE_ID = "qwen21_viggle_turbo_v021_6"
 QWEN21_VIGGLE_LORA_DIR = "qwen21"
 QWEN21_VIGGLE_LORA_FILENAME = "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors"
@@ -847,7 +852,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.6.0"
+        self.version = "0.7.0"
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -1344,6 +1349,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if model_id == QWEN21_MODEL_ID:
                 model_capabilities["prompt_enhancement_by_worker"] = False
                 model_capabilities["rgba"] = False
+                model_capabilities["outpaint"] = True
             model_limits = {
                 "max_outputs": _image_max_outputs_for_model(model_id),
                 "max_steps": _image_max_steps_for_model(model_id),
@@ -1372,7 +1378,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 }
                 model_limits["dimension_alignment"] = 32
                 model_limits["output_mime_types"] = ["image/png"]
-                model_limits["image_tasks"] = ["generate", "edit", "masked_edit"]
+                model_limits["image_tasks"] = ["generate", "edit", "masked_edit", "outpaint"]
                 model_limits["masked_edit"] = {
                     "contract_version": QWEN21_MASKED_EDIT_CONTRACT_VERSION,
                     "reference_mode": "primary_image_edit",
@@ -1393,6 +1399,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "mask_padding": "black_protected",
                         "output": "center_crop_to_delivery_size",
                     },
+                }
+                model_limits["outpaint"] = {
+                    "contract_version": QWEN21_OUTPAINT_CONTRACT_VERSION,
+                    "reference_mode": "primary_image_edit",
+                    "max_source_images": 1,
+                    "placement_modes": [QWEN21_OUTPAINT_PLACEMENT_MODE],
+                    "source_scale_modes": [QWEN21_OUTPAINT_SOURCE_SCALE_MODE],
+                    "accelerator_profile_ids": ["standard"],
+                    "output_modes": ["rgb"],
+                    "output_mime_types": ["image/png"],
+                    "delivery_resolutions": [
+                        "768x768",
+                        "1024x1024",
+                        "1280x720",
+                        "720x1280",
+                    ],
                 }
             if metadata.get("output_roles"):
                 model_limits["output_roles"] = list(metadata["output_roles"])
@@ -2860,6 +2882,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 negative_prompt,
             )
             return
+        if image_task == "outpaint":
+            self._apply_qwen21_outpaint_job_settings(
+                settings,
+                job,
+                generation,
+                requested_resolution,
+                negative_prompt,
+            )
+            return
         if image_task not in {"", "generate", "edit", "image_edit"}:
             raise ValueError(f"Unsupported Qwen Image 2.1 image_task: {image_task}")
 
@@ -2959,6 +2990,227 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "Prepared Qwen Image 2.1 job settings; "
             f"reference_mode={reference_mode!r} reference_count={reference_count} "
             f"profile_id={profile_id!r} requested_resolution={requested_resolution} "
+            f"internal_render_resolution={internal_resolution}."
+        )
+
+    @staticmethod
+    def _qwen21_outpaint_fitted_size(
+        source_size: tuple[int, int],
+        output_size: tuple[int, int],
+    ) -> tuple[int, int]:
+        source_width, source_height = source_size
+        output_width, output_height = output_size
+        if min(source_width, source_height, output_width, output_height) <= 0:
+            raise ValueError("Qwen Image 2.1 outpainting dimensions must be positive.")
+        if source_width <= output_width and source_height <= output_height:
+            return source_width, source_height
+        if output_width * source_height <= output_height * source_width:
+            fitted_width = output_width
+            fitted_height = max(1, int(round(source_height * output_width / source_width)))
+        else:
+            fitted_height = output_height
+            fitted_width = max(1, int(round(source_width * output_height / source_height)))
+        return min(fitted_width, output_width), min(fitted_height, output_height)
+
+    @staticmethod
+    def _qwen21_outpaint_integer(value: Any, label: str, *, positive: bool = False) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"Qwen Image 2.1 outpainting {label} must be an integer.")
+        if positive and value <= 0:
+            raise ValueError(f"Qwen Image 2.1 outpainting {label} must be positive.")
+        if not positive and value < 0:
+            raise ValueError(f"Qwen Image 2.1 outpainting {label} must be non-negative.")
+        return value
+
+    def _apply_qwen21_outpaint_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+        negative_prompt: str,
+    ) -> None:
+        contract_version = str(generation.get("outpaint_contract_version") or "").strip()
+        if contract_version != QWEN21_OUTPAINT_CONTRACT_VERSION:
+            raise ValueError(
+                "Qwen Image 2.1 outpainting requires "
+                f"outpaint_contract_version={QWEN21_OUTPAINT_CONTRACT_VERSION!r}."
+            )
+        reference_mode = str(generation.get("reference_mode") or "").strip().lower()
+        if reference_mode != "primary_image_edit":
+            raise ValueError("Qwen Image 2.1 outpainting requires reference_mode='primary_image_edit'.")
+        placement_mode = str(generation.get("placement_mode") or "").strip().lower()
+        if placement_mode != QWEN21_OUTPAINT_PLACEMENT_MODE:
+            raise ValueError(
+                "Qwen Image 2.1 outpainting requires "
+                f"placement_mode={QWEN21_OUTPAINT_PLACEMENT_MODE!r}."
+            )
+        source_scale_mode = str(generation.get("source_scale_mode") or "").strip().lower()
+        if source_scale_mode != QWEN21_OUTPAINT_SOURCE_SCALE_MODE:
+            raise ValueError(
+                "Qwen Image 2.1 outpainting requires "
+                f"source_scale_mode={QWEN21_OUTPAINT_SOURCE_SCALE_MODE!r}."
+            )
+        profile_id = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
+        if profile_id != "standard":
+            raise ValueError("Qwen Image 2.1 outpainting supports only accelerator_profile_id='standard'.")
+        requested_steps = generation.get("steps")
+        if requested_steps is not None:
+            if isinstance(requested_steps, bool):
+                raise ValueError("Qwen Image 2.1 outpainting standard profile requires 40 steps.")
+            try:
+                requested_steps_value = int(requested_steps)
+            except (TypeError, ValueError):
+                raise ValueError("Qwen Image 2.1 outpainting standard profile requires 40 steps.")
+            if requested_steps_value != 40:
+                raise ValueError(
+                    "Qwen Image 2.1 outpainting standard profile requires 40 steps; "
+                    f"got {requested_steps_value}."
+                )
+
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Job inputs must be a list.")
+        if len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise ValueError("Qwen Image 2.1 outpainting requires exactly one source_image input.")
+        source_input = inputs[0]
+        if str(source_input.get("kind") or "").strip() != "reference_image":
+            raise ValueError("Qwen Image 2.1 outpainting source must use kind='reference_image'.")
+        if str(source_input.get("role") or "").strip() != "source_image":
+            raise ValueError("Qwen Image 2.1 outpainting source must use role='source_image'.")
+        sequence = self._qwen21_outpaint_integer(source_input.get("sequence"), "source sequence")
+        if sequence != 0:
+            raise ValueError("Qwen Image 2.1 outpainting source_image requires sequence=0.")
+        source_width = self._qwen21_outpaint_integer(
+            source_input.get("source_width"),
+            "source_width",
+            positive=True,
+        )
+        source_height = self._qwen21_outpaint_integer(
+            source_input.get("source_height"),
+            "source_height",
+            positive=True,
+        )
+        generation_source_width = self._qwen21_outpaint_integer(
+            generation.get("source_width"),
+            "generation.source_width",
+            positive=True,
+        )
+        generation_source_height = self._qwen21_outpaint_integer(
+            generation.get("source_height"),
+            "generation.source_height",
+            positive=True,
+        )
+        if (generation_source_width, generation_source_height) != (source_width, source_height):
+            raise ValueError(
+                "Qwen Image 2.1 outpainting generation source dimensions must match the source_image descriptor; "
+                f"generation={generation_source_width}x{generation_source_height} "
+                f"descriptor={source_width}x{source_height}."
+            )
+
+        requested_size = self._parse_resolution_size(requested_resolution)
+        internal_resolution = QWEN21_INTERNAL_RENDER_RESOLUTIONS.get(requested_resolution)
+        internal_size = self._parse_resolution_size(internal_resolution)
+        if requested_size is None or internal_size is None:
+            raise ValueError(f"Unsupported Qwen Image 2.1 delivery resolution: {requested_resolution}")
+        output_width, output_height = requested_size
+        placement_payload = generation.get("source_placement")
+        if not isinstance(placement_payload, dict):
+            raise ValueError("Qwen Image 2.1 outpainting requires generation.source_placement.")
+        placement = {
+            "x": self._qwen21_outpaint_integer(placement_payload.get("x"), "source_placement.x"),
+            "y": self._qwen21_outpaint_integer(placement_payload.get("y"), "source_placement.y"),
+            "width": self._qwen21_outpaint_integer(
+                placement_payload.get("width"),
+                "source_placement.width",
+                positive=True,
+            ),
+            "height": self._qwen21_outpaint_integer(
+                placement_payload.get("height"),
+                "source_placement.height",
+                positive=True,
+            ),
+        }
+        if placement["x"] + placement["width"] > output_width:
+            raise ValueError("Qwen Image 2.1 outpainting source_placement exceeds the output width.")
+        if placement["y"] + placement["height"] > output_height:
+            raise ValueError("Qwen Image 2.1 outpainting source_placement exceeds the output height.")
+        expected_size = self._qwen21_outpaint_fitted_size(
+            (source_width, source_height),
+            requested_size,
+        )
+        if (placement["width"], placement["height"]) != expected_size:
+            raise ValueError(
+                "Qwen Image 2.1 outpainting source_placement dimensions do not match "
+                f"{QWEN21_OUTPAINT_SOURCE_SCALE_MODE}; expected {expected_size[0]}x{expected_size[1]}, "
+                f"got {placement['width']}x{placement['height']}."
+            )
+        if (
+            placement["x"] == 0
+            and placement["y"] == 0
+            and placement["width"] == output_width
+            and placement["height"] == output_height
+        ):
+            raise ValueError("Qwen Image 2.1 outpainting requires at least one nonzero outpainting margin.")
+
+        user_prompt = str(settings.get("prompt") or "").strip()
+        expanded_prompt = user_prompt
+        if QWEN21_RED_OUTPAINTING_PROMPT not in expanded_prompt:
+            expanded_prompt = expanded_prompt.rstrip().rstrip(".") + ". " + QWEN21_RED_OUTPAINTING_PROMPT
+        if len(expanded_prompt) > _image_max_prompt_chars_for_model(QWEN21_MODEL_ID):
+            raise ValueError("Qwen Image 2.1 outpainting prompt is too long after Bridge recipe expansion.")
+
+        settings.update({
+            "prompt": expanded_prompt,
+            "resolution": internal_resolution,
+            "image_mode": 1,
+            "prompt_enhancer": "",
+            "negative_prompt": negative_prompt,
+            "guidance_phases": 1,
+            "remove_background_images_ref": 0,
+            "model_mode": 0,
+            "denoising_strength": 1.0,
+            "image_refs": [],
+            "video_prompt_type": "KI",
+            "video_guide_outpainting": "",
+            "video_guide_outpainting_ratio": "",
+            "_midom_image_task": "outpaint",
+            "_midom_qwen21_reference_mode": reference_mode,
+            "_midom_qwen21_reference_image_count": 1,
+            "_midom_qwen21_outpaint_contract_version": contract_version,
+            "_midom_qwen21_outpaint_placement_mode": placement_mode,
+            "_midom_qwen21_outpaint_source_scale_mode": source_scale_mode,
+            "_midom_qwen21_outpaint_requested_placement": dict(placement),
+            "_midom_qwen21_outpaint_source_input_id": self._coerce_input_id(source_input),
+            "_midom_qwen21_outpaint_source_descriptor_size": f"{source_width}x{source_height}",
+            "_midom_qwen21_outpaint_user_prompt": user_prompt,
+            "_midom_qwen21_outpaint_expanded_prompt": expanded_prompt,
+            "_midom_qwen21_reference_descriptors": [{
+                "input_id": self._coerce_input_id(source_input),
+                "role": "source_image",
+                "sequence": 0,
+            }],
+            "_midom_qwen21_reference_inputs": [],
+            "_midom_requested_resolution": requested_resolution,
+            "_midom_internal_render_resolution": internal_resolution,
+            "_midom_final_output_resolution": requested_resolution,
+            "_midom_image_delivery_adapter": (
+                "qwen21_32px_center_crop" if internal_resolution != requested_resolution else ""
+            ),
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": "RGB",
+            "_midom_prompt_enhancement_by_worker": False,
+            "_midom_qwen21_requested_profile_id": "standard",
+            "custom_settings": {
+                "qwen21_kv_cache": "Disabled",
+                "rgba": "Disabled",
+            },
+        })
+        self._log(
+            "Prepared Qwen Image 2.1 outpainting settings; "
+            f"contract_version={contract_version!r} source_input_id={source_input.get('input_id')} "
+            f"source_display_size={source_width}x{source_height} "
+            f"source_placement={placement} requested_resolution={requested_resolution} "
             f"internal_render_resolution={internal_resolution}."
         )
 
@@ -5891,6 +6143,59 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "output_color_mode": "RGB",
                     },
                 }
+            elif str(settings.get("_midom_image_task") or "") == "outpaint":
+                metadata["image_task"] = "outpaint"
+                metadata["outpaint"] = {
+                    "contract_version": str(settings.get("_midom_qwen21_outpaint_contract_version") or ""),
+                    "recipe_version": QWEN21_OUTPAINT_RECIPE_VERSION,
+                    "placement_mode": str(settings.get("_midom_qwen21_outpaint_placement_mode") or ""),
+                    "source_scale_mode": str(settings.get("_midom_qwen21_outpaint_source_scale_mode") or ""),
+                    "source": dict(settings.get("_midom_qwen21_outpaint_input") or {}),
+                    "requested_placement": dict(
+                        settings.get("_midom_qwen21_outpaint_requested_placement") or {}
+                    ),
+                    "resolved_placement": dict(
+                        settings.get("_midom_qwen21_outpaint_resolved_placement") or {}
+                    ),
+                    "internal_placement": dict(
+                        settings.get("_midom_qwen21_outpaint_internal_placement") or {}
+                    ),
+                    "source_fit_scale": self._coerce_float(
+                        settings.get("_midom_qwen21_outpaint_source_fit_scale"),
+                        1.0,
+                        0.0,
+                        1.0,
+                    ),
+                    "user_prompt": str(settings.get("_midom_qwen21_outpaint_user_prompt") or ""),
+                    "expanded_prompt": str(settings.get("_midom_qwen21_outpaint_expanded_prompt") or ""),
+                    "requested_dimensions": str(settings.get("_midom_requested_resolution") or ""),
+                    "internal_dimensions": str(settings.get("_midom_internal_render_resolution") or ""),
+                    "final_output_dimensions": str(settings.get("_midom_final_output_resolution") or ""),
+                    "canvas_adapter": dict(settings.get("_midom_qwen21_outpaint_canvas_adapter") or {}),
+                    "accelerator_profile_id": str(settings.get("_midom_accelerator_profile_id") or "standard"),
+                    "expanded_bridge_recipe": {
+                        "image_mode": self._coerce_int(settings.get("image_mode"), 1, 0, 2),
+                        "video_prompt_type": str(settings.get("video_prompt_type") or ""),
+                        "video_guide_outpainting": str(settings.get("video_guide_outpainting") or ""),
+                        "video_guide_outpainting_ratio": str(
+                            settings.get("video_guide_outpainting_ratio") or ""
+                        ),
+                        "num_inference_steps": self._coerce_int(
+                            settings.get("num_inference_steps"),
+                            40,
+                            1,
+                            MAX_STEPS,
+                        ),
+                        "guidance_scale": self._coerce_float(
+                            settings.get("guidance_scale"),
+                            4.0,
+                            0.0,
+                            100.0,
+                        ),
+                        "sample_solver": str(settings.get("sample_solver") or "default"),
+                        "output_color_mode": "RGB",
+                    },
+                }
         curated_tool_id = str(settings.get("_midom_curated_tool_id") or "").strip()
         if curated_tool_id:
             metadata["curated_tool"] = {
@@ -6944,7 +7249,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     return f"Qwen Image 2.1 unsupported output_format: {output_format}"
                 image_task = str(summary.get("image_task") or "").strip().lower()
                 is_masked_edit = image_task == "masked_edit"
-                if image_task not in {"", "generate", "edit", "image_edit", "masked_edit"}:
+                is_outpaint = image_task == "outpaint"
+                if image_task not in {"", "generate", "edit", "image_edit", "masked_edit", "outpaint"}:
                     return f"Qwen Image 2.1 unsupported image_task: {image_task}"
                 reference_count_value = summary.get("reference_image_count")
                 reference_count = None
@@ -6969,6 +7275,45 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 accelerator_profile_id = str(
                     summary.get("accelerator_profile_id") or summary.get("speed_profile_id") or "standard"
                 ).strip() or "standard"
+                if is_outpaint:
+                    contract_version = str(summary.get("outpaint_contract_version") or "").strip()
+                    if contract_version != QWEN21_OUTPAINT_CONTRACT_VERSION:
+                        return (
+                            "Qwen Image 2.1 outpainting requires contract version "
+                            f"{QWEN21_OUTPAINT_CONTRACT_VERSION}"
+                        )
+                    if reference_mode != "primary_image_edit":
+                        return "Qwen Image 2.1 outpainting requires reference_mode=primary_image_edit"
+                    if reference_count != 1:
+                        return (
+                            "Qwen Image 2.1 outpainting requires exactly one source reference image; "
+                            f"got {reference_count if reference_count is not None else 'missing'}"
+                        )
+                    source_image_count = self._coerce_int(
+                        summary.get("source_image_count"),
+                        reference_count,
+                        0,
+                        100,
+                    )
+                    if source_image_count != 1:
+                        return f"Qwen Image 2.1 outpainting requires source_image_count=1; got {source_image_count}"
+                    mask_image_count = self._coerce_int(summary.get("mask_image_count"), 0, 0, 100)
+                    if mask_image_count:
+                        return f"Qwen Image 2.1 outpainting does not support mask images; got {mask_image_count}"
+                    placement_mode = str(summary.get("placement_mode") or "").strip().lower()
+                    if placement_mode != QWEN21_OUTPAINT_PLACEMENT_MODE:
+                        return (
+                            "Qwen Image 2.1 outpainting requires placement_mode="
+                            f"{QWEN21_OUTPAINT_PLACEMENT_MODE}"
+                        )
+                    source_scale_mode = str(summary.get("source_scale_mode") or "").strip().lower()
+                    if source_scale_mode != QWEN21_OUTPAINT_SOURCE_SCALE_MODE:
+                        return (
+                            "Qwen Image 2.1 outpainting requires source_scale_mode="
+                            f"{QWEN21_OUTPAINT_SOURCE_SCALE_MODE}"
+                        )
+                    if accelerator_profile_id != "standard":
+                        return "Qwen Image 2.1 outpainting supports only accelerator_profile_id=standard"
                 if is_masked_edit:
                     contract_version = str(summary.get("masked_edit_contract_version") or "").strip()
                     if contract_version and contract_version != QWEN21_MASKED_EDIT_CONTRACT_VERSION:
@@ -14043,7 +14388,84 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if model_id == QWEN21_MODEL_ID:
             if control_inputs:
                 raise ValueError("Qwen Image 2.1 first-pass jobs do not support control_image inputs.")
-            if str(settings.get("_midom_image_task") or "").strip().lower() == "masked_edit":
+            qwen21_image_task = str(settings.get("_midom_image_task") or "").strip().lower()
+            if qwen21_image_task == "outpaint":
+                ordered_references = sorted(
+                    [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
+                    key=lambda item: int(item.get("sequence", -1)),
+                )
+                if len(ordered_references) != 1:
+                    raise ValueError(
+                        "Qwen Image 2.1 outpainting requires exactly one downloaded source image."
+                    )
+                if mask_inputs:
+                    raise ValueError("Qwen Image 2.1 outpainting does not accept mask inputs.")
+                source_input = ordered_references[0]
+                if str(source_input.get("role") or "") != "source_image":
+                    raise ValueError("Qwen Image 2.1 outpainting input role must be source_image.")
+                if int(source_input.get("sequence", -1)) != 0:
+                    raise ValueError("Qwen Image 2.1 outpainting source_image requires sequence=0.")
+                if int(source_input.get("input_id") or 0) != int(
+                    settings.get("_midom_qwen21_outpaint_source_input_id") or 0
+                ):
+                    raise ValueError(
+                        "Downloaded Qwen Image 2.1 outpainting source does not match the validated claim."
+                    )
+                requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+                internal_size = self._parse_resolution_size(settings.get("_midom_internal_render_resolution"))
+                descriptor_size = self._parse_resolution_size(
+                    settings.get("_midom_qwen21_outpaint_source_descriptor_size")
+                )
+                placement = settings.get("_midom_qwen21_outpaint_requested_placement")
+                if requested_size is None or internal_size is None or descriptor_size is None:
+                    raise ValueError("Qwen Image 2.1 outpainting dimensions are missing or invalid.")
+                if not isinstance(placement, dict):
+                    raise ValueError("Qwen Image 2.1 outpainting placement is missing or invalid.")
+                prepared = self._prepare_qwen21_outpaint_input(
+                    source_input,
+                    descriptor_size,
+                    requested_size,
+                    internal_size,
+                    placement,
+                )
+                settings["image_mode"] = 1
+                settings["image_refs"] = [prepared["canvas_path"]]
+                settings.pop("image_guide", None)
+                settings.pop("image_mask", None)
+                settings["video_prompt_type"] = "KI"
+                settings["video_guide_outpainting"] = ""
+                settings["video_guide_outpainting_ratio"] = ""
+                settings["_midom_qwen21_reference_inputs"] = [{
+                    "input_id": int(source_input["input_id"]),
+                    "role": "source_image",
+                    "sequence": 0,
+                    "sha256": str(source_input.get("sha256") or ""),
+                }]
+                settings["_midom_qwen21_outpaint_input"] = {
+                    "input_id": int(source_input["input_id"]),
+                    "role": "source_image",
+                    "sequence": 0,
+                    "sha256": str(source_input.get("sha256") or ""),
+                    "display_width": prepared["source_display_size"][0],
+                    "display_height": prepared["source_display_size"][1],
+                    "prepared_canvas_sha256": prepared["canvas_sha256"],
+                }
+                settings["_midom_qwen21_outpaint_resolved_placement"] = prepared["resolved_placement"]
+                settings["_midom_qwen21_outpaint_internal_placement"] = prepared["internal_placement"]
+                settings["_midom_qwen21_outpaint_source_fit_scale"] = prepared["source_fit_scale"]
+                settings["_midom_qwen21_outpaint_canvas_adapter"] = prepared["canvas_adapter"]
+                self._log(
+                    "Applied Qwen Image 2.1 outpainting input; "
+                    f"source_input_id={source_input['input_id']} "
+                    f"source_sha256={str(source_input.get('sha256') or '')[:12]}... "
+                    f"source_display_size={prepared['source_display_size'][0]}x{prepared['source_display_size'][1]} "
+                    f"resolved_placement={prepared['resolved_placement']} "
+                    f"internal_placement={prepared['internal_placement']} "
+                    f"prepared_canvas={Path(prepared['canvas_path']).name!r} "
+                    f"prepared_canvas_sha256={prepared['canvas_sha256'][:12]}...."
+                )
+                return
+            if qwen21_image_task == "masked_edit":
                 ordered_references = sorted(
                     [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
                     key=lambda item: int(item.get("sequence", -1)),
@@ -14293,6 +14715,129 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"prepared={target_path.name!r} prepared_size={internal_size[0]}x{internal_size[1]}."
         )
         return str(target_path)
+
+    def _prepare_qwen21_outpaint_input(
+        self,
+        source_input: dict[str, Any],
+        descriptor_size: tuple[int, int],
+        requested_size: tuple[int, int],
+        internal_size: tuple[int, int],
+        placement: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_path = Path(str(source_input.get("path") or ""))
+        if not source_path.is_file():
+            raise ValueError("Qwen Image 2.1 outpainting source image is missing.")
+        try:
+            with Image.open(source_path) as source_file:
+                source = ImageOps.exif_transpose(source_file).convert("RGB")
+                source.load()
+        except Exception as exc:
+            raise ValueError(f"Qwen Image 2.1 outpainting source image could not be decoded: {exc}")
+        if source.size != descriptor_size:
+            raise ValueError(
+                "Qwen Image 2.1 outpainting source display dimensions do not match the claim descriptor; "
+                f"descriptor={descriptor_size[0]}x{descriptor_size[1]} "
+                f"decoded={source.size[0]}x{source.size[1]}."
+            )
+
+        requested_width, requested_height = requested_size
+        internal_width, internal_height = internal_size
+        if internal_width < requested_width or internal_height < requested_height:
+            raise ValueError("Qwen Image 2.1 outpainting internal canvas cannot be smaller than delivery output.")
+        crop_left = (internal_width - requested_width) // 2
+        crop_top = (internal_height - requested_height) // 2
+        if (
+            crop_left * 2 != internal_width - requested_width
+            or crop_top * 2 != internal_height - requested_height
+        ):
+            raise ValueError("Qwen Image 2.1 outpainting delivery crop must be symmetrically aligned.")
+
+        expected_width, expected_height = self._qwen21_outpaint_fitted_size(source.size, requested_size)
+        resolved_placement = {
+            "x": self._qwen21_outpaint_integer(placement.get("x"), "source_placement.x"),
+            "y": self._qwen21_outpaint_integer(placement.get("y"), "source_placement.y"),
+            "width": self._qwen21_outpaint_integer(
+                placement.get("width"),
+                "source_placement.width",
+                positive=True,
+            ),
+            "height": self._qwen21_outpaint_integer(
+                placement.get("height"),
+                "source_placement.height",
+                positive=True,
+            ),
+        }
+        if (resolved_placement["width"], resolved_placement["height"]) != (
+            expected_width,
+            expected_height,
+        ):
+            raise ValueError(
+                "Qwen Image 2.1 outpainting source geometry changed after download; "
+                f"expected {expected_width}x{expected_height}, "
+                f"got {resolved_placement['width']}x{resolved_placement['height']}."
+            )
+        if resolved_placement["x"] + expected_width > requested_width:
+            raise ValueError("Qwen Image 2.1 outpainting source placement exceeds delivery width.")
+        if resolved_placement["y"] + expected_height > requested_height:
+            raise ValueError("Qwen Image 2.1 outpainting source placement exceeds delivery height.")
+        if (
+            resolved_placement["x"] == 0
+            and resolved_placement["y"] == 0
+            and expected_width == requested_width
+            and expected_height == requested_height
+        ):
+            raise ValueError("Qwen Image 2.1 outpainting requires at least one nonzero outpainting margin.")
+
+        internal_placement = {
+            "x": resolved_placement["x"] + crop_left,
+            "y": resolved_placement["y"] + crop_top,
+            "width": expected_width,
+            "height": expected_height,
+        }
+        fitted_source = source
+        if source.size != (expected_width, expected_height):
+            fitted_source = source.resize((expected_width, expected_height), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", internal_size, (255, 0, 0))
+        canvas.paste(fitted_source, (internal_placement["x"], internal_placement["y"]))
+        canvas_path = source_path.with_name(
+            f"{source_path.stem}-qwen21-outpaint-{internal_width}x{internal_height}.png"
+        )
+        canvas.save(canvas_path, format="PNG", optimize=True)
+        canvas_hasher = hashlib.sha256()
+        with canvas_path.open("rb") as reader:
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                canvas_hasher.update(chunk)
+        canvas_sha256 = canvas_hasher.hexdigest()
+        source_fit_scale = min(expected_width / source.width, expected_height / source.height)
+        canvas_adapter = {
+            "adapter_id": QWEN21_OUTPAINT_RECIPE_VERSION,
+            "requested_width": requested_width,
+            "requested_height": requested_height,
+            "internal_width": internal_width,
+            "internal_height": internal_height,
+            "crop_left": crop_left,
+            "crop_right": internal_width - requested_width - crop_left,
+            "crop_top": crop_top,
+            "crop_bottom": internal_height - requested_height - crop_top,
+            "conditioning_canvas": "rgb_red_255_0_0",
+            "output_crop": "center",
+        }
+        self._log(
+            "Prepared Qwen Image 2.1 outpainting Red Canvas; "
+            f"source={source_path.name!r} source_display_size={source.width}x{source.height} "
+            f"requested={requested_width}x{requested_height} internal={internal_width}x{internal_height} "
+            f"resolved_placement={resolved_placement} internal_placement={internal_placement} "
+            f"source_fit_scale={source_fit_scale:.6f} canvas_sha256={canvas_sha256[:12]}...."
+        )
+        return {
+            "canvas_path": str(canvas_path),
+            "canvas_sha256": canvas_sha256,
+            "source_display_size": source.size,
+            "resolved_placement": resolved_placement,
+            "internal_placement": internal_placement,
+            "source_fit_scale": source_fit_scale,
+            "canvas_adapter": canvas_adapter,
+        }
 
     def _prepare_qwen21_masked_edit_inputs(
         self,
