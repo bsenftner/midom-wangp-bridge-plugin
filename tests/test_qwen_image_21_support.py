@@ -199,7 +199,9 @@ def test_qwen21_capability_reports_first_pass_contract():
     assert capability["capabilities"]["inpaint"] is True
     assert capability["capabilities"]["masked_edit"] is True
     assert capability["capabilities"]["outpaint"] is True
-    assert capability["capabilities"]["rgba"] is False
+    assert capability["capabilities"]["curated_variation"] is True
+    assert capability["capabilities"]["rgba"] is True
+    assert capability["limits"]["rgba_output"] == plugin._qwen21_native_rgba_capability()
     assert capability["limits"]["max_reference_images"] == 10
     assert capability["limits"]["output_mime_types"] == ["image/png"]
     assert capability["limits"]["internal_render_resolutions"]["1280x720"] == "1280x736"
@@ -211,7 +213,13 @@ def test_qwen21_capability_reports_first_pass_contract():
     assert masked_edit["mask_semantics"] == ["luminance_white_edit_v1"]
     assert masked_edit["accelerator_profile_ids"] == ["standard"]
     assert masked_edit["output_color_mode"] == "RGB"
-    assert capability["limits"]["image_tasks"] == ["generate", "edit", "masked_edit", "outpaint"]
+    assert capability["limits"]["image_tasks"] == [
+        "generate",
+        "edit",
+        "masked_edit",
+        "outpaint",
+        "curated_variation",
+    ]
     outpaint = capability["limits"]["outpaint"]
     assert outpaint == {
         "contract_version": "qwen21_outpaint_v1",
@@ -226,6 +234,37 @@ def test_qwen21_capability_reports_first_pass_contract():
     }
     assert "modes" not in outpaint
     assert "preserve_original" not in outpaint
+    assert capability["limits"]["curated_variation"] == {
+        "contract_version": "qwen21_visual_variation_v1",
+        "recipe_version": "qwen21_visual_variation_candidate_v1",
+        "reference_mode": "primary_image_edit",
+        "max_source_images": 1,
+        "max_supporting_reference_images": 2,
+        "max_reference_images": 3,
+        "reference_roles": ["source_image", "supporting_reference_image"],
+        "supporting_reference_purposes": [
+            "accessory", "atmosphere", "composition", "identity", "lighting",
+            "location", "object", "prop", "style", "wardrobe",
+        ],
+        "reference_background_policies": ["keep_all", "remove_supporting_backgrounds"],
+        "primary_source_background_removal": False,
+        "accelerator_profile_ids": ["standard"],
+        "output_mime_types": ["image/png"],
+        "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
+        "max_outputs": 10,
+        "modes": [
+            {
+                "mode_id": "character_asset",
+                "output_color_mode": "rgba",
+                "default_reference_background_policy": "remove_supporting_backgrounds",
+            },
+            {
+                "mode_id": "location_plate",
+                "output_color_mode": "rgb",
+                "default_reference_background_policy": "keep_all",
+            },
+        ],
+    }
     profiles = {item["profile_id"]: item for item in capability["accelerator_profiles"]}
     assert profiles["standard"]["steps"] == 40
     assert profiles["standard"]["max_reference_images"] == 10

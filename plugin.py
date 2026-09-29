@@ -181,6 +181,54 @@ QWEN21_OUTPAINT_PLACEMENT_MODE = "explicit_rectangle"
 QWEN21_OUTPAINT_SOURCE_SCALE_MODE = "fit_without_crop_no_upscale"
 QWEN21_OUTPAINT_RECIPE_VERSION = "qwen21_red_canvas_v1"
 QWEN21_RED_OUTPAINTING_PROMPT = "Remove the red paddings on the sides and show what's behind them."
+QWEN21_NATIVE_RGBA_CONTRACT_VERSION = "qwen21_native_rgba_v1"
+QWEN21_NATIVE_RGBA_MODE = "isolated_asset"
+QWEN21_NATIVE_RGBA_PROMPT_POLICY = "bridge_wrapped_native_rgba_v1"
+QWEN21_NATIVE_RGBA_ALPHA_VALIDATION = "transparent_and_opaque_pixels_v1"
+QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES = 3
+# Enabled on the local qualification worker; Midom still gates the UI on the full nested contract.
+QWEN21_NATIVE_RGBA_ADVERTISE = True
+QWEN21_VISUAL_VARIATION_CONTRACT_VERSION = "qwen21_visual_variation_v1"
+QWEN21_VISUAL_VARIATION_RECIPE_VERSION = "qwen21_visual_variation_candidate_v1"
+QWEN21_VISUAL_VARIATION_MODES = {"character_asset", "location_plate"}
+QWEN21_VISUAL_VARIATION_CAMERA_VIEWS = {
+    "front",
+    "front_left",
+    "left",
+    "back_left",
+    "back",
+    "back_right",
+    "right",
+    "front_right",
+}
+QWEN21_VISUAL_VARIATION_CAMERA_HEIGHTS = {"low", "eye_level", "elevated"}
+QWEN21_VISUAL_VARIATION_SHOT_DISTANCES = {"close", "medium", "wide", "full_body"}
+QWEN21_VISUAL_VARIATION_MAX_REFERENCE_IMAGES = 1
+QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES = 2
+QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES = (
+    QWEN21_VISUAL_VARIATION_MAX_REFERENCE_IMAGES
+    + QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES
+)
+QWEN21_VISUAL_VARIATION_REFERENCE_BACKGROUND_POLICIES = {
+    "keep_all",
+    "remove_supporting_backgrounds",
+}
+QWEN21_VISUAL_VARIATION_REFERENCE_PURPOSES = {
+    "identity",
+    "wardrobe",
+    "accessory",
+    "prop",
+    "object",
+    "location",
+    "composition",
+    "lighting",
+    "atmosphere",
+    "style",
+}
+QWEN21_VISUAL_VARIATION_MAX_FIELD_CHARS = 500
+QWEN21_VISUAL_VARIATION_MAX_OUTPUTS = 10
+QWEN21_VISUAL_VARIATION_RECIPE_STEPS = 50
+QWEN21_VISUAL_VARIATION_RECIPE_GUIDANCE = 8.0
 QWEN21_VIGGLE_PROFILE_ID = "qwen21_viggle_turbo_v021_6"
 QWEN21_VIGGLE_LORA_DIR = "qwen21"
 QWEN21_VIGGLE_LORA_FILENAME = "Qwen-Image-2.1-viggle-turbo-v0.2.1-6step-lora-r256.safetensors"
@@ -197,6 +245,7 @@ QWEN21_ACCELERATOR_PROFILE_IDS = {
 QWEN_MULTI_ANGLE_TOOL_ID = "qwen_image_edit_2511_multiple_angles"
 QWEN_MULTI_ANGLE_TOOL_DISPLAY_NAME = "Generate Alternate View"
 QWEN_MULTI_ANGLE_TOOL_VERSION = "1"
+QWEN_MULTI_ANGLE_RECIPE_VERSION = "3"
 QWEN_MULTI_ANGLE_BASE_MODEL_ID = "qwen_image_edit_plus2_20B"
 QWEN_MULTI_ANGLE_LORA_DIR = "qwen"
 QWEN_MULTI_ANGLE_LORA_FILENAME = "qwen-image-edit-2511-multiple-angles-lora.safetensors"
@@ -204,11 +253,14 @@ QWEN_MULTI_ANGLE_LORA_SHA256 = "42426ded4e25fd22879d9e198b857556445ef4ca56e8da32
 QWEN_MULTI_ANGLE_LORA_LICENSE = "Apache 2.0"
 QWEN_MULTI_ANGLE_DEFAULT_VIEW_CHANGE_STRENGTH = "standard"
 QWEN_MULTI_ANGLE_VIEW_CHANGE_STRENGTHS = {
-    "subtle": "0.75",
+    "subtle": "0.8",
     "standard": "0.9",
-    "strong": "1.05",
-    "maximum": "1.15",
+    "strong": "0.95",
+    "maximum": "1.0",
 }
+QWEN_MULTI_ANGLE_STANDARD_STEPS = 30
+QWEN_MULTI_ANGLE_STANDARD_GUIDANCE = 4.0
+QWEN_MULTI_ANGLE_SAFE_ATTENTION = "sdpa"
 QWEN_MULTI_ANGLE_ALLOWED_ACCELERATOR_PROFILE_IDS = {
     "standard",
     "qwen_edit_2511_lightning_8",
@@ -852,7 +904,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.7.1"
+        self.version = "0.8.0"
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -1317,6 +1369,46 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         return self._status_text(config=config)
 
+    @staticmethod
+    def _qwen21_native_rgba_capability() -> dict[str, Any]:
+        return {
+            "contract_version": QWEN21_NATIVE_RGBA_CONTRACT_VERSION,
+            "modes": [QWEN21_NATIVE_RGBA_MODE],
+            "prompt_policy": QWEN21_NATIVE_RGBA_PROMPT_POLICY,
+            "accelerator_profile_ids": ["standard"],
+            "output_mime_types": ["image/png"],
+            "output_color_modes": ["rgba"],
+            "delivery_resolutions": [
+                "768x768",
+                "1024x1024",
+                "1280x720",
+                "720x1280",
+            ],
+            "max_outputs": MAX_OUTPUTS,
+            "routes": [
+                {
+                    "image_task": "generate",
+                    "reference_mode": "none",
+                    "min_reference_images": 0,
+                    "max_reference_images": 0,
+                },
+                {
+                    "image_task": "edit",
+                    "reference_mode": "primary_image_edit",
+                    "min_reference_images": 1,
+                    "max_reference_images": 1,
+                },
+                {
+                    "image_task": "edit",
+                    "reference_mode": "ordered_reference_images",
+                    "min_reference_images": 1,
+                    "max_reference_images": QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES,
+                },
+            ],
+            "excluded_image_tasks": ["masked_edit", "outpaint"],
+            "alpha_validation": QWEN21_NATIVE_RGBA_ALPHA_VALIDATION,
+        }
+
     def _capabilities(self) -> dict[str, Any]:
         models = []
         for model_id in sorted(ALLOWED_MODEL_TYPES):
@@ -1348,8 +1440,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 model_capabilities["prompt_enhancement_by_worker"] = False
             if model_id == QWEN21_MODEL_ID:
                 model_capabilities["prompt_enhancement_by_worker"] = False
-                model_capabilities["rgba"] = False
+                model_capabilities["rgba"] = bool(QWEN21_NATIVE_RGBA_ADVERTISE)
                 model_capabilities["outpaint"] = True
+                model_capabilities["curated_variation"] = True
             model_limits = {
                 "max_outputs": _image_max_outputs_for_model(model_id),
                 "max_steps": _image_max_steps_for_model(model_id),
@@ -1378,7 +1471,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 }
                 model_limits["dimension_alignment"] = 32
                 model_limits["output_mime_types"] = ["image/png"]
-                model_limits["image_tasks"] = ["generate", "edit", "masked_edit", "outpaint"]
+                model_limits["image_tasks"] = [
+                    "generate",
+                    "edit",
+                    "masked_edit",
+                    "outpaint",
+                    "curated_variation",
+                ]
                 model_limits["masked_edit"] = {
                     "contract_version": QWEN21_MASKED_EDIT_CONTRACT_VERSION,
                     "reference_mode": "primary_image_edit",
@@ -1416,6 +1515,45 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "720x1280",
                     ],
                 }
+                model_limits["curated_variation"] = {
+                    "contract_version": QWEN21_VISUAL_VARIATION_CONTRACT_VERSION,
+                    "recipe_version": QWEN21_VISUAL_VARIATION_RECIPE_VERSION,
+                    "reference_mode": "primary_image_edit",
+                    "max_source_images": QWEN21_VISUAL_VARIATION_MAX_REFERENCE_IMAGES,
+                    "max_supporting_reference_images": QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES,
+                    "max_reference_images": QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES,
+                    "reference_roles": ["source_image", "supporting_reference_image"],
+                    "supporting_reference_purposes": sorted(
+                        QWEN21_VISUAL_VARIATION_REFERENCE_PURPOSES
+                    ),
+                    "reference_background_policies": sorted(
+                        QWEN21_VISUAL_VARIATION_REFERENCE_BACKGROUND_POLICIES
+                    ),
+                    "primary_source_background_removal": False,
+                    "accelerator_profile_ids": ["standard"],
+                    "output_mime_types": ["image/png"],
+                    "delivery_resolutions": [
+                        "768x768",
+                        "1024x1024",
+                        "1280x720",
+                        "720x1280",
+                    ],
+                    "max_outputs": QWEN21_VISUAL_VARIATION_MAX_OUTPUTS,
+                    "modes": [
+                        {
+                            "mode_id": "character_asset",
+                            "output_color_mode": "rgba",
+                            "default_reference_background_policy": "remove_supporting_backgrounds",
+                        },
+                        {
+                            "mode_id": "location_plate",
+                            "output_color_mode": "rgb",
+                            "default_reference_background_policy": "keep_all",
+                        },
+                    ],
+                }
+                if QWEN21_NATIVE_RGBA_ADVERTISE:
+                    model_limits["rgba_output"] = self._qwen21_native_rgba_capability()
             if metadata.get("output_roles"):
                 model_limits["output_roles"] = list(metadata["output_roles"])
             curated_tools = self._curated_tools_for_model(model_id)
@@ -2357,7 +2495,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 },
                 "accelerator_profiles": self._qwen_multi_angle_accelerator_profiles(),
                 "tool_version": QWEN_MULTI_ANGLE_TOOL_VERSION,
-                "recipe_version": QWEN_MULTI_ANGLE_TOOL_VERSION,
+                "recipe_version": QWEN_MULTI_ANGLE_RECIPE_VERSION,
                 "license": QWEN_MULTI_ANGLE_LORA_LICENSE,
             }
         ]
@@ -2792,7 +2930,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 if has_output_count and layer_output_count != output_count:
                     raise ValueError("Qwen Image Layered output.count and generation.layer_output_count must match.")
                 output_count = layer_output_count
-        max_outputs = _image_max_outputs_for_model(model_type)
+        is_qwen21_curated_variation = (
+            model_type == QWEN21_MODEL_ID
+            and str(generation.get("image_task") or "").strip().lower() == "curated_variation"
+        )
+        max_outputs = (
+            QWEN21_VISUAL_VARIATION_MAX_OUTPUTS
+            if is_qwen21_curated_variation
+            else _image_max_outputs_for_model(model_type)
+        )
         if output_count < 1 or output_count > max_outputs:
             raise ValueError(f"Unsupported output count: {output.get('count')}")
         tool_id = str(job.get("tool_id") or generation.get("tool_id") or "").strip()
@@ -2804,7 +2950,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if len(prompt) > prompt_limit:
             raise ValueError(f"Job prompt exceeds {prompt_limit} characters.")
         settings["prompt"] = str(tool_payload["expanded_prompt"] if tool_payload else prompt)
-        if not settings["prompt"]:
+        if not settings["prompt"] and not is_qwen21_curated_variation:
             raise ValueError("Job prompt is required.")
         negative_prompt = str(job.get("negative_prompt") or "").strip()
         if model_type == SENSENOVA_MODEL_ID and negative_prompt:
@@ -2824,9 +2970,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._apply_qwen21_job_settings(settings, job, generation, resolution, negative_prompt)
         accelerator_profile_id = self._apply_accelerator_profile(settings, model_type, generation)
         if model_type == QWEN21_MODEL_ID:
-            self._finalize_qwen21_profile_settings(settings, accelerator_profile_id)
+            if is_qwen21_curated_variation:
+                self._finalize_qwen21_visual_variation_settings(settings, accelerator_profile_id)
+            else:
+                self._finalize_qwen21_profile_settings(settings, accelerator_profile_id)
         if tool_payload:
             self._apply_curated_image_tool_settings(settings, tool_payload["settings"])
+            self._finalize_qwen_multi_angle_recipe(settings, accelerator_profile_id)
         seed = generation.get("seed")
         if seed is not None:
             settings["seed"] = self._coerce_int(seed, 0, 0, 2_147_483_647)
@@ -2855,6 +3005,41 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         settings["multi_prompts_gen_type"] = "FG"
         settings["_midom_prompt_processing_mode"] = "FG"
 
+    @staticmethod
+    def _qwen21_native_rgba_prompt(user_prompt: str) -> str:
+        return (
+            "This is an RGBA image with transparency.\n"
+            f"{str(user_prompt or '').strip()}\n"
+            "The image has an alpha channel and the background is transparent."
+        )
+
+    @classmethod
+    def _qwen21_delivery_crop_details(
+        cls,
+        requested_resolution: str,
+        internal_resolution: str,
+    ) -> dict[str, Any]:
+        requested = cls._parse_resolution_size(requested_resolution)
+        internal = cls._parse_resolution_size(internal_resolution)
+        if requested is None or internal is None:
+            raise ValueError("Qwen Image 2.1 delivery dimensions are missing or invalid.")
+        if internal[0] < requested[0] or internal[1] < requested[1]:
+            raise ValueError("Qwen Image 2.1 internal dimensions cannot be smaller than delivery dimensions.")
+        crop_x = (internal[0] - requested[0]) // 2
+        crop_y = (internal[1] - requested[1]) // 2
+        return {
+            "adapter_id": "qwen21_32px_center_crop" if internal != requested else "none",
+            "applied": internal != requested,
+            "internal_width": int(internal[0]),
+            "internal_height": int(internal[1]),
+            "crop_x": int(crop_x),
+            "crop_y": int(crop_y),
+            "crop_width": int(requested[0]),
+            "crop_height": int(requested[1]),
+            "final_width": int(requested[0]),
+            "final_height": int(requested[1]),
+        }
+
     def _apply_qwen21_job_settings(
         self,
         settings: dict[str, Any],
@@ -2873,7 +3058,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError("Qwen Image 2.1 jobs must use the final Midom prompt; worker prompt enhancement is not supported.")
 
         image_task = str(generation.get("image_task") or "").strip().lower()
+        output_color_mode = str(output.get("color_mode") or "").strip().lower()
+        rgba_contract_version = str(
+            generation.get("transparent_output_contract_version") or ""
+        ).strip()
+        rgba_mode = str(generation.get("transparent_output_mode") or "").strip().lower()
+        has_native_rgba_fields = bool(rgba_contract_version or rgba_mode)
         if image_task == "masked_edit":
+            if has_native_rgba_fields or output_color_mode == "rgba":
+                raise ValueError("Qwen Image 2.1 native RGBA output is not supported for masked_edit.")
             self._apply_qwen21_masked_edit_job_settings(
                 settings,
                 job,
@@ -2883,7 +3076,23 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             )
             return
         if image_task == "outpaint":
+            if has_native_rgba_fields or output_color_mode == "rgba":
+                raise ValueError("Qwen Image 2.1 native RGBA output is not supported for outpaint.")
             self._apply_qwen21_outpaint_job_settings(
+                settings,
+                job,
+                generation,
+                requested_resolution,
+                negative_prompt,
+            )
+            return
+        if image_task == "curated_variation":
+            if has_native_rgba_fields:
+                raise ValueError(
+                    "Qwen Image 2.1 curated variation has its own output contract and must not use "
+                    "transparent_output_contract_version."
+                )
+            self._apply_qwen21_visual_variation_job_settings(
                 settings,
                 job,
                 generation,
@@ -2893,6 +3102,25 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return
         if image_task not in {"", "generate", "edit", "image_edit"}:
             raise ValueError(f"Unsupported Qwen Image 2.1 image_task: {image_task}")
+        if output_color_mode not in {"", "rgb", "rgba"}:
+            raise ValueError(f"Unsupported Qwen Image 2.1 output.color_mode: {output_color_mode}")
+
+        native_rgba_requested = has_native_rgba_fields or output_color_mode == "rgba"
+        if native_rgba_requested:
+            if rgba_contract_version != QWEN21_NATIVE_RGBA_CONTRACT_VERSION:
+                raise ValueError(
+                    "Qwen Image 2.1 native RGBA output requires "
+                    f"transparent_output_contract_version={QWEN21_NATIVE_RGBA_CONTRACT_VERSION!r}."
+                )
+            if rgba_mode != QWEN21_NATIVE_RGBA_MODE:
+                raise ValueError(
+                    "Qwen Image 2.1 native RGBA output requires "
+                    f"transparent_output_mode={QWEN21_NATIVE_RGBA_MODE!r}."
+                )
+            if output_color_mode != "rgba":
+                raise ValueError("Qwen Image 2.1 native RGBA output requires output.color_mode='rgba'.")
+            if image_task not in {"generate", "edit"}:
+                raise ValueError("Qwen Image 2.1 native RGBA output requires image_task='generate' or 'edit'.")
 
         reference_mode = str(generation.get("reference_mode") or "").strip().lower()
         if reference_mode not in QWEN21_REFERENCE_MODES:
@@ -2924,9 +3152,40 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if reference_mode != "none" and reference_count < 1:
             raise ValueError(f"Qwen Image 2.1 reference_mode={reference_mode} requires at least one reference image.")
 
+        if native_rgba_requested:
+            if image_task == "generate":
+                if reference_mode != "none" or reference_count != 0:
+                    raise ValueError(
+                        "Qwen Image 2.1 native RGBA generate requires reference_mode='none' and zero references."
+                    )
+            elif reference_mode == "primary_image_edit":
+                if reference_count != 1:
+                    raise ValueError(
+                        "Qwen Image 2.1 native RGBA primary_image_edit requires exactly one reference image."
+                    )
+                source_sequence, source_input = reference_inputs[0]
+                if source_sequence != 0 or str(source_input.get("role") or "") != "source_image":
+                    raise ValueError(
+                        "Qwen Image 2.1 native RGBA primary_image_edit requires "
+                        "role='source_image' and sequence=0."
+                    )
+            elif reference_mode == "ordered_reference_images":
+                if not 1 <= reference_count <= QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES:
+                    raise ValueError(
+                        "Qwen Image 2.1 native RGBA ordered_reference_images supports one to "
+                        f"{QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES} references; got {reference_count}."
+                    )
+            else:
+                raise ValueError(
+                    "Qwen Image 2.1 native RGBA edit requires reference_mode='primary_image_edit' "
+                    "or 'ordered_reference_images'."
+                )
+
         profile_id = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
         if profile_id not in {"standard", *QWEN21_ACCELERATOR_PROFILE_IDS}:
             raise ValueError(f"Unsupported accelerator_profile_id for {QWEN21_MODEL_ID}: {profile_id}")
+        if native_rgba_requested and profile_id != "standard":
+            raise ValueError("Qwen Image 2.1 native RGBA output supports only accelerator_profile_id='standard'.")
         profile = ACCELERATOR_PROFILE_BY_ID.get(profile_id) if profile_id != "standard" else None
         max_references = int(profile.get("max_reference_images") or QWEN21_MAX_REFERENCE_IMAGES) if profile else QWEN21_MAX_REFERENCE_IMAGES
         if reference_count > max_references:
@@ -2972,6 +3231,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             {
                 "input_id": self._coerce_input_id(item),
                 "sequence": sequence,
+                **({"role": str(item.get("role"))} if item.get("role") else {}),
             }
             for sequence, item in sorted(reference_inputs, key=lambda entry: entry[0])
         ]
@@ -2984,13 +3244,368 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         }[reference_mode]
         settings["custom_settings"] = {
             "qwen21_kv_cache": "Disabled",
-            "rgba": "Disabled",
+            "rgba": "Enabled" if native_rgba_requested else "Disabled",
         }
+        settings["_midom_image_task"] = image_task or "generate"
+        if native_rgba_requested:
+            user_prompt = str(settings.get("prompt") or "").strip()
+            expanded_prompt = self._qwen21_native_rgba_prompt(user_prompt)
+            settings["prompt"] = expanded_prompt
+            settings["_midom_qwen21_native_rgba_contract_version"] = rgba_contract_version
+            settings["_midom_qwen21_native_rgba_mode"] = rgba_mode
+            settings["_midom_qwen21_native_rgba_prompt_policy"] = QWEN21_NATIVE_RGBA_PROMPT_POLICY
+            settings["_midom_qwen21_native_rgba_user_prompt"] = user_prompt
+            settings["_midom_qwen21_native_rgba_expanded_prompt"] = expanded_prompt
+            settings["_midom_qwen21_native_rgba_delivery_crop"] = self._qwen21_delivery_crop_details(
+                requested_resolution,
+                internal_resolution,
+            )
+            settings["_midom_output_color_mode"] = "RGBA"
+            settings["_midom_require_meaningful_alpha"] = True
         self._log(
             "Prepared Qwen Image 2.1 job settings; "
             f"reference_mode={reference_mode!r} reference_count={reference_count} "
             f"profile_id={profile_id!r} requested_resolution={requested_resolution} "
-            f"internal_render_resolution={internal_resolution}."
+            f"internal_render_resolution={internal_resolution} native_rgba={native_rgba_requested}."
+        )
+
+    @staticmethod
+    def _qwen21_visual_variation_text(value: Any, label: str, *, required: bool = False) -> str:
+        text = str(value or "").strip()
+        if required and not text:
+            raise ValueError(f"Qwen Image 2.1 curated variation requires variation.{label}.")
+        if len(text) > QWEN21_VISUAL_VARIATION_MAX_FIELD_CHARS:
+            raise ValueError(
+                f"Qwen Image 2.1 curated variation variation.{label} exceeds "
+                f"{QWEN21_VISUAL_VARIATION_MAX_FIELD_CHARS} characters."
+            )
+        return text
+
+    def _qwen21_visual_variation_prompt(
+        self,
+        variation_mode: str,
+        variation: dict[str, Any],
+        user_notes: str,
+        reference_descriptors: list[dict[str, Any]],
+    ) -> str:
+        camera_view = str(variation["camera_view"]).replace("_", " ")
+        camera_height = str(variation["camera_height"]).replace("_", " ")
+        shot_distance = str(variation["shot_distance"]).replace("_", " ")
+        camera = (
+            f"Camera view: {camera_view}. Camera height: {camera_height}. "
+            f"Framing: {shot_distance}."
+        )
+        if len(reference_descriptors) > 1:
+            reference_parts = [
+                "Reference assignment: <image1> is the authoritative primary source."
+            ]
+            for descriptor in reference_descriptors[1:]:
+                image_number = int(descriptor["sequence"]) + 1
+                purpose = str(descriptor["reference_purpose"]).replace("_", " ")
+                reference_parts.append(
+                    f"<image{image_number}> is a supporting {purpose} reference; use it only for that purpose."
+                )
+            reference_parts.append(
+                "Do not replace the primary source identity or location with a supporting reference."
+            )
+            reference_instruction = " ".join(reference_parts)
+        else:
+            reference_instruction = "Use the supplied image as the authoritative primary source."
+        if variation_mode == "character_asset":
+            details = []
+            for key, label in (
+                ("pose", "Pose"),
+                ("action", "Action"),
+                ("expression", "Expression"),
+                ("gaze", "Gaze"),
+                ("wardrobe", "Wardrobe"),
+                ("accessories", "Accessories"),
+                ("lighting", "Character lighting"),
+            ):
+                value = str(variation.get(key) or "").strip()
+                if value:
+                    details.append(f"{label}: {value}.")
+            prompt_parts = [
+                "Create one production-ready isolated character asset from the reference image.",
+                "Preserve the character's identity, proportions, design, materials, colors, and recognizable details.",
+                reference_instruction,
+                camera,
+                *details,
+                "Render exactly one complete character, with all visible limbs, accessories, and feet intact.",
+                "Do not include a stage, room, scenery, floor, horizon, backdrop, border, text, or cast shadow.",
+                "Output a native RGBA PNG with a genuinely transparent background stored in the alpha channel, not a checkerboard or a white background.",
+                "Keep clean antialiased edges, fine hair and fabric detail, and transparent interior spaces where appropriate.",
+            ]
+        else:
+            details = []
+            for key, label in (
+                ("set_arrangement", "Set arrangement"),
+                ("set_dressing", "Set dressing"),
+                ("props", "Props"),
+                ("lighting", "Lighting"),
+                ("time_of_day", "Time of day"),
+                ("weather", "Weather"),
+                ("atmosphere", "Atmosphere"),
+            ):
+                value = str(variation.get(key) or "").strip()
+                if value:
+                    details.append(f"{label}: {value}.")
+            prompt_parts = [
+                "Create one production-ready location plate variation from the reference image.",
+                "Preserve the identity, architecture, spatial logic, materials, and recognizable set details of the location.",
+                reference_instruction,
+                camera,
+                *details,
+                "Show a complete environment plate with no people, characters, performers, bodies, silhouettes, or crowds.",
+                "Output a fully opaque RGB PNG suitable for later deterministic composition.",
+            ]
+        if user_notes:
+            prompt_parts.append(f"Additional production direction: {user_notes}")
+        return " ".join(prompt_parts)
+
+    def _apply_qwen21_visual_variation_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+        negative_prompt: str,
+    ) -> None:
+        contract_version = str(generation.get("variation_contract_version") or "").strip()
+        if contract_version != QWEN21_VISUAL_VARIATION_CONTRACT_VERSION:
+            raise ValueError(
+                "Qwen Image 2.1 curated variation requires "
+                f"variation_contract_version={QWEN21_VISUAL_VARIATION_CONTRACT_VERSION!r}."
+            )
+        variation_mode = str(generation.get("variation_mode") or "").strip().lower()
+        if variation_mode not in QWEN21_VISUAL_VARIATION_MODES:
+            raise ValueError(f"Unsupported Qwen Image 2.1 variation_mode: {variation_mode or 'missing'}")
+        if negative_prompt:
+            raise ValueError("Qwen Image 2.1 curated variation does not support a negative prompt.")
+        profile_id = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
+        if profile_id != "standard":
+            raise ValueError("Qwen Image 2.1 curated variation supports only accelerator_profile_id='standard'.")
+        raw_recipe_fields = sorted(
+            field
+            for field in {
+                "steps",
+                "guidance",
+                "guidance_scale",
+                "sampler",
+                "sample_solver",
+                "scheduler",
+                "model_mode",
+                "denoising_strength",
+                "activated_loras",
+                "loras_multipliers",
+                "custom_settings",
+            }
+            if generation.get(field) is not None
+        )
+        if raw_recipe_fields:
+            raise ValueError(
+                "Qwen Image 2.1 curated variation does not accept raw recipe fields; "
+                "the Bridge owns the qualification recipe: "
+                + ", ".join(raw_recipe_fields)
+            )
+        options = generation.get("options") or {}
+        if not isinstance(options, dict):
+            raise ValueError("Qwen Image 2.1 curated variation generation.options must be an object.")
+        unknown_options = sorted(set(options) - {"multi_prompts_gen_type"})
+        if unknown_options:
+            raise ValueError(
+                "Qwen Image 2.1 curated variation contains unsupported generation.options fields: "
+                + ", ".join(unknown_options)
+            )
+        reference_mode = str(generation.get("reference_mode") or "primary_image_edit").strip().lower()
+        if reference_mode != "primary_image_edit":
+            raise ValueError("Qwen Image 2.1 curated variation requires reference_mode='primary_image_edit'.")
+        variation = generation.get("variation")
+        if not isinstance(variation, dict):
+            raise ValueError("Qwen Image 2.1 curated variation requires a generation.variation object.")
+        common_fields = {"camera_view", "camera_height", "shot_distance", "prompt_notes"}
+        mode_fields = {
+            "character_asset": {"pose", "action", "expression", "gaze", "wardrobe", "accessories", "lighting"},
+            "location_plate": {"set_arrangement", "set_dressing", "props", "lighting", "time_of_day", "weather", "atmosphere"},
+        }[variation_mode]
+        unknown_fields = sorted(set(variation) - common_fields - mode_fields)
+        if unknown_fields:
+            raise ValueError(
+                "Qwen Image 2.1 curated variation contains unsupported variation fields: "
+                + ", ".join(unknown_fields)
+            )
+        normalized_variation = {
+            key: self._qwen21_visual_variation_text(
+                variation.get(key),
+                key,
+                required=key in {"camera_view", "camera_height", "shot_distance"},
+            )
+            for key in sorted(common_fields | mode_fields)
+            if variation.get(key) is not None or key in {"camera_view", "camera_height", "shot_distance"}
+        }
+        if normalized_variation["camera_view"] not in QWEN21_VISUAL_VARIATION_CAMERA_VIEWS:
+            raise ValueError(
+                "Unsupported Qwen Image 2.1 curated variation camera_view: "
+                f"{normalized_variation['camera_view']}"
+            )
+        if normalized_variation["camera_height"] not in QWEN21_VISUAL_VARIATION_CAMERA_HEIGHTS:
+            raise ValueError(
+                "Unsupported Qwen Image 2.1 curated variation camera_height: "
+                f"{normalized_variation['camera_height']}"
+            )
+        if normalized_variation["shot_distance"] not in QWEN21_VISUAL_VARIATION_SHOT_DISTANCES:
+            raise ValueError(
+                "Unsupported Qwen Image 2.1 curated variation shot_distance: "
+                f"{normalized_variation['shot_distance']}"
+            )
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Job inputs must be a list.")
+        if not 1 <= len(inputs) <= QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES:
+            raise ValueError(
+                "Qwen Image 2.1 curated variation requires one source_image and at most "
+                f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting reference images."
+            )
+        reference_inputs = []
+        for item in inputs:
+            if not isinstance(item, dict):
+                raise ValueError("Qwen Image 2.1 curated variation inputs must be objects.")
+            if str(item.get("kind") or "").strip() != "reference_image":
+                raise ValueError("Qwen Image 2.1 curated variation accepts only reference_image inputs.")
+            try:
+                sequence = int(item.get("sequence"))
+            except (TypeError, ValueError):
+                raise ValueError("Qwen Image 2.1 curated variation reference inputs require integer sequences.")
+            reference_inputs.append((sequence, item))
+        reference_inputs.sort(key=lambda entry: entry[0])
+        sequences = [sequence for sequence, _item in reference_inputs]
+        if sequences != list(range(len(reference_inputs))):
+            raise ValueError(
+                "Qwen Image 2.1 curated variation reference sequences must be unique, contiguous, and begin at zero."
+            )
+        source_input = reference_inputs[0][1]
+        if str(source_input.get("role") or "").strip() != "source_image":
+            raise ValueError("Qwen Image 2.1 curated variation sequence 0 must use role='source_image'.")
+        supporting_inputs = []
+        reference_descriptors = [{
+            "input_id": self._coerce_input_id(source_input),
+            "role": "source_image",
+            "sequence": 0,
+            "reference_purpose": "primary_source",
+        }]
+        for sequence, item in reference_inputs[1:]:
+            if str(item.get("role") or "").strip() != "supporting_reference_image":
+                raise ValueError(
+                    "Qwen Image 2.1 curated variation supporting references require "
+                    "role='supporting_reference_image'."
+                )
+            purpose = str(item.get("reference_purpose") or "").strip().lower()
+            if purpose not in QWEN21_VISUAL_VARIATION_REFERENCE_PURPOSES:
+                raise ValueError(
+                    "Qwen Image 2.1 curated variation supporting references require a supported "
+                    f"reference_purpose; got {purpose or 'missing'}."
+                )
+            supporting_inputs.append(item)
+            reference_descriptors.append({
+                "input_id": self._coerce_input_id(item),
+                "role": "supporting_reference_image",
+                "sequence": sequence,
+                "reference_purpose": purpose,
+            })
+        if len(supporting_inputs) > QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES:
+            raise ValueError(
+                "Qwen Image 2.1 curated variation supports at most "
+                f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting reference images."
+            )
+        default_background_policy = (
+            "remove_supporting_backgrounds" if variation_mode == "character_asset" else "keep_all"
+        )
+        reference_background_policy = str(
+            generation.get("reference_background_policy") or default_background_policy
+        ).strip().lower()
+        if reference_background_policy not in QWEN21_VISUAL_VARIATION_REFERENCE_BACKGROUND_POLICIES:
+            raise ValueError(
+                "Unsupported Qwen Image 2.1 curated variation reference_background_policy: "
+                f"{reference_background_policy or 'missing'}"
+            )
+        output = job.get("output") or {}
+        expected_color_mode = "rgba" if variation_mode == "character_asset" else "rgb"
+        color_mode = str(output.get("color_mode") or "").strip().lower()
+        if color_mode != expected_color_mode:
+            raise ValueError(
+                f"Qwen Image 2.1 {variation_mode} output.color_mode must be {expected_color_mode!r}."
+            )
+        internal_resolution = QWEN21_INTERNAL_RENDER_RESOLUTIONS.get(requested_resolution)
+        if not internal_resolution:
+            raise ValueError(f"Unsupported Qwen Image 2.1 delivery resolution: {requested_resolution}")
+        user_notes = normalized_variation.pop("prompt_notes", "")
+        top_level_notes = str(job.get("prompt") or "").strip()
+        if user_notes and top_level_notes and user_notes != top_level_notes:
+            raise ValueError("Qwen Image 2.1 curated variation prompt notes must be supplied in only one place.")
+        user_notes = user_notes or top_level_notes
+        if len(user_notes) > QWEN21_VISUAL_VARIATION_MAX_FIELD_CHARS:
+            raise ValueError(
+                "Qwen Image 2.1 curated variation prompt notes exceed "
+                f"{QWEN21_VISUAL_VARIATION_MAX_FIELD_CHARS} characters."
+            )
+        expanded_prompt = self._qwen21_visual_variation_prompt(
+            variation_mode,
+            normalized_variation,
+            user_notes,
+            reference_descriptors,
+        )
+        if len(expanded_prompt) > _image_max_prompt_chars_for_model(QWEN21_MODEL_ID):
+            raise ValueError("Qwen Image 2.1 curated variation prompt is too long after Bridge expansion.")
+        settings.update({
+            "prompt": expanded_prompt,
+            "negative_prompt": negative_prompt,
+            "resolution": internal_resolution,
+            "image_mode": 1,
+            "video_prompt_type": "KI",
+            "prompt_enhancer": "",
+            "guidance_phases": 1,
+            "remove_background_images_ref": (
+                1 if reference_background_policy == "remove_supporting_backgrounds" else 0
+            ),
+            "model_mode": 0,
+            "denoising_strength": 1.0,
+            "_midom_image_task": "curated_variation",
+            "_midom_qwen21_reference_mode": "primary_image_edit",
+            "_midom_qwen21_reference_image_count": len(reference_descriptors),
+            "_midom_qwen21_reference_descriptors": reference_descriptors,
+            "_midom_qwen21_reference_inputs": [],
+            "_midom_requested_resolution": requested_resolution,
+            "_midom_internal_render_resolution": internal_resolution,
+            "_midom_final_output_resolution": requested_resolution,
+            "_midom_image_delivery_adapter": (
+                "qwen21_32px_center_crop" if internal_resolution != requested_resolution else ""
+            ),
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": expected_color_mode.upper(),
+            "_midom_require_meaningful_alpha": variation_mode == "character_asset",
+            "_midom_prompt_enhancement_by_worker": False,
+            "_midom_qwen21_requested_profile_id": "standard",
+            "_midom_qwen21_visual_variation_contract_version": contract_version,
+            "_midom_qwen21_visual_variation_recipe_version": QWEN21_VISUAL_VARIATION_RECIPE_VERSION,
+            "_midom_qwen21_visual_variation_mode": variation_mode,
+            "_midom_qwen21_visual_variation_reference_background_policy": reference_background_policy,
+            "_midom_qwen21_visual_variation_intent": dict(normalized_variation),
+            "_midom_qwen21_visual_variation_user_notes": user_notes,
+            "_midom_qwen21_visual_variation_expanded_prompt": expanded_prompt,
+            "image_refs": [],
+            "custom_settings": {
+                "qwen21_kv_cache": "Disabled",
+                "rgba": "Enabled" if variation_mode == "character_asset" else "Disabled",
+            },
+        })
+        self._log(
+            "Prepared Qwen Image 2.1 curated-variation qualification settings; "
+            f"contract_version={contract_version!r} recipe_version={QWEN21_VISUAL_VARIATION_RECIPE_VERSION!r} "
+            f"variation_mode={variation_mode!r} profile_id='standard' "
+            f"references={len(reference_descriptors)} supporting_references={len(supporting_inputs)} "
+            f"reference_background_policy={reference_background_policy!r} "
+            f"requested_resolution={requested_resolution} internal_render_resolution={internal_resolution} "
+            f"output_color_mode={expected_color_mode.upper()}."
         )
 
     @staticmethod
@@ -3376,9 +3991,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
 
     def _finalize_qwen21_profile_settings(self, settings: dict[str, Any], profile_id: str) -> None:
         settings["prompt_enhancer"] = ""
+        native_rgba = bool(settings.get("_midom_qwen21_native_rgba_contract_version"))
+        if native_rgba and profile_id != "standard":
+            raise ValueError("Qwen Image 2.1 native RGBA output supports only accelerator_profile_id='standard'.")
         settings["custom_settings"] = {
             "qwen21_kv_cache": "Disabled",
-            "rgba": "Disabled",
+            "rgba": "Enabled" if native_rgba else "Disabled",
         }
         if profile_id == "standard":
             settings["num_inference_steps"] = 40
@@ -3399,7 +4017,36 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._log(
             "Finalized Qwen Image 2.1 generation profile; "
             f"profile_id={profile_id!r} steps={settings.get('num_inference_steps')} "
-            f"guidance_scale={settings.get('guidance_scale')} sample_solver={settings.get('sample_solver')!r}."
+            f"guidance_scale={settings.get('guidance_scale')} sample_solver={settings.get('sample_solver')!r} "
+            f"native_rgba={native_rgba}."
+        )
+
+    def _finalize_qwen21_visual_variation_settings(
+        self,
+        settings: dict[str, Any],
+        profile_id: str,
+    ) -> None:
+        if profile_id != "standard":
+            raise ValueError("Qwen Image 2.1 curated variation supports only accelerator_profile_id='standard'.")
+        variation_mode = str(settings.get("_midom_qwen21_visual_variation_mode") or "").strip()
+        if variation_mode not in QWEN21_VISUAL_VARIATION_MODES:
+            raise ValueError("Qwen Image 2.1 curated variation mode was not validated.")
+        settings["prompt_enhancer"] = ""
+        settings["num_inference_steps"] = QWEN21_VISUAL_VARIATION_RECIPE_STEPS
+        settings["guidance_scale"] = QWEN21_VISUAL_VARIATION_RECIPE_GUIDANCE
+        settings["sample_solver"] = "default"
+        settings["activated_loras"] = []
+        settings["loras_multipliers"] = ""
+        settings["custom_settings"] = {
+            "qwen21_kv_cache": "Disabled",
+            "rgba": "Enabled" if variation_mode == "character_asset" else "Disabled",
+        }
+        self._log(
+            "Finalized unadvertised Qwen Image 2.1 curated-variation qualification recipe; "
+            f"recipe_version={QWEN21_VISUAL_VARIATION_RECIPE_VERSION!r} "
+            f"variation_mode={variation_mode!r} profile_id={profile_id!r} "
+            f"steps={QWEN21_VISUAL_VARIATION_RECIPE_STEPS} "
+            f"guidance_scale={QWEN21_VISUAL_VARIATION_RECIPE_GUIDANCE} sample_solver='default'."
         )
 
     def _apply_sensenova_job_settings(
@@ -3485,6 +4132,70 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 continue
             settings[key] = value
 
+    def _finalize_qwen_multi_angle_recipe(self, settings: dict[str, Any], profile_id: str) -> None:
+        settings["image_mode"] = 1
+        settings["model_mode"] = 0
+        settings["denoising_strength"] = 1.0
+        settings["prompt_enhancer"] = ""
+        settings["spatial_upsampling"] = ""
+        settings["override_attention"] = QWEN_MULTI_ANGLE_SAFE_ATTENTION
+        settings["_midom_output_mime_type"] = "image/png"
+        settings["_midom_output_color_mode"] = "RGB"
+        if profile_id == "standard":
+            settings["num_inference_steps"] = QWEN_MULTI_ANGLE_STANDARD_STEPS
+            settings["guidance_scale"] = QWEN_MULTI_ANGLE_STANDARD_GUIDANCE
+            settings["sample_solver"] = "default"
+        settings["_midom_curated_tool_recipe_version"] = QWEN_MULTI_ANGLE_RECIPE_VERSION
+        settings["_midom_curated_tool_recipe"] = {
+            "accelerator_profile_id": profile_id,
+            "num_inference_steps": settings.get("num_inference_steps"),
+            "guidance_scale": settings.get("guidance_scale"),
+            "sample_solver": str(settings.get("sample_solver") or "default"),
+            "model_mode": 0,
+            "denoising_strength": 1.0,
+            "attention_mode": QWEN_MULTI_ANGLE_SAFE_ATTENTION,
+            "prompt_enhancement_by_worker": False,
+            "spatial_upsampling": "",
+            "image_output_codec": "png",
+        }
+        self._log(
+            "Finalized curated Qwen multi-angle recipe; "
+            f"recipe_version={QWEN_MULTI_ANGLE_RECIPE_VERSION!r} profile_id={profile_id!r} "
+            f"steps={settings.get('num_inference_steps')} guidance_scale={settings.get('guidance_scale')} "
+            f"sample_solver={settings.get('sample_solver', 'default')!r} "
+            f"denoising_strength={settings.get('denoising_strength')} "
+            f"attention_mode={settings.get('override_attention')!r}."
+        )
+
+    def _begin_qwen_multi_angle_lossless_output(self, api_session, settings: dict[str, Any]):
+        if str(settings.get("_midom_curated_tool_id") or "") != QWEN_MULTI_ANGLE_TOOL_ID:
+            return None
+        runtime = api_session._ensure_runtime()
+        server_config = getattr(runtime.module, "server_config", None)
+        if not isinstance(server_config, dict):
+            raise ValueError("WanGP server configuration is unavailable; cannot enforce lossless Alternate View output.")
+        had_previous = "image_output_codec" in server_config
+        previous = server_config.get("image_output_codec")
+        server_config["image_output_codec"] = "png"
+        self._log(
+            "Temporarily selected lossless WanGP image output for curated Qwen multi-angle generation; "
+            f"previous_codec={previous!r} active_codec='png'."
+        )
+        return server_config, had_previous, previous
+
+    def _restore_qwen_multi_angle_output_codec(self, override_state) -> None:
+        if override_state is None:
+            return
+        server_config, had_previous, previous = override_state
+        if had_previous:
+            server_config["image_output_codec"] = previous
+        else:
+            server_config.pop("image_output_codec", None)
+        self._log(
+            "Restored WanGP image output codec after curated Qwen multi-angle generation; "
+            f"restored_codec={previous!r}."
+        )
+
     @staticmethod
     def _lora_multiplier_items(value: Any, count: int) -> list[str]:
         if count <= 0:
@@ -3534,6 +4245,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         output = job.get("output") or {}
         if not isinstance(output, dict):
             raise ValueError(f"{QWEN_MULTI_ANGLE_TOOL_ID} requires an output object.")
+        output_format = str(output.get("format") or "").strip().lower()
+        if output_format != "png":
+            raise ValueError(
+                f"{QWEN_MULTI_ANGLE_TOOL_ID} output.format must be 'png'; got {output_format or 'missing'}."
+            )
         requested_resolution = self._resolve_job_resolution(job)
         if not requested_resolution:
             raise ValueError(f"{QWEN_MULTI_ANGLE_TOOL_ID} requires explicit output.width and output.height.")
@@ -6103,7 +6819,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 if isinstance(item, dict)
             ]
             metadata["accelerator_profile_id"] = str(settings.get("_midom_accelerator_profile_id") or "standard")
-            metadata["num_inference_steps"] = self._coerce_int(settings.get("num_inference_steps"), 40, 1, MAX_STEPS)
+            metadata["num_inference_steps"] = self._coerce_int(
+                settings.get("num_inference_steps"),
+                40,
+                1,
+                max(MAX_STEPS, QWEN21_VISUAL_VARIATION_RECIPE_STEPS),
+            )
             metadata["guidance_scale"] = self._coerce_float(settings.get("guidance_scale"), 4.0, 0.0, 100.0)
             metadata["sample_solver"] = str(settings.get("sample_solver") or "default")
             metadata["prompt_processing_mode"] = str(settings.get("_midom_prompt_processing_mode") or "FG")
@@ -6112,7 +6833,134 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             metadata["requested_resolution"] = str(settings.get("_midom_requested_resolution") or "")
             metadata["internal_render_resolution"] = str(settings.get("_midom_internal_render_resolution") or settings.get("resolution") or "")
             metadata["final_output_resolution"] = str(settings.get("_midom_final_output_resolution") or settings.get("_midom_requested_resolution") or "")
-            if str(settings.get("_midom_image_task") or "") == "masked_edit":
+            if settings.get("_midom_qwen21_native_rgba_contract_version"):
+                metadata["image_task"] = str(settings.get("_midom_image_task") or "")
+                metadata["native_rgba"] = {
+                    "contract_version": str(
+                        settings.get("_midom_qwen21_native_rgba_contract_version") or ""
+                    ),
+                    "mode": str(settings.get("_midom_qwen21_native_rgba_mode") or ""),
+                    "prompt_policy": str(
+                        settings.get("_midom_qwen21_native_rgba_prompt_policy") or ""
+                    ),
+                    "reference_mode": str(settings.get("_midom_qwen21_reference_mode") or ""),
+                    "references": [dict(item) for item in metadata["ordered_reference_inputs"]],
+                    "user_prompt": str(settings.get("_midom_qwen21_native_rgba_user_prompt") or ""),
+                    "expanded_prompt": str(
+                        settings.get("_midom_qwen21_native_rgba_expanded_prompt") or ""
+                    ),
+                    "requested_dimensions": str(settings.get("_midom_requested_resolution") or ""),
+                    "internal_dimensions": str(settings.get("_midom_internal_render_resolution") or ""),
+                    "final_output_dimensions": str(settings.get("_midom_final_output_resolution") or ""),
+                    "delivery_crop": dict(
+                        settings.get("_midom_qwen21_native_rgba_delivery_crop") or {}
+                    ),
+                    "accelerator_profile_id": str(
+                        settings.get("_midom_accelerator_profile_id") or "standard"
+                    ),
+                    "expanded_bridge_recipe": {
+                        "num_inference_steps": self._coerce_int(
+                            settings.get("num_inference_steps"), 40, 1, MAX_STEPS
+                        ),
+                        "guidance_scale": self._coerce_float(
+                            settings.get("guidance_scale"), 4.0, 0.0, 100.0
+                        ),
+                        "sample_solver": str(settings.get("sample_solver") or "default"),
+                        "rgba": str((settings.get("custom_settings") or {}).get("rgba") or ""),
+                        "output_mime_type": "image/png",
+                        "output_color_mode": "RGBA",
+                    },
+                    "runtime_diagnostics": dict(
+                        settings.get("_midom_qwen21_native_rgba_runtime_diagnostics") or {}
+                    ),
+                    "output_validation": list(
+                        settings.get("_midom_qwen21_native_rgba_output_validation") or []
+                    ),
+                }
+            elif str(settings.get("_midom_image_task") or "") == "curated_variation":
+                variation_mode = str(settings.get("_midom_qwen21_visual_variation_mode") or "")
+                metadata["image_task"] = "curated_variation"
+                metadata["visual_variation"] = {
+                    "contract_version": str(
+                        settings.get("_midom_qwen21_visual_variation_contract_version") or ""
+                    ),
+                    "recipe_version": str(
+                        settings.get("_midom_qwen21_visual_variation_recipe_version") or ""
+                    ),
+                    "qualification_status": "local_gpu_qualification",
+                    "variation_mode": variation_mode,
+                    "structured_intent": dict(
+                        settings.get("_midom_qwen21_visual_variation_intent") or {}
+                    ),
+                    "user_notes": str(
+                        settings.get("_midom_qwen21_visual_variation_user_notes") or ""
+                    ),
+                    "expanded_prompt": str(
+                        settings.get("_midom_qwen21_visual_variation_expanded_prompt") or ""
+                    ),
+                    "references": [
+                        {
+                            "input_id": self._coerce_int(item.get("input_id"), 0, 0, 2_147_483_647),
+                            "role": str(item.get("role") or ""),
+                            "sequence": self._coerce_int(
+                                item.get("sequence"),
+                                0,
+                                0,
+                                QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES - 1,
+                            ),
+                            "reference_purpose": str(item.get("reference_purpose") or ""),
+                            "sha256": str(item.get("sha256") or ""),
+                            "background_removal_applied": bool(
+                                item.get("background_removal_applied")
+                            ),
+                        }
+                        for item in reference_inputs
+                        if isinstance(item, dict)
+                    ],
+                    "reference_background_policy": str(
+                        settings.get(
+                            "_midom_qwen21_visual_variation_reference_background_policy"
+                        )
+                        or ""
+                    ),
+                    "output_color_mode": "RGBA" if variation_mode == "character_asset" else "RGB",
+                    "alpha_required": variation_mode == "character_asset",
+                    "requested_dimensions": str(settings.get("_midom_requested_resolution") or ""),
+                    "internal_dimensions": str(settings.get("_midom_internal_render_resolution") or ""),
+                    "final_output_dimensions": str(settings.get("_midom_final_output_resolution") or ""),
+                    "accelerator_profile_id": str(
+                        settings.get("_midom_accelerator_profile_id") or "standard"
+                    ),
+                    "expanded_bridge_recipe": {
+                        "image_mode": self._coerce_int(settings.get("image_mode"), 1, 0, 2),
+                        "video_prompt_type": str(settings.get("video_prompt_type") or ""),
+                        "remove_background_images_ref": self._coerce_int(
+                            settings.get("remove_background_images_ref"),
+                            0,
+                            0,
+                            1,
+                        ),
+                        "num_inference_steps": self._coerce_int(
+                            settings.get("num_inference_steps"),
+                            QWEN21_VISUAL_VARIATION_RECIPE_STEPS,
+                            1,
+                            QWEN21_VISUAL_VARIATION_RECIPE_STEPS,
+                        ),
+                        "guidance_scale": self._coerce_float(
+                            settings.get("guidance_scale"),
+                            QWEN21_VISUAL_VARIATION_RECIPE_GUIDANCE,
+                            0.0,
+                            100.0,
+                        ),
+                        "sample_solver": str(settings.get("sample_solver") or "default"),
+                        "rgba": str((settings.get("custom_settings") or {}).get("rgba") or "Disabled"),
+                        "output_color_mode": "RGBA" if variation_mode == "character_asset" else "RGB",
+                    },
+                    "output_validation": list(
+                        settings.get("_midom_qwen21_visual_variation_output_validation") or []
+                    ),
+                }
+            elif str(settings.get("_midom_image_task") or "") == "masked_edit":
                 masked_inputs = settings.get("_midom_qwen21_masked_edit_inputs")
                 if not isinstance(masked_inputs, dict):
                     masked_inputs = {}
@@ -6213,7 +7061,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "tool_id": curated_tool_id,
                 "display_name": str(settings.get("_midom_curated_tool_display_name") or ""),
                 "tool_version": str(settings.get("_midom_curated_tool_version") or ""),
-                "recipe_version": str(settings.get("_midom_curated_tool_version") or ""),
+                "recipe_version": str(
+                    settings.get("_midom_curated_tool_recipe_version")
+                    or settings.get("_midom_curated_tool_version")
+                    or ""
+                ),
                 "base_model_id": str(settings.get("_midom_curated_tool_base_model_id") or settings.get("model_type") or ""),
                 "lora_filename": str(settings.get("_midom_curated_tool_lora_filename") or ""),
                 "lora_sha256": str(settings.get("_midom_curated_tool_lora_sha256") or ""),
@@ -6222,6 +7074,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "accelerator_profile_id": str(settings.get("_midom_accelerator_profile_id") or "standard"),
                 "parameters": settings.get("_midom_curated_tool_parameters") if isinstance(settings.get("_midom_curated_tool_parameters"), dict) else {},
                 "expanded_prompt": str(settings.get("_midom_curated_tool_expanded_prompt") or ""),
+                "expanded_recipe": dict(settings.get("_midom_curated_tool_recipe") or {}),
+                "runtime_diagnostics": dict(
+                    settings.get("_midom_curated_tool_runtime_diagnostics") or {}
+                ),
             }
         combined_audio_segment_count = self._coerce_int(settings.get("_midom_combined_audio_segment_count"), 0, 0, 10_000)
         if combined_audio_segment_count > 1:
@@ -7261,7 +8117,28 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 image_task = str(summary.get("image_task") or "").strip().lower()
                 is_masked_edit = image_task == "masked_edit"
                 is_outpaint = image_task == "outpaint"
-                if image_task not in {"", "generate", "edit", "image_edit", "masked_edit", "outpaint"}:
+                is_curated_variation = image_task == "curated_variation"
+                rgba_contract_version = str(
+                    summary.get("transparent_output_contract_version") or ""
+                ).strip()
+                rgba_mode = str(summary.get("transparent_output_mode") or "").strip().lower()
+                output_color_mode = str(
+                    summary.get("output_color_mode") or summary.get("color_mode") or ""
+                ).strip().lower()
+                native_rgba_requested = bool(
+                    rgba_contract_version
+                    or rgba_mode
+                    or (output_color_mode == "rgba" and not is_curated_variation)
+                )
+                if image_task not in {
+                    "",
+                    "generate",
+                    "edit",
+                    "image_edit",
+                    "masked_edit",
+                    "outpaint",
+                    "curated_variation",
+                }:
                     return f"Qwen Image 2.1 unsupported image_task: {image_task}"
                 reference_count_value = summary.get("reference_image_count")
                 reference_count = None
@@ -7286,6 +8163,126 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 accelerator_profile_id = str(
                     summary.get("accelerator_profile_id") or summary.get("speed_profile_id") or "standard"
                 ).strip() or "standard"
+                if native_rgba_requested:
+                    if is_masked_edit or is_outpaint or is_curated_variation:
+                        return f"Qwen Image 2.1 native RGBA output is not supported for image_task={image_task}"
+                    if rgba_contract_version != QWEN21_NATIVE_RGBA_CONTRACT_VERSION:
+                        return (
+                            "Qwen Image 2.1 native RGBA output requires contract version "
+                            f"{QWEN21_NATIVE_RGBA_CONTRACT_VERSION}"
+                        )
+                    if rgba_mode != QWEN21_NATIVE_RGBA_MODE:
+                        return (
+                            "Qwen Image 2.1 native RGBA output requires transparent_output_mode="
+                            f"{QWEN21_NATIVE_RGBA_MODE}"
+                        )
+                    if output_color_mode != "rgba":
+                        return "Qwen Image 2.1 native RGBA output requires output_color_mode=rgba"
+                    if accelerator_profile_id != "standard":
+                        return "Qwen Image 2.1 native RGBA output supports only accelerator_profile_id=standard"
+                    if image_task == "generate":
+                        if reference_mode != "none" or reference_count != 0:
+                            return (
+                                "Qwen Image 2.1 native RGBA generate requires reference_mode=none "
+                                "and reference_image_count=0"
+                            )
+                    elif image_task == "edit":
+                        if reference_mode == "primary_image_edit":
+                            if reference_count != 1:
+                                return (
+                                    "Qwen Image 2.1 native RGBA primary_image_edit requires "
+                                    "reference_image_count=1"
+                                )
+                        elif reference_mode == "ordered_reference_images":
+                            if reference_count is None or not (
+                                1 <= reference_count <= QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES
+                            ):
+                                return (
+                                    "Qwen Image 2.1 native RGBA ordered_reference_images supports one to "
+                                    f"{QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES} references"
+                                )
+                        else:
+                            return (
+                                "Qwen Image 2.1 native RGBA edit requires reference_mode="
+                                "primary_image_edit or ordered_reference_images"
+                            )
+                    else:
+                        return "Qwen Image 2.1 native RGBA output requires image_task=generate or edit"
+                if is_curated_variation:
+                    contract_version = str(summary.get("variation_contract_version") or "").strip()
+                    if contract_version != QWEN21_VISUAL_VARIATION_CONTRACT_VERSION:
+                        return (
+                            "Qwen Image 2.1 curated variation requires contract version "
+                            f"{QWEN21_VISUAL_VARIATION_CONTRACT_VERSION}"
+                        )
+                    variation_mode = str(summary.get("variation_mode") or "").strip().lower()
+                    if variation_mode not in QWEN21_VISUAL_VARIATION_MODES:
+                        return f"Qwen Image 2.1 curated variation unsupported variation_mode: {variation_mode or 'missing'}"
+                    if reference_mode and reference_mode != "primary_image_edit":
+                        return "Qwen Image 2.1 curated variation requires reference_mode=primary_image_edit"
+                    if reference_count is None or not (
+                        1 <= reference_count <= QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES
+                    ):
+                        return (
+                            "Qwen Image 2.1 curated variation requires one source and at most "
+                            f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting references; "
+                            f"got {reference_count if reference_count is not None else 'missing'}"
+                        )
+                    source_image_count = self._coerce_int(
+                        summary.get("source_image_count"),
+                        1,
+                        0,
+                        100,
+                    )
+                    if source_image_count != 1:
+                        return (
+                            "Qwen Image 2.1 curated variation requires source_image_count=1; "
+                            f"got {source_image_count}"
+                        )
+                    supporting_reference_count = self._coerce_int(
+                        summary.get("supporting_reference_image_count"),
+                        max(0, reference_count - 1),
+                        0,
+                        100,
+                    )
+                    if supporting_reference_count != reference_count - 1:
+                        return (
+                            "Qwen Image 2.1 curated variation supporting-reference count does not match "
+                            f"reference_image_count; got {supporting_reference_count} supporting and "
+                            f"{reference_count} total"
+                        )
+                    if supporting_reference_count > QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES:
+                        return (
+                            "Qwen Image 2.1 curated variation supports at most "
+                            f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting references"
+                        )
+                    mask_image_count = self._coerce_int(summary.get("mask_image_count"), 0, 0, 100)
+                    if mask_image_count:
+                        return f"Qwen Image 2.1 curated variation does not support mask images; got {mask_image_count}"
+                    default_background_policy = (
+                        "remove_supporting_backgrounds"
+                        if variation_mode == "character_asset"
+                        else "keep_all"
+                    )
+                    background_policy = str(
+                        summary.get("reference_background_policy") or default_background_policy
+                    ).strip().lower()
+                    if background_policy not in QWEN21_VISUAL_VARIATION_REFERENCE_BACKGROUND_POLICIES:
+                        return (
+                            "Qwen Image 2.1 curated variation unsupported "
+                            f"reference_background_policy: {background_policy or 'missing'}"
+                        )
+                    if bool(summary.get("has_negative_prompt")):
+                        return "Qwen Image 2.1 curated variation does not support a negative prompt"
+                    if accelerator_profile_id != "standard":
+                        return "Qwen Image 2.1 curated variation supports only accelerator_profile_id=standard"
+                    expected_color_mode = "rgba" if variation_mode == "character_asset" else "rgb"
+                    color_mode = str(summary.get("output_color_mode") or summary.get("color_mode") or "").strip().lower()
+                    if color_mode and color_mode != expected_color_mode:
+                        return (
+                            f"Qwen Image 2.1 {variation_mode} requires output color mode "
+                            f"{expected_color_mode}; got {color_mode}"
+                        )
                 if is_outpaint:
                     contract_version = str(summary.get("outpaint_contract_version") or "").strip()
                     if contract_version != QWEN21_OUTPAINT_CONTRACT_VERSION:
@@ -7400,7 +8397,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 output_count = int(summary.get("output_count") or 1)
             except (TypeError, ValueError):
                 return f"invalid output_count: {summary.get('output_count')}"
-            max_outputs = _image_max_outputs_for_model(model_id) if media_type == "image" else 1
+            is_qwen21_curated_variation = (
+                media_type == "image"
+                and model_id == QWEN21_MODEL_ID
+                and str(summary.get("image_task") or "").strip().lower() == "curated_variation"
+            )
+            max_outputs = (
+                QWEN21_VISUAL_VARIATION_MAX_OUTPUTS
+                if is_qwen21_curated_variation
+                else (_image_max_outputs_for_model(model_id) if media_type == "image" else 1)
+            )
             if output_count < 1 or output_count > max_outputs:
                 return f"unsupported output_count: {output_count}"
             if media_type == "audio":
@@ -8050,13 +9056,28 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "Submitting job to background WanGP generation session; "
                     f"job_id={job_id} media_type={media_type} output_count={output_count}."
                 )
-                job_handle = self._submit_wangp_job(self._get_generation_session(), settings, output_count, callbacks)
-                self._active_job = job_handle
+                api_session = self._get_generation_session()
+                output_codec_override = self._begin_qwen_multi_angle_lossless_output(api_session, settings)
                 try:
-                    result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
+                    job_handle = self._submit_wangp_job(api_session, settings, output_count, callbacks)
+                    self._active_job = job_handle
+                    try:
+                        result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
+                    finally:
+                        if self._active_job is job_handle:
+                            self._active_job = None
+                    self._capture_qwen_multi_angle_runtime_diagnostics(
+                        api_session,
+                        settings,
+                        phase="post_generation",
+                    )
+                    self._capture_qwen21_native_rgba_runtime_diagnostics(
+                        api_session,
+                        settings,
+                        phase="post_generation",
+                    )
                 finally:
-                    if self._active_job is job_handle:
-                        self._active_job = None
+                    self._restore_qwen_multi_angle_output_codec(output_codec_override)
                 self._log(
                     "WanGP job returned; "
                     f"job_id={job_id} success={getattr(result, 'success', None)} "
@@ -8120,6 +9141,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     )
                     return
                 artifacts = []
+                variation_output_validation = []
+                if str(settings.get("_midom_image_task") or "") == "curated_variation":
+                    settings["_midom_qwen21_visual_variation_output_validation"] = variation_output_validation
+                elif settings.get("_midom_qwen21_native_rgba_contract_version"):
+                    settings["_midom_qwen21_native_rgba_output_validation"] = variation_output_validation
                 for artifact_index, file_path in enumerate(generated_files[:output_count]):
                     if media_type == "audio":
                         artifacts.append(self._upload_audio_artifact(connection, job_id, file_path, artifact_index, settings, temp_dir))
@@ -8136,6 +9162,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                 "center_crop_downscale" if settings.get("_midom_image_delivery_adapter") else "resize",
                                 settings.get("_midom_output_mime_type"),
                                 settings.get("_midom_output_color_mode"),
+                                bool(settings.get("_midom_require_meaningful_alpha")),
+                                variation_output_validation,
+                                (
+                                    settings.get("_midom_internal_render_resolution")
+                                    if settings.get("_midom_require_meaningful_alpha")
+                                    else None
+                                ),
                             )
                         )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
@@ -12095,8 +13128,230 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             parts.append(text)
         return " ".join(parts)
 
+    def _capture_qwen21_native_rgba_runtime_diagnostics(
+        self,
+        api_session,
+        settings: dict[str, Any],
+        *,
+        phase: str,
+    ) -> None:
+        if not settings.get("_midom_qwen21_native_rgba_contract_version"):
+            return
+        public_settings = {
+            key: value for key, value in settings.items() if not str(key).startswith("_midom_")
+        }
+        try:
+            merged = api_session.merge_settings_with_defaults(public_settings)
+        except Exception:
+            merged = dict(public_settings)
+        diagnostics: dict[str, Any] = {
+            "phase": phase,
+            "model_id": str(merged.get("model_type") or settings.get("model_type") or ""),
+            "contract_version": QWEN21_NATIVE_RGBA_CONTRACT_VERSION,
+            "accelerator_profile_id": str(
+                settings.get("_midom_accelerator_profile_id") or "standard"
+            ),
+            "num_inference_steps": merged.get("num_inference_steps"),
+            "guidance_scale": merged.get("guidance_scale"),
+            "sample_solver": str(merged.get("sample_solver") or "default"),
+            "rgba_setting": str((merged.get("custom_settings") or {}).get("rgba") or ""),
+            "vae_checkpoint": "qwen_image_21/qwen_image_21_vae.safetensors",
+        }
+        try:
+            runtime = api_session._ensure_runtime()
+            module = runtime.module
+            server_config = getattr(module, "server_config", {})
+            model_id = diagnostics["model_id"]
+            quantization = str(getattr(module, "transformer_quantization", "") or "")
+            dtype_policy = str(getattr(module, "transformer_dtype_policy", "") or "")
+            model_filename = module.get_model_filename(model_id, quantization, dtype_policy)
+            diagnostics.update({
+                "model_checkpoint": str(model_filename).rsplit("/", 1)[-1],
+                "transformer_quantization": quantization or "none",
+                "transformer_dtype_policy": dtype_policy or "default",
+                "configured_attention_mode": str(getattr(module, "attention_mode", "auto") or "auto"),
+                "auto_attention_mode": str(module.get_auto_attention()),
+                "vae_precision_setting": str(server_config.get("vae_precision", "16")),
+                "vae_tiling_setting": server_config.get("vae_config", 0),
+                "image_output_codec": str(server_config.get("image_output_codec", "jpeg_95")),
+                "torch_version": str(getattr(module.torch, "__version__", "unknown")),
+                "cuda_version": str(getattr(module.torch.version, "cuda", "unknown")),
+            })
+            try:
+                local_checkpoint = module.fl.get_local_model_filename(model_filename)
+                if local_checkpoint:
+                    diagnostics["model_checkpoint_local"] = Path(str(local_checkpoint)).name
+                    diagnostics["model_checkpoint_bytes"] = Path(str(local_checkpoint)).stat().st_size
+            except Exception:
+                pass
+            try:
+                vae_path = module.fl.locate_file(
+                    "qwen_image_21/qwen_image_21_vae.safetensors",
+                    error_if_none=False,
+                )
+                if vae_path:
+                    diagnostics["vae_checkpoint_local"] = Path(str(vae_path)).name
+                    diagnostics["vae_checkpoint_bytes"] = Path(str(vae_path)).stat().st_size
+            except Exception:
+                pass
+            loaded_model = getattr(module, "wan_model", None)
+            if loaded_model is not None and str(getattr(module, "transformer_type", "") or "") == model_id:
+                transformer = getattr(loaded_model, "transformer", None)
+                vae = getattr(loaded_model, "vae", None)
+                if transformer is not None:
+                    try:
+                        diagnostics["loaded_transformer_dtype"] = str(next(transformer.parameters()).dtype)
+                    except Exception:
+                        diagnostics["loaded_transformer_dtype"] = "unavailable"
+                if vae is not None:
+                    try:
+                        diagnostics["loaded_vae_dtype"] = str(next(vae.parameters()).dtype)
+                    except Exception:
+                        diagnostics["loaded_vae_dtype"] = "unavailable"
+                    diagnostics["loaded_vae_tiling"] = bool(getattr(vae, "use_tiling", False))
+        except Exception as exc:
+            diagnostics["runtime_introspection_error"] = str(exc)
+        settings["_midom_qwen21_native_rgba_runtime_diagnostics"] = diagnostics
+        self._log(
+            "Qwen Image 2.1 native RGBA runtime diagnostics; "
+            + json.dumps(diagnostics, sort_keys=True, separators=(",", ":")),
+            force=True,
+        )
+
+    def _capture_qwen_multi_angle_runtime_diagnostics(
+        self,
+        api_session,
+        settings: dict[str, Any],
+        *,
+        phase: str,
+    ) -> None:
+        if str(settings.get("_midom_curated_tool_id") or "") != QWEN_MULTI_ANGLE_TOOL_ID:
+            return
+        public_settings = {
+            key: value for key, value in settings.items() if not str(key).startswith("_midom_")
+        }
+        try:
+            merged = api_session.merge_settings_with_defaults(public_settings)
+        except Exception as exc:
+            merged = dict(public_settings)
+            self._log(
+                "Unable to merge WanGP defaults for curated Qwen runtime diagnostics; "
+                f"phase={phase!r} error={exc!r}.",
+                force=True,
+            )
+        diagnostics: dict[str, Any] = {
+            "phase": phase,
+            "model_id": str(merged.get("model_type") or settings.get("model_type") or ""),
+            "recipe_version": QWEN_MULTI_ANGLE_RECIPE_VERSION,
+            "accelerator_profile_id": str(settings.get("_midom_accelerator_profile_id") or "standard"),
+            "view_change_strength": str(
+                (settings.get("_midom_curated_tool_parameters") or {}).get("view_change_strength") or ""
+            ),
+            "lora_multiplier": str(settings.get("_midom_curated_tool_lora_multiplier") or ""),
+            "num_inference_steps": merged.get("num_inference_steps"),
+            "guidance_scale": merged.get("guidance_scale"),
+            "sample_solver": str(merged.get("sample_solver") or "default"),
+            "model_mode": merged.get("model_mode"),
+            "denoising_strength": merged.get("denoising_strength"),
+            "attention_mode": str(merged.get("override_attention") or "auto"),
+            "vae_checkpoint": "qwen_vae.safetensors",
+            "prompt_enhancer": str(merged.get("prompt_enhancer") or "disabled"),
+            "spatial_upsampling": str(merged.get("spatial_upsampling") or "disabled"),
+        }
+        try:
+            runtime = api_session._ensure_runtime()
+            module = runtime.module
+            server_config = getattr(module, "server_config", {})
+            model_id = diagnostics["model_id"]
+            quantization = str(getattr(module, "transformer_quantization", "") or "")
+            dtype_policy = str(getattr(module, "transformer_dtype_policy", "") or "")
+            model_filename = module.get_model_filename(
+                model_id,
+                quantization,
+                dtype_policy,
+            )
+            diagnostics.update(
+                {
+                    "model_checkpoint": str(model_filename).rsplit("/", 1)[-1],
+                    "transformer_quantization": quantization or "none",
+                    "transformer_dtype_policy": dtype_policy or "default",
+                    "configured_attention_mode": str(getattr(module, "attention_mode", "auto") or "auto"),
+                    "auto_attention_mode": str(module.get_auto_attention()),
+                    "vae_precision_setting": str(server_config.get("vae_precision", "16")),
+                    "vae_tiling_setting": server_config.get("vae_config", 0),
+                    "image_output_codec": str(server_config.get("image_output_codec", "jpeg_95")),
+                    "torch_version": str(getattr(module.torch, "__version__", "unknown")),
+                    "cuda_version": str(getattr(module.torch.version, "cuda", "unknown")),
+                }
+            )
+            try:
+                local_checkpoint = module.fl.get_local_model_filename(model_filename)
+                if local_checkpoint:
+                    diagnostics["model_checkpoint_local"] = Path(str(local_checkpoint)).name
+                    diagnostics["model_checkpoint_bytes"] = Path(str(local_checkpoint)).stat().st_size
+            except Exception:
+                pass
+            try:
+                vae_path = module.fl.locate_file("qwen_vae.safetensors", error_if_none=False)
+                if vae_path:
+                    diagnostics["vae_checkpoint_local"] = Path(str(vae_path)).name
+                    diagnostics["vae_checkpoint_bytes"] = Path(str(vae_path)).stat().st_size
+            except Exception:
+                pass
+            loaded_model = getattr(module, "wan_model", None)
+            loaded_model_id = str(getattr(module, "transformer_type", "") or "")
+            if loaded_model is not None and loaded_model_id == model_id:
+                diagnostics["loaded_model_id"] = loaded_model_id
+                transformer = getattr(loaded_model, "transformer", None)
+                vae = getattr(loaded_model, "vae", None)
+                if transformer is not None:
+                    try:
+                        diagnostics["loaded_transformer_dtype"] = str(next(transformer.parameters()).dtype)
+                    except Exception:
+                        diagnostics["loaded_transformer_dtype"] = "unavailable"
+                if vae is not None:
+                    try:
+                        diagnostics["loaded_vae_dtype"] = str(next(vae.parameters()).dtype)
+                    except Exception:
+                        diagnostics["loaded_vae_dtype"] = "unavailable"
+                    diagnostics["loaded_vae_tiling"] = bool(getattr(vae, "use_tiling", False))
+                    diagnostics["loaded_vae_tile_minimum"] = int(
+                        getattr(vae, "tile_latent_min_width", 0) or 0
+                    )
+            try:
+                from importlib.metadata import PackageNotFoundError, version
+
+                for package_name, metadata_key in (
+                    ("triton", "triton_version"),
+                    ("sageattention", "sageattention_version"),
+                ):
+                    try:
+                        diagnostics[metadata_key] = version(package_name)
+                    except PackageNotFoundError:
+                        diagnostics[metadata_key] = "not_installed"
+            except Exception:
+                pass
+        except Exception as exc:
+            diagnostics["runtime_introspection_error"] = str(exc)
+        settings["_midom_curated_tool_runtime_diagnostics"] = diagnostics
+        self._log(
+            "Curated Qwen multi-angle runtime diagnostics; "
+            + json.dumps(diagnostics, sort_keys=True, separators=(",", ":")),
+            force=True,
+        )
+
     def _submit_wangp_job(self, api_session, settings: dict[str, Any], output_count: int, callbacks):
         self._assert_ltx_control_video_submission_integrity(settings)
+        self._capture_qwen21_native_rgba_runtime_diagnostics(
+            api_session,
+            settings,
+            phase="pre_submit",
+        )
+        self._capture_qwen_multi_angle_runtime_diagnostics(
+            api_session,
+            settings,
+            phase="pre_submit",
+        )
         if str(settings.get("_midom_media_type") or "") == "audio":
             self._log(
                 "WanGP audio submit settings; "
@@ -13042,6 +14297,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "control_mode": control_mode,
                 "role": str(item.get("role") or "").strip(),
                 **({"sequence": int(item["sequence"])} if model_id == QWEN21_MODEL_ID and kind == "reference_image" else {}),
+                **({
+                    "reference_purpose": str(item.get("reference_purpose") or "").strip().lower(),
+                } if model_id == QWEN21_MODEL_ID and kind == "reference_image" else {}),
             })
             self._log(
                 f"Downloaded input; job_id={job_id} input_id={input_id} "
@@ -14411,6 +15669,78 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if control_inputs:
                 raise ValueError("Qwen Image 2.1 first-pass jobs do not support control_image inputs.")
             qwen21_image_task = str(settings.get("_midom_image_task") or "").strip().lower()
+            if qwen21_image_task == "curated_variation":
+                ordered_references = sorted(
+                    [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
+                    key=lambda item: int(item.get("sequence", -1)),
+                )
+                expected_descriptors = settings.get("_midom_qwen21_reference_descriptors") or []
+                if not 1 <= len(ordered_references) <= QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES:
+                    raise ValueError(
+                        "Qwen Image 2.1 curated variation requires one downloaded source image and at most "
+                        f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting references."
+                    )
+                if len(ordered_references) != len(expected_descriptors):
+                    raise ValueError(
+                        "Downloaded Qwen Image 2.1 curated-variation reference count does not match the validated claim."
+                    )
+                if mask_inputs:
+                    raise ValueError("Qwen Image 2.1 curated variation does not accept mask inputs.")
+                source_input = ordered_references[0]
+                if str(source_input.get("role") or "") != "source_image":
+                    raise ValueError("Qwen Image 2.1 curated variation input role must be source_image.")
+                if int(source_input.get("sequence", -1)) != 0:
+                    raise ValueError("Qwen Image 2.1 curated variation source_image requires sequence=0.")
+                reference_provenance = []
+                for index, (downloaded, descriptor) in enumerate(
+                    zip(ordered_references, expected_descriptors)
+                ):
+                    expected_role = "source_image" if index == 0 else "supporting_reference_image"
+                    if int(downloaded.get("sequence", -1)) != index:
+                        raise ValueError(
+                            "Downloaded Qwen Image 2.1 curated-variation references are not contiguous."
+                        )
+                    if str(downloaded.get("role") or "") != expected_role:
+                        raise ValueError(
+                            "Downloaded Qwen Image 2.1 curated-variation reference role does not match its sequence."
+                        )
+                    if int(downloaded.get("input_id") or 0) != int(descriptor.get("input_id") or 0):
+                        raise ValueError(
+                            "Downloaded Qwen Image 2.1 curated-variation reference does not match the validated claim."
+                        )
+                    expected_purpose = str(descriptor.get("reference_purpose") or "")
+                    downloaded_purpose = str(downloaded.get("reference_purpose") or "") or (
+                        "primary_source" if index == 0 else ""
+                    )
+                    if downloaded_purpose != expected_purpose:
+                        raise ValueError(
+                            "Downloaded Qwen Image 2.1 curated-variation reference purpose does not match the validated claim."
+                        )
+                    reference_provenance.append({
+                        "input_id": int(downloaded["input_id"]),
+                        "role": expected_role,
+                        "sequence": index,
+                        "reference_purpose": expected_purpose,
+                        "sha256": str(downloaded.get("sha256") or ""),
+                        "background_removal_applied": bool(
+                            index > 0
+                            and settings.get("_midom_qwen21_visual_variation_reference_background_policy")
+                            == "remove_supporting_backgrounds"
+                        ),
+                    })
+                settings["image_mode"] = 1
+                settings["image_refs"] = [item["path"] for item in ordered_references]
+                settings["video_prompt_type"] = "KI"
+                settings["_midom_qwen21_reference_inputs"] = reference_provenance
+                self._log(
+                    "Applied Qwen Image 2.1 curated-variation reference inputs; "
+                    f"variation_mode={settings.get('_midom_qwen21_visual_variation_mode')!r} "
+                    f"ordered_inputs={[(item['input_id'], item['sequence'], item.get('reference_purpose')) for item in reference_provenance]} "
+                    f"reference_background_policy={settings.get('_midom_qwen21_visual_variation_reference_background_policy')!r} "
+                    f"remove_background_images_ref={settings.get('remove_background_images_ref')} "
+                    "video_prompt_type='KI'."
+                )
+                return
             if qwen21_image_task == "outpaint":
                 ordered_references = sorted(
                     [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
@@ -14596,6 +15926,28 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "Downloaded Qwen Image 2.1 reference count does not match the validated claim; "
                     f"expected {expected_count}, got {len(ordered_paths)}."
                 )
+            native_rgba = bool(settings.get("_midom_qwen21_native_rgba_contract_version"))
+            expected_descriptors = settings.get("_midom_qwen21_reference_descriptors") or []
+            if native_rgba:
+                if len(expected_descriptors) != len(ordered_inputs):
+                    raise ValueError(
+                        "Downloaded Qwen Image 2.1 native RGBA reference count does not match the validated claim."
+                    )
+                for downloaded, descriptor in zip(ordered_inputs, expected_descriptors):
+                    if int(downloaded.get("input_id") or 0) != int(descriptor.get("input_id") or 0):
+                        raise ValueError(
+                            "Downloaded Qwen Image 2.1 native RGBA reference does not match the validated claim."
+                        )
+                    if int(downloaded.get("sequence", -1)) != int(descriptor.get("sequence", -2)):
+                        raise ValueError(
+                            "Downloaded Qwen Image 2.1 native RGBA reference sequence does not match the validated claim."
+                        )
+                    expected_role = str(descriptor.get("role") or "")
+                    downloaded_role = str(downloaded.get("role") or "")
+                    if expected_role and downloaded_role != expected_role:
+                        raise ValueError(
+                            "Downloaded Qwen Image 2.1 native RGBA reference role does not match the validated claim."
+                        )
             if reference_mode == "none":
                 if ordered_paths:
                     raise ValueError("Qwen Image 2.1 reference_mode=none cannot include reference images.")
@@ -14618,6 +15970,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "input_id": int(item["input_id"]),
                     "sequence": int(item["sequence"]),
                     "sha256": str(item.get("sha256") or ""),
+                    **({"role": str(item.get("role"))} if item.get("role") else {}),
                 }
                 for item in ordered_inputs
             ]
@@ -15080,6 +16433,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         normalization_mode: str = "resize",
         required_mime_type: Any = None,
         required_color_mode: Any = None,
+        require_meaningful_alpha: bool = False,
+        output_validation: Optional[list[dict[str, Any]]] = None,
+        allowed_normalization_source_resolution: Any = None,
     ) -> dict[str, Any]:
         self._ensure_job_flow_enabled()
         path = Path(file_path)
@@ -15108,8 +16464,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 decoded_color_mode = str(image.mode or "").upper()
         except Exception as exc:
             raise ValueError(f"Generated artifact could not be decoded as an image: {exc}")
+        source_width = int(decoded_width)
+        source_height = int(decoded_height)
+        source_format = decoded_format
+        source_color_mode = decoded_color_mode
         expected_size = self._parse_resolution_size(expected_resolution)
         dimensions_mismatch = expected_size is not None and (decoded_width, decoded_height) != expected_size
+        if require_meaningful_alpha and dimensions_mismatch:
+            allowed_source_size = self._parse_resolution_size(allowed_normalization_source_resolution)
+            if allowed_source_size is None or (decoded_width, decoded_height) != allowed_source_size:
+                raise ValueError(
+                    "Qwen Image 2.1 native alpha output dimensions do not match the requested delivery "
+                    "or aligned internal dimensions; "
+                    f"got {decoded_width}x{decoded_height}, expected delivery={expected_resolution!r}, "
+                    f"internal={allowed_normalization_source_resolution!r}."
+                )
         mime_mismatch = bool(required_mime and mime_type != required_mime)
         required_color = str(required_color_mode or "").strip().upper()
         if required_color and required_color not in {"RGB", "RGBA"}:
@@ -15144,9 +16513,67 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 decoded_color_mode = str(image.mode or "").upper()
         if file_size > MAX_IMAGE_BYTES:
             raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
+        alpha_validation = None
+        if require_meaningful_alpha:
+            if decoded_color_mode != "RGBA" or mime_type != "image/png" or decoded_format != "PNG":
+                raise ValueError(
+                    "Qwen Image 2.1 native alpha output must be a decoded RGBA PNG."
+                )
+            with Image.open(path) as image:
+                rgba = image.convert("RGBA")
+                alpha = rgba.getchannel("A")
+                minimum_alpha, maximum_alpha = alpha.getextrema()
+                histogram = alpha.histogram()
+                transparent_pixels = int(histogram[0])
+                opaque_pixels = int(histogram[255])
+                partial_pixels = int(sum(histogram[1:255]))
+                total_pixels = int(rgba.width * rgba.height)
+            if minimum_alpha != 0 or maximum_alpha != 255 or transparent_pixels <= 0 or opaque_pixels <= 0:
+                raise ValueError(
+                    "Qwen Image 2.1 output did not produce meaningful native alpha; "
+                    f"alpha_range={minimum_alpha}-{maximum_alpha} transparent_pixels={transparent_pixels} "
+                    f"opaque_pixels={opaque_pixels}."
+                )
+            alpha_validation = {
+                "artifact_index": int(artifact_index),
+                "source_decoded_format": source_format,
+                "source_color_mode": source_color_mode,
+                "source_width": source_width,
+                "source_height": source_height,
+                "decoded_format": decoded_format,
+                "color_mode": decoded_color_mode,
+                "width": int(decoded_width),
+                "height": int(decoded_height),
+                "alpha_min": int(minimum_alpha),
+                "alpha_max": int(maximum_alpha),
+                "zero_alpha_pixel_count": transparent_pixels,
+                "transparent_pixel_count": transparent_pixels,
+                "partial_alpha_pixel_count": partial_pixels,
+                "opaque_pixel_count": opaque_pixels,
+                "total_pixel_count": total_pixels,
+                "zero_alpha_fraction": transparent_pixels / total_pixels,
+                "partial_alpha_fraction": partial_pixels / total_pixels,
+                "opaque_alpha_fraction": opaque_pixels / total_pixels,
+                "normalization_applied": normalized_temp_path is not None,
+                "normalization_mode": normalization_mode if normalized_temp_path is not None else "none",
+                "native_alpha_validation": "passed",
+            }
+        elif output_validation is not None:
+            alpha_validation = {
+                "artifact_index": int(artifact_index),
+                "decoded_format": decoded_format,
+                "color_mode": decoded_color_mode,
+                "width": int(decoded_width),
+                "height": int(decoded_height),
+                "native_alpha_validation": "not_required",
+            }
         with path.open("rb") as reader:
             data = reader.read()
         sha256 = hashlib.sha256(data).hexdigest()
+        if alpha_validation is not None:
+            alpha_validation["final_sha256"] = sha256
+        if output_validation is not None and alpha_validation is not None:
+            output_validation.append(alpha_validation)
         self._log(
             f"Uploading artifact; job_id={job_id} artifact_index={artifact_index} "
             f"filename={path.name!r} mime_type={mime_type} decoded_format={decoded_format!r} "
