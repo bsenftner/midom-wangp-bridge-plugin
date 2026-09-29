@@ -904,7 +904,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.8.0"
+        self.version = "0.8.1"
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -4194,6 +4194,47 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._log(
             "Restored WanGP image output codec after curated Qwen multi-angle generation; "
             f"restored_codec={previous!r}."
+        )
+
+    def _begin_ace_step15_int8_backend_compatibility(self, api_session, settings: dict[str, Any]):
+        if str(settings.get("model_type") or "").strip() != ACE_STEP15_WANGP_MODEL_TYPE:
+            return None
+        runtime = api_session._ensure_runtime()
+        module = runtime.module
+        quantization = str(getattr(module, "transformer_quantization", "") or "").strip().lower()
+        int8_backend = getattr(module, "int8_backend", None)
+        kitchen_enabled = getattr(int8_backend, "kitchen_enabled", None)
+        if quantization != "int8" or not callable(kitchen_enabled) or not kitchen_enabled():
+            return None
+        apply_setting = getattr(module, "apply_int8_kernel_setting", None)
+        if not callable(apply_setting):
+            raise ValueError(
+                "WanGP cannot apply the ACE-Step 1.5 INT8 compatibility backend for this job."
+            )
+        previous_selection = str(getattr(module, "int8_kernels", "auto") or "auto").strip().lower()
+        apply_setting("disabled")
+        self._log(
+            "Temporarily selected the PyTorch INT8 backend for ACE-Step 1.5 compatibility; "
+            f"previous_backend_setting={previous_selection!r} transformer_quantization='int8'."
+        )
+        return module, previous_selection
+
+    def _restore_ace_step15_int8_backend(self, override_state) -> None:
+        if override_state is None:
+            return
+        module, previous_selection = override_state
+        try:
+            module.apply_int8_kernel_setting(previous_selection)
+        except Exception as exc:
+            self._log(
+                "Unable to restore WanGP INT8 backend after ACE-Step 1.5 generation; "
+                f"requested_backend_setting={previous_selection!r} error={exc!r}.",
+                force=True,
+            )
+            return
+        self._log(
+            "Restored WanGP INT8 backend after ACE-Step 1.5 generation; "
+            f"restored_backend_setting={previous_selection!r}."
         )
 
     @staticmethod
@@ -9058,6 +9099,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 )
                 api_session = self._get_generation_session()
                 output_codec_override = self._begin_qwen_multi_angle_lossless_output(api_session, settings)
+                ace_step_int8_backend_override = self._begin_ace_step15_int8_backend_compatibility(
+                    api_session,
+                    settings,
+                )
                 try:
                     job_handle = self._submit_wangp_job(api_session, settings, output_count, callbacks)
                     self._active_job = job_handle
@@ -9077,6 +9122,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         phase="post_generation",
                     )
                 finally:
+                    self._restore_ace_step15_int8_backend(ace_step_int8_backend_override)
                     self._restore_qwen_multi_angle_output_codec(output_codec_override)
                 self._log(
                     "WanGP job returned; "

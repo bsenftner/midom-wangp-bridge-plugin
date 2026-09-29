@@ -247,6 +247,7 @@ Curated image resolutions include:
 - Midom prompt maps to WanGP music caption / `alt_prompt`.
 - Lyrics are fixed to `[Instrumental]` for the first pass.
 - Optional controls include BPM, key scale, time signature, and language when reported by the worker.
+- When an INT8 ACE-Step checkpoint is running through Comfy Kitchen, the Bridge temporarily uses WanGP's PyTorch INT8 backend for that job to accommodate ACE-Step layers whose dimensions are unsupported by the accelerated GEMM kernel. The previous INT8 backend is restored when generation finishes; BF16 and non-Comfy-Kitchen configurations are unchanged.
 
 Audio output is truthful per worker:
 
