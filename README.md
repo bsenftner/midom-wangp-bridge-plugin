@@ -296,6 +296,14 @@ Audio output is truthful per worker:
   - `standard`
   - `omninft_rl_lora_sync` / Better Audio-Video Sync, reported only when the local OmniNFT RL-LoRA is installed.
 
+LTX prompt-generated soundtrack generation:
+
+- The Bridge implements fixed-duration start-image generation with native LTX prompt-generated audio for both LTX model IDs.
+- This route uses `audio_video_mode=prompt_generated_audio`, `duration_mode=fixed_seconds`, an explicit duration from 1 through 20 seconds, `audio_prompt_type=""`, and no audio or control-video guide.
+- Generated MP4 output must contain a real audio stream aligned with the video and must not be digitally silent.
+- Both `ltx2_22B_1_1` and `ltx2_25_22B_distilled` advertise `prompt_generated_audio=true`, allowing Midom to offer fixed-duration generation without a supplied soundtrack.
+- Windows FFprobe and FFmpeg diagnostics are decoded as UTF-8 with replacement for malformed metadata bytes, preventing non-ASCII output metadata from causing a false missing-stream failure.
+
 LTX control-video mode:
 
 - Supported model ids:

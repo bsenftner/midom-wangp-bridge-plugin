@@ -72,6 +72,8 @@ CHATTERBOX_MAX_PROMPT_CHARS_PER_SPLIT = 300
 MAX_LONGCAT_VIDEO_DURATION_SECONDS = 20
 MAX_LTX_VIDEO_DURATION_SECONDS = 20
 LTX_CONTROL_VIDEO_DURATION_MODE = "fit_to_control_video_audio_max_20"
+LTX_PROMPT_GENERATED_AUDIO_MODE = "prompt_generated_audio"
+LTX_FIXED_DURATION_MODE = "fixed_seconds"
 LTX_CONTROL_VIDEO_MODES = {
     "human_motion": "PVG",
     "human_motion_aligned": "OVG",
@@ -904,7 +906,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.8.1"
+        self.version = "0.8.2"
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -2552,6 +2554,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         }
 
     def _ltx_video_capability(self, model_id: str, display_name: str) -> dict[str, Any]:
+        duration_modes = [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE, LTX_FIXED_DURATION_MODE]
         return {
             "model_id": model_id,
             "family": "ltx2",
@@ -2563,7 +2566,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "audio_conditioned_video": True,
                 "audio_guided_video": True,
                 "driving_audio_guided": True,
-                "prompt_generated_audio": False,
+                "prompt_generated_audio": True,
                 "reference_voice_video": False,
                 "control_video": True,
                 "control_video_audio": True,
@@ -2571,7 +2574,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "control_video_portrait": True,
                 "separate_driving_audio_with_control_video": True,
                 "control_video_modes": list(LTX_CONTROL_VIDEO_MODES.keys()),
-                "duration_modes": [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE],
+                "duration_modes": duration_modes,
                 "end_image": True,
                 "ending_image_target": True,
                 "image_to_video": False,
@@ -2588,10 +2591,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "input_mime_types": sorted(ALLOWED_VIDEO_INPUT_MIME_TYPES),
                 "output_mime_types": sorted(ALLOWED_VIDEO_OUTPUT_MIME_TYPES),
                 "prompt_modes": ["plain"],
-                "duration_modes": [LTX_DURATION_MODE, LTX_CONTROL_VIDEO_DURATION_MODE],
+                "duration_modes": duration_modes,
                 "default_duration_mode": LTX_DURATION_MODE,
                 "required_input_kinds": ["start_image", "driving_audio"],
                 "optional_input_kinds": ["end_image"],
+                "prompt_generated_audio_required_input_kinds": ["start_image"],
+                "prompt_generated_audio_optional_input_kinds": ["end_image"],
+                "prompt_generated_audio_duration_modes": [LTX_FIXED_DURATION_MODE],
                 "control_video_required_input_kinds": ["start_image", "control_video"],
                 "control_video_optional_input_kinds": ["driving_audio"],
                 "max_end_images": 1,
@@ -6138,18 +6144,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if video_task != "audio_conditioned_video":
             raise ValueError(f"Unsupported LTX video_task: {video_task}")
         audio_video_mode = str(generation.get("audio_video_mode") or "").strip().lower()
-        if audio_video_mode != "driving_audio_guided":
+        if audio_video_mode not in {"driving_audio_guided", LTX_PROMPT_GENERATED_AUDIO_MODE}:
             raise ValueError(f"Unsupported LTX audio_video_mode: {audio_video_mode}")
+        is_prompt_generated_audio = audio_video_mode == LTX_PROMPT_GENERATED_AUDIO_MODE
         speed_profile_id = str(generation.get("speed_profile_id") or "standard").strip() or "standard"
         if speed_profile_id != "standard":
             raise ValueError(f"Unsupported LTX speed_profile_id: {speed_profile_id}")
         prompt_mode = str(generation.get("prompt_mode") or "plain").strip().lower()
         if prompt_mode != "plain":
             raise ValueError(f"Unsupported LTX prompt_mode: {prompt_mode}")
-        duration_mode = str(generation.get("duration_mode") or LTX_DURATION_MODE).strip().lower()
-        if duration_mode != LTX_DURATION_MODE:
+        expected_duration_mode = LTX_FIXED_DURATION_MODE if is_prompt_generated_audio else LTX_DURATION_MODE
+        duration_mode = str(generation.get("duration_mode") or expected_duration_mode).strip().lower()
+        if duration_mode != expected_duration_mode:
             raise ValueError(f"Unsupported LTX duration_mode: {duration_mode}")
         video_sync_profile_id = str(generation.get("video_sync_profile_id") or "standard").strip() or "standard"
+        if is_prompt_generated_audio and video_sync_profile_id != "standard":
+            raise ValueError("LTX prompt-generated audio supports only video_sync_profile_id='standard'.")
         output = job.get("output") or {}
         if not isinstance(output, dict):
             raise ValueError("LTX video job output must be a JSON object.")
@@ -6168,9 +6178,30 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if not prompt:
             raise ValueError("LTX prompt is required.")
         duration_value = generation.get("duration_seconds")
-        if duration_value is None:
-            duration_value = output.get("max_duration_seconds")
-        duration_seconds = self._coerce_int(duration_value, 5, 1, MAX_LTX_VIDEO_DURATION_SECONDS)
+        if is_prompt_generated_audio:
+            if isinstance(duration_value, bool) or duration_value is None:
+                raise ValueError("LTX prompt-generated audio requires explicit generation.duration_seconds.")
+            try:
+                duration_number = float(duration_value)
+                duration_seconds = int(duration_number)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("LTX prompt-generated audio duration_seconds must be an integer from 1 through 20.")
+            if duration_number != duration_seconds or not 1 <= duration_seconds <= MAX_LTX_VIDEO_DURATION_SECONDS:
+                raise ValueError("LTX prompt-generated audio duration_seconds must be an integer from 1 through 20.")
+            max_duration_value = output.get("max_duration_seconds")
+            if max_duration_value is not None:
+                try:
+                    declared_max_duration = float(max_duration_value)
+                except (TypeError, ValueError, OverflowError):
+                    raise ValueError("LTX prompt-generated audio output.max_duration_seconds must be numeric when provided.")
+                if declared_max_duration < duration_seconds:
+                    raise ValueError(
+                        "LTX prompt-generated audio output.max_duration_seconds must be at least generation.duration_seconds."
+                    )
+        else:
+            if duration_value is None:
+                duration_value = output.get("max_duration_seconds")
+            duration_seconds = self._coerce_int(duration_value, 5, 1, MAX_LTX_VIDEO_DURATION_SECONDS)
         resolution = self._resolve_video_resolution(output, model_type)
         video_length = self._ltx_video_length_for_duration(duration_seconds)
         inputs = job.get("inputs") or []
@@ -6181,13 +6212,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"LTX video job requires exactly one start_image input; got {start_image_count}.")
         if end_image_count > 1:
             raise ValueError(f"LTX video job supports at most one end_image input; got {end_image_count}.")
-        if driving_audio_count != 1:
+        required_driving_audio_count = 0 if is_prompt_generated_audio else 1
+        if driving_audio_count != required_driving_audio_count:
+            if is_prompt_generated_audio:
+                raise ValueError(
+                    "LTX prompt-generated audio must not include driving_audio inputs; "
+                    f"got {driving_audio_count}."
+                )
             raise ValueError(f"LTX video job requires exactly one driving_audio input; got {driving_audio_count}.")
         for item in inputs:
             if not isinstance(item, dict):
                 continue
             kind = str(item.get("kind") or "").strip()
-            if kind not in {"start_image", "end_image", "driving_audio"}:
+            allowed_kinds = {"start_image", "end_image"}
+            if not is_prompt_generated_audio:
+                allowed_kinds.add("driving_audio")
+            if kind not in allowed_kinds:
                 raise ValueError(f"Unsupported LTX video input kind: {kind}")
         settings = {
             "model_type": model_type,
@@ -6197,7 +6237,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "image_mode": 0,
             "image_prompt_type": "SE" if end_image_count else "S",
             "video_prompt_type": "",
-            "audio_prompt_type": "A",
+            "audio_prompt_type": "" if is_prompt_generated_audio else "A",
             "video_length": video_length,
             "duration_seconds": duration_seconds,
             "num_inference_steps": 8,
@@ -6233,6 +6273,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_speed_profile_id": speed_profile_id,
             "_midom_prompt_mode": prompt_mode,
             "_midom_duration_mode": duration_mode,
+            "_midom_requires_generated_audio": is_prompt_generated_audio,
         }
         self._apply_ltx_delivery_adapter(settings)
         self._apply_ltx_video_sync_profile(settings, video_sync_profile_id)
@@ -7138,6 +7179,23 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             metadata["video_delivery_adapter"] = str(settings.get("_midom_ltx_delivery_adapter") or "")
             metadata["requested_resolution"] = str(settings.get("_midom_requested_resolution") or "")
             metadata["internal_render_resolution"] = str(settings.get("_midom_ltx_internal_resolution") or settings.get("resolution") or "")
+        if bool(settings.get("_midom_requires_generated_audio")):
+            metadata["prompt_generated_audio"] = {
+                "mode": LTX_PROMPT_GENERATED_AUDIO_MODE,
+                "duration_mode": LTX_FIXED_DURATION_MODE,
+                "requested_duration_seconds": self._coerce_int(
+                    settings.get("duration_seconds"),
+                    0,
+                    0,
+                    MAX_LTX_VIDEO_DURATION_SECONDS,
+                ),
+                "audio_prompt_type": str(settings.get("audio_prompt_type") or ""),
+                "audio_guide_supplied": bool(settings.get("audio_guide")),
+                "video_guide_supplied": bool(settings.get("video_guide")),
+                "output_validation": list(
+                    settings.get("_midom_ltx_prompt_generated_audio_output_validation") or []
+                ),
+            }
         if str(settings.get("_midom_video_task") or "").strip().lower() == "control_video_guided_video":
             metadata["control_video_input_id"] = self._coerce_int(settings.get("_midom_control_video_input_id"), 0, 0, 2_147_483_647)
             metadata["control_video_source_sha256"] = str(settings.get("_midom_control_video_source_sha256") or "")
@@ -8559,13 +8617,35 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             return f"unsupported control_video_mode: {control_video_mode}"
                     else:
                         audio_video_mode = str(summary.get("audio_video_mode") or "driving_audio_guided").strip().lower()
-                        if audio_video_mode != "driving_audio_guided":
+                        if audio_video_mode not in {"driving_audio_guided", LTX_PROMPT_GENERATED_AUDIO_MODE}:
                             return f"unsupported audio_video_mode: {audio_video_mode}"
-                        duration_mode = str(summary.get("duration_mode") or LTX_DURATION_MODE).strip().lower()
-                        if duration_mode != LTX_DURATION_MODE:
+                        expected_duration_mode = (
+                            LTX_FIXED_DURATION_MODE
+                            if audio_video_mode == LTX_PROMPT_GENERATED_AUDIO_MODE
+                            else LTX_DURATION_MODE
+                        )
+                        duration_mode = str(summary.get("duration_mode") or expected_duration_mode).strip().lower()
+                        if duration_mode != expected_duration_mode:
                             return f"unsupported duration_mode: {duration_mode}"
+                        if audio_video_mode == LTX_PROMPT_GENERATED_AUDIO_MODE:
+                            raw_duration = summary.get("duration_seconds")
+                            if isinstance(raw_duration, bool) or raw_duration is None:
+                                return "prompt-generated audio requires duration_seconds"
+                            try:
+                                duration_number = float(raw_duration)
+                                duration_seconds = int(duration_number)
+                            except (TypeError, ValueError, OverflowError):
+                                return f"unsupported duration_seconds: {raw_duration}"
+                            if duration_number != duration_seconds or not 1 <= duration_seconds <= MAX_LTX_VIDEO_DURATION_SECONDS:
+                                return f"unsupported duration_seconds: {raw_duration}"
                     video_sync_profile_id = str(summary.get("video_sync_profile_id") or "standard").strip() or "standard"
                     if video_sync_profile_id not in {"standard", LTX_VIDEO_SYNC_OMNINFT_PROFILE_ID}:
+                        return f"unsupported video_sync_profile_id: {video_sync_profile_id}"
+                    if (
+                        video_task == "audio_conditioned_video"
+                        and audio_video_mode == LTX_PROMPT_GENERATED_AUDIO_MODE
+                        and video_sync_profile_id != "standard"
+                    ):
                         return f"unsupported video_sync_profile_id: {video_sync_profile_id}"
                 elif model_id == SVI_VIDEO_MODEL_ID:
                     video_task = str(summary.get("video_task") or "cinematic_i2v").strip().lower()
@@ -8583,7 +8663,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 if model_id in LTX_VIDEO_MODEL_IDS:
                     video_task = str(summary.get("video_task") or "audio_conditioned_video").strip().lower()
                     is_control_video_job = video_task == "control_video_guided_video"
-                    input_audio_count = self._coerce_int(summary.get("input_audio_count"), 0 if is_control_video_job else 1, 0, 10)
+                    audio_video_mode = str(
+                        summary.get("audio_video_mode")
+                        or ("control_video_audio_guided" if is_control_video_job else "driving_audio_guided")
+                    ).strip().lower()
+                    is_prompt_generated_audio = (
+                        not is_control_video_job and audio_video_mode == LTX_PROMPT_GENERATED_AUDIO_MODE
+                    )
+                    default_audio_count = 0 if is_control_video_job or is_prompt_generated_audio else 1
+                    input_audio_count = self._coerce_int(summary.get("input_audio_count"), default_audio_count, 0, 10)
                     # LTX candidate summaries may include aggregate image counts that are not as precise as
                     # the claimed input descriptors. Trust explicit start_image_count when present, then let
                     # the post-claim validator enforce the exact start_image/driving_audio contract.
@@ -8601,6 +8689,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         if control_video_count != 1:
                             return f"unsupported control_video_count: {control_video_count}"
                         if input_audio_count not in {0, 1}:
+                            return f"unsupported input_audio_count: {input_audio_count}"
+                    elif is_prompt_generated_audio:
+                        control_video_count = self._coerce_int(summary.get("control_video_count"), 0, 0, 10)
+                        if control_video_count != 0:
+                            return f"unsupported control_video_count: {control_video_count}"
+                        if input_audio_count != 0:
                             return f"unsupported input_audio_count: {input_audio_count}"
                     elif input_audio_count != 1:
                         return f"unsupported input_audio_count: {input_audio_count}"
@@ -13388,6 +13482,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
 
     def _submit_wangp_job(self, api_session, settings: dict[str, Any], output_count: int, callbacks):
         self._assert_ltx_control_video_submission_integrity(settings)
+        self._assert_ltx_prompt_generated_audio_submission_integrity(settings)
         self._capture_qwen21_native_rgba_runtime_diagnostics(
             api_session,
             settings,
@@ -13507,6 +13602,37 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             tasks.append(task)
         self._log(f"Using WanGP submit_manifest for {len(tasks)} outputs.")
         return api_session.submit_manifest(tasks, callbacks=callbacks)
+
+    def _assert_ltx_prompt_generated_audio_submission_integrity(self, settings: dict[str, Any]) -> None:
+        if not bool(settings.get("_midom_requires_generated_audio")):
+            return
+        if str(settings.get("model_type") or "").strip() not in LTX_VIDEO_MODEL_IDS:
+            raise ValueError("Prompt-generated soundtrack submission must use a supported LTX model.")
+        if str(settings.get("_midom_video_task") or "").strip().lower() != "audio_conditioned_video":
+            raise ValueError("LTX prompt-generated soundtrack submission has an invalid video_task.")
+        if str(settings.get("_midom_audio_video_mode") or "").strip().lower() != LTX_PROMPT_GENERATED_AUDIO_MODE:
+            raise ValueError("LTX prompt-generated soundtrack submission has an invalid audio_video_mode.")
+        if str(settings.get("_midom_duration_mode") or "").strip().lower() != LTX_FIXED_DURATION_MODE:
+            raise ValueError("LTX prompt-generated soundtrack submission has an invalid duration_mode.")
+        if str(settings.get("audio_prompt_type") or "") != "":
+            raise ValueError("LTX prompt-generated soundtrack submission requires an empty audio_prompt_type.")
+        if settings.get("audio_guide") is not None or settings.get("audio_guide2") is not None:
+            raise ValueError("LTX prompt-generated soundtrack submission must not include an audio guide.")
+        if settings.get("video_guide") is not None:
+            raise ValueError("LTX prompt-generated soundtrack submission must not include a control-video guide.")
+        image_start = settings.get("image_start") or []
+        image_end = settings.get("image_end") or []
+        if not isinstance(image_start, list) or len(image_start) != 1:
+            raise ValueError("LTX prompt-generated soundtrack submission requires exactly one prepared start image.")
+        if not isinstance(image_end, list) or len(image_end) > 1:
+            raise ValueError("LTX prompt-generated soundtrack submission supports at most one prepared end image.")
+        self._log(
+            "Verified LTX prompt-generated soundtrack submission contract; "
+            f"job_id={self._active_job_id} model_type={settings.get('model_type')!r} "
+            f"duration_seconds={settings.get('duration_seconds')} video_length={settings.get('video_length')} "
+            f"image_prompt_type={settings.get('image_prompt_type')!r} audio_prompt_type='' "
+            f"audio_guide=None video_guide=None."
+        )
 
     def _assert_ltx_control_video_submission_integrity(self, settings: dict[str, Any]) -> None:
         if str(settings.get("_midom_media_type") or "").strip().lower() != "video":
@@ -14035,7 +14161,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "json",
             str(path),
         ]
-        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=30)
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
         if completed.returncode != 0:
             stderr = str(completed.stderr or completed.stdout or "").strip()
             raise ValueError(f"Could not inspect Event source video metadata: {stderr}")
@@ -14584,12 +14718,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_type = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
         generation = job.get("generation") or {}
         video_task = str(generation.get("video_task") or "").strip().lower() if isinstance(generation, dict) else ""
+        audio_video_mode = str(generation.get("audio_video_mode") or "").strip().lower() if isinstance(generation, dict) else ""
         is_ltx_control_video = model_type in LTX_VIDEO_MODEL_IDS and video_task == "control_video_guided_video"
+        is_ltx_prompt_generated_audio = (
+            model_type in LTX_VIDEO_MODEL_IDS
+            and video_task == "audio_conditioned_video"
+            and audio_video_mode == LTX_PROMPT_GENERATED_AUDIO_MODE
+        )
         if model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID:
             required_image_kind = "start_image"
         else:
             required_image_kind = "reference_image"
-        requires_driving_audio = model_type != SVI_VIDEO_MODEL_ID and not is_ltx_control_video
+        requires_driving_audio = (
+            model_type != SVI_VIDEO_MODEL_ID
+            and not is_ltx_control_video
+            and not is_ltx_prompt_generated_audio
+        )
         optional_driving_audio = is_ltx_control_video
         requires_control_video = is_ltx_control_video
         model_label = "SVI" if model_type == SVI_VIDEO_MODEL_ID else ("LTX" if model_type in LTX_VIDEO_MODEL_IDS else "LongCat")
@@ -15633,8 +15777,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     raise ValueError(f"LTX video job requires exactly one start_image input; got {len(start_image_inputs)}.")
                 if len(end_image_inputs) > 1:
                     raise ValueError(f"LTX video job supports at most one end_image input; got {len(end_image_inputs)}.")
-                if len(driving_audio_inputs) != 1:
+                is_prompt_generated_audio = (
+                    settings.get("_midom_audio_video_mode") == LTX_PROMPT_GENERATED_AUDIO_MODE
+                )
+                if is_prompt_generated_audio and driving_audio_inputs:
+                    raise ValueError(
+                        "LTX prompt-generated audio must not include driving_audio inputs; "
+                        f"got {len(driving_audio_inputs)}."
+                    )
+                if not is_prompt_generated_audio and len(driving_audio_inputs) != 1:
                     raise ValueError(f"LTX video job requires exactly one driving_audio input; got {len(driving_audio_inputs)}.")
+                if control_video_inputs:
+                    raise ValueError(f"LTX video job does not support control_video inputs; got {len(control_video_inputs)}.")
                 requested_size = self._ltx_requested_size(settings)
                 internal_size = self._ltx_internal_size(settings)
                 start_path = Path(start_image_inputs[0]["path"])
@@ -15665,17 +15819,19 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     )
                 settings["image_start"] = [overscan_start_path]
                 settings["image_end"] = [overscan_end_path] if overscan_end_path else None
-                settings["audio_guide"] = driving_audio_inputs[0]["path"]
+                settings["video_guide"] = None
+                settings["audio_guide"] = None if is_prompt_generated_audio else driving_audio_inputs[0]["path"]
                 settings["audio_guide2"] = None
                 settings["image_prompt_type"] = "SE" if end_image_inputs else "S"
                 settings["video_prompt_type"] = ""
-                settings["audio_prompt_type"] = "A"
+                settings["audio_prompt_type"] = "" if is_prompt_generated_audio else "A"
                 self._log(
                     "Applied LTX video inputs to WanGP settings; "
                     f"model_id={model_type} "
                     f"image_start={Path(overscan_start_path).name!r} "
                     f"image_end={(Path(overscan_end_path).name if overscan_end_path else None)!r} "
-                    f"audio_guide={Path(driving_audio_inputs[0]['path']).name!r} "
+                    f"audio_source={'prompt_generated' if is_prompt_generated_audio else 'driving_audio'} "
+                    f"audio_guide={(Path(driving_audio_inputs[0]['path']).name if driving_audio_inputs else None)!r} "
                     f"requested_size={requested_size[0]}x{requested_size[1]} "
                     f"internal_size={internal_size[0]}x{internal_size[1]} "
                     f"image_prompt_type={settings.get('image_prompt_type')!r} "
@@ -16860,6 +17016,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         expected_size = self._parse_resolution_size(settings.get("_midom_requested_resolution") or settings.get("resolution"))
         if expected_size is not None:
             self._validate_generated_video_resolution(path, expected_size, job_id, artifact_index)
+        if bool(settings.get("_midom_requires_generated_audio")):
+            validation = self._validate_ltx_prompt_generated_audio_output(
+                path,
+                self._coerce_int(settings.get("duration_seconds"), 0, 0, MAX_LTX_VIDEO_DURATION_SECONDS),
+                job_id,
+                artifact_index,
+            )
+            validations = settings.setdefault("_midom_ltx_prompt_generated_audio_output_validation", [])
+            if isinstance(validations, list):
+                validations.append(validation)
         sha256 = hashlib.sha256(data).hexdigest()
         self._log(
             f"Uploading video artifact; job_id={job_id} artifact_index={artifact_index} "
@@ -16898,6 +17064,89 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "file_id": int(payload.get("file_id")),
             "artifact_index": int(payload.get("artifact_index", artifact_index)),
         }
+
+    def _validate_ltx_prompt_generated_audio_output(
+        self,
+        path: Path,
+        expected_duration_seconds: int,
+        job_id: int,
+        artifact_index: int,
+    ) -> dict[str, Any]:
+        metadata = self._probe_event_video_metadata(path)
+        if not metadata.get("has_audio"):
+            raise ValueError("LTX prompt-generated soundtrack output does not contain an audio stream.")
+        audio_duration = float(metadata.get("audio_duration_seconds") or 0.0)
+        video_duration = float(metadata.get("duration_seconds") or 0.0)
+        if audio_duration <= 0:
+            raise ValueError("LTX prompt-generated soundtrack output audio duration could not be read.")
+        if expected_duration_seconds > 0:
+            tolerance = 0.75
+            if abs(video_duration - float(expected_duration_seconds)) > tolerance:
+                raise ValueError(
+                    "LTX prompt-generated soundtrack output duration does not match the requested fixed duration; "
+                    f"requested={expected_duration_seconds}s actual={video_duration:.3f}s tolerance={tolerance:.2f}s."
+                )
+            if abs(audio_duration - video_duration) > tolerance:
+                raise ValueError(
+                    "LTX prompt-generated soundtrack audio is not aligned with the generated video; "
+                    f"video={video_duration:.3f}s audio={audio_duration:.3f}s tolerance={tolerance:.2f}s."
+                )
+        command = [
+            self._ffmpeg_binary(),
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ]
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        if completed.returncode != 0:
+            stderr = str(completed.stderr or completed.stdout or "").strip()
+            raise ValueError(f"Could not inspect LTX prompt-generated soundtrack signal: {stderr}")
+        diagnostic_text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
+        match = re.search(r"max_volume:\s*(-?inf|[-+]?\d+(?:\.\d+)?)\s*dB", diagnostic_text, re.IGNORECASE)
+        if not match:
+            raise ValueError("LTX prompt-generated soundtrack signal level could not be read.")
+        max_volume_text = match.group(1).lower()
+        if "inf" in max_volume_text:
+            raise ValueError("LTX prompt-generated soundtrack output is digitally silent.")
+        max_volume_db = float(max_volume_text)
+        if max_volume_db <= -90.0:
+            raise ValueError(
+                "LTX prompt-generated soundtrack output is effectively silent; "
+                f"max_volume={max_volume_db:.1f} dB."
+            )
+        validation = {
+            "artifact_index": int(artifact_index),
+            "has_audio_stream": True,
+            "video_duration_seconds": round(video_duration, 6),
+            "audio_duration_seconds": round(audio_duration, 6),
+            "audio_codec": str(metadata.get("audio_codec") or ""),
+            "max_volume_db": max_volume_db,
+            "silence_threshold_db": -90.0,
+            "verification_result": "passed",
+        }
+        self._log(
+            "Validated LTX prompt-generated soundtrack output; "
+            f"job_id={job_id} artifact_index={artifact_index} filename={path.name!r} "
+            f"video_duration={video_duration:.3f}s audio_duration={audio_duration:.3f}s "
+            f"audio_codec={validation['audio_codec']!r} max_volume={max_volume_db:.1f}dB."
+        )
+        return validation
 
     @staticmethod
     def _looks_like_mp4(data: bytes) -> bool:
