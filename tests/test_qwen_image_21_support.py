@@ -205,6 +205,13 @@ def test_qwen21_capability_reports_first_pass_contract():
     assert capability["limits"]["max_reference_images"] == 10
     assert capability["limits"]["output_mime_types"] == ["image/png"]
     assert capability["limits"]["internal_render_resolutions"]["1280x720"] == "1280x736"
+    scene_contracts = capability["limits"]["scene_integration_contracts"]
+    assert [item["contract_version"] for item in scene_contracts] == [
+        "qwen21_scene_integration_v1",
+        "qwen21_scene_integration_v2",
+    ]
+    assert capability["limits"]["scene_integration"] == scene_contracts[0]
+    assert scene_contracts[1]["profiles"][0]["profile_id"] == "production_flattened_matte_v1"
     masked_edit = capability["limits"]["masked_edit"]
     assert masked_edit["contract_version"] == "qwen21_masked_edit_v1"
     assert "max_reference_images" not in masked_edit
@@ -219,6 +226,8 @@ def test_qwen21_capability_reports_first_pass_contract():
         "masked_edit",
         "outpaint",
         "curated_variation",
+        "scene_integration",
+        "atmosphere_overlay",
     ]
     outpaint = capability["limits"]["outpaint"]
     assert outpaint == {

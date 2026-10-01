@@ -178,6 +178,24 @@ QWEN21_MASKED_EDIT_METHODS = {
 }
 QWEN21_MASKED_EDIT_STRENGTH = "balanced"
 QWEN21_MASKED_EDIT_MAX_SUPPORTING_REFERENCE_IMAGES = 1
+QWEN21_SCENE_INTEGRATION_CONTRACT_VERSION = "qwen21_scene_integration_v1"
+QWEN21_SCENE_INTEGRATION_DRAFT_PROFILE_ID = "draft_v1"
+QWEN21_SCENE_INTEGRATION_PRODUCTION_PROFILE_ID = "production_v1"
+QWEN21_SCENE_INTEGRATION_DRAFT_MODE = "full_scene"
+QWEN21_SCENE_INTEGRATION_PRODUCTION_MODE = "edge_matte"
+QWEN21_SCENE_INTEGRATION_V2_CONTRACT_VERSION = "qwen21_scene_integration_v2"
+QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_PROFILE_ID = "production_flattened_matte_v1"
+QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_MODE = "visible_edge_matte"
+QWEN21_SCENE_INTEGRATION_FLATTENED_MAX_EDITABLE_AREA_FRACTION = 0.60
+QWEN21_SCENE_INTEGRATION_MAX_DRAFT_OUTPUTS = 6
+QWEN21_SCENE_INTEGRATION_PRODUCTION_STEPS = 50
+QWEN21_SCENE_INTEGRATION_PRODUCTION_GUIDANCE = 8.0
+QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS = {
+    "768x768": "1152x1152",
+    "1024x1024": "1536x1536",
+    "1280x720": "1920x1088",
+    "720x1280": "1088x1920",
+}
 QWEN21_OUTPAINT_CONTRACT_VERSION = "qwen21_outpaint_v1"
 QWEN21_OUTPAINT_PLACEMENT_MODE = "explicit_rectangle"
 QWEN21_OUTPAINT_SOURCE_SCALE_MODE = "fit_without_crop_no_upscale"
@@ -190,6 +208,13 @@ QWEN21_NATIVE_RGBA_ALPHA_VALIDATION = "transparent_and_opaque_pixels_v1"
 QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES = 3
 # Enabled on the local qualification worker; Midom still gates the UI on the full nested contract.
 QWEN21_NATIVE_RGBA_ADVERTISE = True
+QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION = "qwen21_atmosphere_overlay_v1"
+QWEN21_ATMOSPHERE_OVERLAY_MODE = "atmosphere_tint"
+QWEN21_ATMOSPHERE_OVERLAY_RECIPE_VERSION = "qwen21_atmosphere_overlay_candidate_v1"
+QWEN21_ATMOSPHERE_OVERLAY_MIN_PARTIAL_ALPHA_FRACTION = 0.01
+QWEN21_ATMOSPHERE_OVERLAY_MAX_OPAQUE_ALPHA_FRACTION = 0.25
+QWEN21_ATMOSPHERE_OVERLAY_STEPS = 50
+QWEN21_ATMOSPHERE_OVERLAY_GUIDANCE = 8.0
 QWEN21_VISUAL_VARIATION_CONTRACT_VERSION = "qwen21_visual_variation_v1"
 QWEN21_VISUAL_VARIATION_RECIPE_VERSION = "qwen21_visual_variation_candidate_v1"
 QWEN21_VISUAL_VARIATION_MODES = {"character_asset", "location_plate"}
@@ -1432,6 +1457,99 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         }
 
     @staticmethod
+    def _qwen21_atmosphere_overlay_capability() -> dict[str, Any]:
+        return {
+            "contract_version": QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION,
+            "recipe_version": QWEN21_ATMOSPHERE_OVERLAY_RECIPE_VERSION,
+            "modes": [QWEN21_ATMOSPHERE_OVERLAY_MODE],
+            "reference_mode": "primary_image_edit",
+            "input_roles": ["scene_image"],
+            "max_scene_images": 1,
+            "max_outputs": 1,
+            "accelerator_profile_ids": ["standard"],
+            "output_mime_types": ["image/png"],
+            "output_color_modes": ["rgba"],
+            "delivery_resolutions": sorted(QWEN21_DELIVERY_RESOLUTIONS),
+            "alpha_validation": {
+                "policy": "mostly_semitransparent_v1",
+                "min_partial_alpha_fraction": QWEN21_ATMOSPHERE_OVERLAY_MIN_PARTIAL_ALPHA_FRACTION,
+                "max_opaque_alpha_fraction": QWEN21_ATMOSPHERE_OVERLAY_MAX_OPAQUE_ALPHA_FRACTION,
+            },
+            "experimental": True,
+        }
+
+    @staticmethod
+    def _qwen21_scene_integration_capability() -> dict[str, Any]:
+        return {
+            "contract_version": QWEN21_SCENE_INTEGRATION_CONTRACT_VERSION,
+            "output_mime_types": ["image/png"],
+            "output_color_modes": ["rgb"],
+            "delivery_resolutions": sorted(QWEN21_DELIVERY_RESOLUTIONS),
+            "accelerator_profile_ids": ["standard"],
+            "profiles": [
+                {
+                    "profile_id": QWEN21_SCENE_INTEGRATION_DRAFT_PROFILE_ID,
+                    "integration_mode": QWEN21_SCENE_INTEGRATION_DRAFT_MODE,
+                    "input_roles": ["scene_composite"],
+                    "mask_required": False,
+                    "max_outputs": QWEN21_SCENE_INTEGRATION_MAX_DRAFT_OUTPUTS,
+                    "internal_render_resolutions": {
+                        key: QWEN21_INTERNAL_RENDER_RESOLUTIONS[key]
+                        for key in sorted(QWEN21_INTERNAL_RENDER_RESOLUTIONS)
+                    },
+                    "protected_pixel_guarantee": False,
+                },
+                {
+                    "profile_id": QWEN21_SCENE_INTEGRATION_PRODUCTION_PROFILE_ID,
+                    "integration_mode": QWEN21_SCENE_INTEGRATION_PRODUCTION_MODE,
+                    "input_roles": ["location_plate", "placed_asset", "integration_matte"],
+                    "mask_required": True,
+                    "mask_semantics": QWEN21_MASK_SEMANTICS,
+                    "max_outputs": 1,
+                    "internal_render_resolutions": {
+                        key: QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS[key]
+                        for key in sorted(QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS)
+                    },
+                    "protected_pixel_guarantee": "exact_post_generation_restore_v1",
+                    "placed_asset_limit": 1,
+                },
+            ],
+        }
+
+    @staticmethod
+    def _qwen21_scene_integration_v2_capability() -> dict[str, Any]:
+        return {
+            "contract_version": QWEN21_SCENE_INTEGRATION_V2_CONTRACT_VERSION,
+            "reference_mode": "scene_integration",
+            "max_scene_composites": 1,
+            "max_integration_mattes": 1,
+            "max_outputs": 1,
+            "output_mime_types": ["image/png"],
+            "output_color_modes": ["rgb"],
+            "delivery_resolutions": sorted(QWEN21_DELIVERY_RESOLUTIONS),
+            "accelerator_profile_ids": ["standard"],
+            "profiles": [{
+                "profile_id": QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_PROFILE_ID,
+                "integration_mode": QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_MODE,
+                "input_roles": ["scene_composite", "integration_matte"],
+                "scene_composite_mime_types": ["image/png"],
+                "scene_composite_color_mode": "rgb",
+                "mask_required": True,
+                "mask_semantics": QWEN21_MASK_SEMANTICS,
+                "mask_mime_types": ["image/png"],
+                "mask_color_modes": ["1", "l", "rgb"],
+                "mask_alpha_semantics": False,
+                "max_editable_area_fraction": QWEN21_SCENE_INTEGRATION_FLATTENED_MAX_EDITABLE_AREA_FRACTION,
+                "max_outputs": 1,
+                "internal_render_resolutions": {
+                    key: QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS[key]
+                    for key in sorted(QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS)
+                },
+                "protected_pixel_guarantee": "exact_post_generation_restore_v1",
+            }],
+        }
+
+    @staticmethod
     def _qwen21_prop_asset_capability() -> dict[str, Any]:
         return {
             "contract_version": QWEN21_VISUAL_VARIATION_V2_CONTRACT_VERSION,
@@ -1550,6 +1668,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 model_capabilities["rgba"] = bool(QWEN21_NATIVE_RGBA_ADVERTISE)
                 model_capabilities["outpaint"] = True
                 model_capabilities["curated_variation"] = True
+                model_capabilities["scene_integration"] = True
+                model_capabilities["atmosphere_overlay"] = True
             model_limits = {
                 "max_outputs": _image_max_outputs_for_model(model_id),
                 "max_steps": _image_max_steps_for_model(model_id),
@@ -1584,6 +1704,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "masked_edit",
                     "outpaint",
                     "curated_variation",
+                    "scene_integration",
+                    "atmosphere_overlay",
                 ]
                 model_limits["masked_edit"] = {
                     "contract_version": QWEN21_MASKED_EDIT_CONTRACT_VERSION,
@@ -1622,6 +1744,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "720x1280",
                     ],
                 }
+                model_limits["scene_integration"] = self._qwen21_scene_integration_capability()
+                model_limits["scene_integration_contracts"] = [
+                    self._qwen21_scene_integration_capability(),
+                    self._qwen21_scene_integration_v2_capability(),
+                ]
+                model_limits["atmosphere_overlay"] = self._qwen21_atmosphere_overlay_capability()
                 # Preserve the v1 record for existing Midom versions while exposing a
                 # version-addressable collection for future variation contracts.
                 model_limits["curated_variation"] = self._qwen21_visual_variation_v1_capability()
@@ -3012,9 +3140,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             model_type == QWEN21_MODEL_ID
             and str(generation.get("image_task") or "").strip().lower() == "curated_variation"
         )
+        is_qwen21_scene_integration = (
+            model_type == QWEN21_MODEL_ID
+            and str(generation.get("image_task") or "").strip().lower() == "scene_integration"
+        )
+        is_qwen21_atmosphere_overlay = (
+            model_type == QWEN21_MODEL_ID
+            and str(generation.get("image_task") or "").strip().lower() == "atmosphere_overlay"
+        )
         max_outputs = (
             QWEN21_VISUAL_VARIATION_MAX_OUTPUTS
             if is_qwen21_curated_variation
+            else QWEN21_SCENE_INTEGRATION_MAX_DRAFT_OUTPUTS
+            if is_qwen21_scene_integration
+            else 1
+            if is_qwen21_atmosphere_overlay
             else _image_max_outputs_for_model(model_type)
         )
         if output_count < 1 or output_count > max_outputs:
@@ -3050,6 +3190,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if model_type == QWEN21_MODEL_ID:
             if is_qwen21_curated_variation:
                 self._finalize_qwen21_visual_variation_settings(settings, accelerator_profile_id)
+            elif is_qwen21_scene_integration:
+                self._finalize_qwen21_scene_integration_settings(settings, accelerator_profile_id)
+            elif is_qwen21_atmosphere_overlay:
+                self._finalize_qwen21_atmosphere_overlay_settings(settings, accelerator_profile_id)
             else:
                 self._finalize_qwen21_profile_settings(settings, accelerator_profile_id)
         if tool_payload:
@@ -3146,6 +3290,31 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if has_native_rgba_fields or output_color_mode == "rgba":
                 raise ValueError("Qwen Image 2.1 native RGBA output is not supported for masked_edit.")
             self._apply_qwen21_masked_edit_job_settings(
+                settings,
+                job,
+                generation,
+                requested_resolution,
+                negative_prompt,
+            )
+            return
+        if image_task == "scene_integration":
+            if has_native_rgba_fields or output_color_mode == "rgba":
+                raise ValueError("Qwen Image 2.1 scene integration outputs RGB PNG only.")
+            self._apply_qwen21_scene_integration_job_settings(
+                settings,
+                job,
+                generation,
+                requested_resolution,
+                negative_prompt,
+            )
+            return
+        if image_task == "atmosphere_overlay":
+            if has_native_rgba_fields:
+                raise ValueError(
+                    "Qwen Image 2.1 atmosphere overlay has its own RGBA contract and must not use "
+                    "transparent_output_contract_version."
+                )
+            self._apply_qwen21_atmosphere_overlay_job_settings(
                 settings,
                 job,
                 generation,
@@ -4180,6 +4349,418 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"allow_full_image_edit={allow_full_image_edit} requested_resolution={requested_resolution} "
             f"internal_render_resolution={internal_resolution}."
         )
+
+    def _apply_qwen21_scene_integration_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+        negative_prompt: str,
+    ) -> None:
+        contract_version = str(generation.get("scene_integration_contract_version") or "").strip()
+        if contract_version == QWEN21_SCENE_INTEGRATION_V2_CONTRACT_VERSION:
+            self._apply_qwen21_flattened_scene_integration_job_settings(
+                settings,
+                job,
+                generation,
+                requested_resolution,
+                negative_prompt,
+            )
+            return
+        if contract_version != QWEN21_SCENE_INTEGRATION_CONTRACT_VERSION:
+            raise ValueError(
+                "Qwen Image 2.1 scene integration requires "
+                f"scene_integration_contract_version={QWEN21_SCENE_INTEGRATION_CONTRACT_VERSION!r}."
+            )
+        if negative_prompt:
+            raise ValueError("Qwen Image 2.1 scene integration does not support a negative prompt.")
+        profile_id = str(generation.get("integration_profile_id") or "").strip().lower()
+        if profile_id not in {
+            QWEN21_SCENE_INTEGRATION_DRAFT_PROFILE_ID,
+            QWEN21_SCENE_INTEGRATION_PRODUCTION_PROFILE_ID,
+        }:
+            raise ValueError("Qwen Image 2.1 scene integration requires a supported integration_profile_id.")
+        production = profile_id == QWEN21_SCENE_INTEGRATION_PRODUCTION_PROFILE_ID
+        required_mode = (
+            QWEN21_SCENE_INTEGRATION_PRODUCTION_MODE
+            if production
+            else QWEN21_SCENE_INTEGRATION_DRAFT_MODE
+        )
+        integration_mode = str(generation.get("integration_mode") or "").strip().lower()
+        if integration_mode != required_mode:
+            raise ValueError(
+                "Qwen Image 2.1 scene integration requires "
+                f"integration_mode={required_mode!r} for {profile_id}."
+            )
+        profile_setting = str(generation.get("accelerator_profile_id") or "standard").strip() or "standard"
+        if profile_setting != "standard":
+            raise ValueError("Qwen Image 2.1 scene integration supports only accelerator_profile_id='standard'.")
+        reference_mode = str(generation.get("reference_mode") or "").strip().lower()
+        if reference_mode != "scene_integration":
+            raise ValueError("Qwen Image 2.1 scene integration requires reference_mode='scene_integration'.")
+        raw_recipe_fields = sorted(
+            field for field in {"steps", "guidance", "guidance_scale", "sampler", "scheduler", "model_mode", "custom_settings"}
+            if generation.get(field) is not None
+        )
+        if raw_recipe_fields:
+            raise ValueError(
+                "Qwen Image 2.1 scene integration does not accept raw recipe fields; the Bridge owns the recipe: "
+                + ", ".join(raw_recipe_fields)
+            )
+        output = job.get("output") or {}
+        output_count = self._coerce_int(
+            output.get("count"), 1, 1, QWEN21_SCENE_INTEGRATION_MAX_DRAFT_OUTPUTS
+        )
+        if production and output_count != 1:
+            raise ValueError("Qwen Image 2.1 Production Integration requires output.count=1.")
+        if str(output.get("color_mode") or "").strip().lower() != "rgb":
+            raise ValueError("Qwen Image 2.1 scene integration output.color_mode must be 'rgb'.")
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list):
+            raise ValueError("Qwen Image 2.1 scene integration inputs must be a list.")
+        reference_inputs = [item for item in inputs if isinstance(item, dict) and item.get("kind") == "reference_image"]
+        mask_inputs = [item for item in inputs if isinstance(item, dict) and item.get("kind") == "mask_image"]
+        if len(reference_inputs) + len(mask_inputs) != len(inputs):
+            raise ValueError("Qwen Image 2.1 scene integration accepts only reference_image and mask_image inputs.")
+        if production:
+            if len(reference_inputs) != 2 or len(mask_inputs) != 1:
+                raise ValueError("Qwen Image 2.1 Production Integration requires one location_plate, one placed_asset, and one integration_matte.")
+            references = sorted(reference_inputs, key=lambda item: self._coerce_int(item.get("sequence"), -1, -1, 10))
+            if [self._coerce_int(item.get("sequence"), -1, -1, 10) for item in references] != [0, 1]:
+                raise ValueError("Qwen Image 2.1 Production Integration references require contiguous sequence values 0 and 1.")
+            if str(references[0].get("role") or "") != "location_plate":
+                raise ValueError("Qwen Image 2.1 Production Integration sequence 0 requires role='location_plate'.")
+            if str(references[1].get("role") or "") != "placed_asset":
+                raise ValueError("Qwen Image 2.1 Production Integration sequence 1 requires role='placed_asset'.")
+            if str(mask_inputs[0].get("role") or "") != "integration_matte":
+                raise ValueError("Qwen Image 2.1 Production Integration mask requires role='integration_matte'.")
+            placement = references[1].get("placement")
+            self._validate_scene_integration_placement(placement, requested_resolution)
+            mask_semantics = str(generation.get("mask_semantics") or "").strip()
+            if mask_semantics != QWEN21_MASK_SEMANTICS:
+                raise ValueError(
+                    "Qwen Image 2.1 Production Integration requires "
+                    f"mask_semantics={QWEN21_MASK_SEMANTICS!r}."
+                )
+            internal_resolution = QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS.get(requested_resolution)
+        else:
+            if len(reference_inputs) != 1 or mask_inputs:
+                raise ValueError("Qwen Image 2.1 Draft Integration requires exactly one scene_composite and no mask.")
+            source = reference_inputs[0]
+            if self._coerce_int(source.get("sequence"), -1, -1, 10) != 0 or str(source.get("role") or "") != "scene_composite":
+                raise ValueError("Qwen Image 2.1 Draft Integration requires scene_composite at sequence 0.")
+            if generation.get("mask_semantics") is not None:
+                raise ValueError("Qwen Image 2.1 Draft Integration does not accept mask_semantics.")
+            internal_resolution = QWEN21_INTERNAL_RENDER_RESOLUTIONS.get(requested_resolution)
+        if not internal_resolution:
+            raise ValueError(f"Unsupported Qwen Image 2.1 scene integration delivery resolution: {requested_resolution}")
+        user_prompt = str(job.get("prompt") or "").strip()
+        expanded_prompt = (
+            "Refine the supplied scene only inside the editable integration matte. "
+            "Integrate contact shadows, edge lighting, color bounce, and floor grounding naturally. "
+            "Do not introduce people, props, or scene changes outside the editable integration region. "
+            + user_prompt
+            if production
+            else "Generate a cohesive scene integration from the supplied scene composite. " + user_prompt
+        )
+        settings.update({
+            "prompt": expanded_prompt,
+            "negative_prompt": "",
+            "resolution": internal_resolution,
+            "image_mode": 2 if production else 1,
+            "video_prompt_type": "VAG" if production else "KI",
+            "prompt_enhancer": "",
+            "guidance_phases": 1,
+            "remove_background_images_ref": 0,
+            "model_mode": 0,
+            "denoising_strength": 1.0,
+            "masking_strength": 1.0 if production else 0.0,
+            "image_refs": [],
+            "_midom_image_task": "scene_integration",
+            "_midom_scene_integration_contract_version": contract_version,
+            "_midom_scene_integration_profile_id": profile_id,
+            "_midom_scene_integration_mode": integration_mode,
+            "_midom_scene_integration_production": production,
+            "_midom_qwen21_reference_mode": "scene_integration",
+            "_midom_qwen21_reference_image_count": 2 if production else 1,
+            "_midom_requested_resolution": requested_resolution,
+            "_midom_internal_render_resolution": internal_resolution,
+            "_midom_final_output_resolution": requested_resolution,
+            "_midom_image_delivery_adapter": "qwen21_scene_integration_center_crop_downscale" if production else (
+                "qwen21_32px_center_crop" if internal_resolution != requested_resolution else ""
+            ),
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": "RGB",
+            "_midom_qwen21_requested_profile_id": "standard",
+            "_midom_scene_integration_user_prompt": user_prompt,
+            "_midom_scene_integration_expanded_prompt": expanded_prompt,
+            "_midom_scene_integration_input_descriptors": [
+                {
+                    "input_id": self._coerce_input_id(item),
+                    "kind": str(item.get("kind") or ""),
+                    "role": str(item.get("role") or ""),
+                    "sequence": item.get("sequence"),
+                    **({"placement": dict(item.get("placement") or {})} if item.get("placement") else {}),
+                }
+                for item in inputs
+            ],
+            "_midom_scene_integration_output_validation": [],
+            "custom_settings": {"qwen21_kv_cache": "Disabled", "rgba": "Disabled"},
+        })
+
+    def _apply_qwen21_flattened_scene_integration_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+        negative_prompt: str,
+    ) -> None:
+        if negative_prompt:
+            raise ValueError("Qwen Image 2.1 flattened Production Integration does not support a negative prompt.")
+        profile_id = str(generation.get("integration_profile_id") or "").strip().lower()
+        if profile_id != QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_PROFILE_ID:
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration requires "
+                f"integration_profile_id={QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_PROFILE_ID!r}."
+            )
+        integration_mode = str(generation.get("integration_mode") or "").strip().lower()
+        if integration_mode != QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_MODE:
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration requires "
+                f"integration_mode={QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_MODE!r}."
+            )
+        if str(generation.get("accelerator_profile_id") or "standard").strip() != "standard":
+            raise ValueError("Qwen Image 2.1 flattened Production Integration supports only accelerator_profile_id='standard'.")
+        if str(generation.get("reference_mode") or "").strip().lower() != "scene_integration":
+            raise ValueError("Qwen Image 2.1 flattened Production Integration requires reference_mode='scene_integration'.")
+        if str(generation.get("mask_semantics") or "").strip() != QWEN21_MASK_SEMANTICS:
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration requires "
+                f"mask_semantics={QWEN21_MASK_SEMANTICS!r}."
+            )
+        raw_recipe_fields = sorted(
+            field for field in {"steps", "guidance", "guidance_scale", "sampler", "scheduler", "model_mode", "custom_settings"}
+            if generation.get(field) is not None
+        )
+        if raw_recipe_fields:
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration does not accept raw recipe fields; the Bridge owns the recipe: "
+                + ", ".join(raw_recipe_fields)
+            )
+        output = job.get("output") or {}
+        if self._coerce_int(output.get("count"), 1, 1, 1) != 1:
+            raise ValueError("Qwen Image 2.1 flattened Production Integration requires output.count=1.")
+        if str(output.get("color_mode") or "").strip().lower() != "rgb":
+            raise ValueError("Qwen Image 2.1 flattened Production Integration output.color_mode must be 'rgb'.")
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list) or len(inputs) != 2:
+            raise ValueError("Qwen Image 2.1 flattened Production Integration requires scene_composite and integration_matte inputs.")
+        reference_inputs = [item for item in inputs if isinstance(item, dict) and item.get("kind") == "reference_image"]
+        mask_inputs = [item for item in inputs if isinstance(item, dict) and item.get("kind") == "mask_image"]
+        if len(reference_inputs) != 1 or len(mask_inputs) != 1:
+            raise ValueError("Qwen Image 2.1 flattened Production Integration requires exactly one scene_composite and one integration_matte.")
+        source = reference_inputs[0]
+        matte = mask_inputs[0]
+        if (
+            str(source.get("role") or "") != "scene_composite"
+            or self._coerce_int(source.get("sequence"), -1, -1, 1) != 0
+            or str(source.get("mime_type") or "").strip().lower() != "image/png"
+        ):
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration requires reference_image "
+                "role='scene_composite', sequence=0, and mime_type='image/png'."
+            )
+        if (
+            str(matte.get("role") or "") != "integration_matte"
+            or str(matte.get("mime_type") or "").strip().lower() != "image/png"
+        ):
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration requires mask_image "
+                "role='integration_matte' and mime_type='image/png'."
+            )
+        internal_resolution = QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS.get(requested_resolution)
+        if not internal_resolution:
+            raise ValueError(
+                f"Unsupported Qwen Image 2.1 flattened Production Integration delivery resolution: {requested_resolution}"
+            )
+        user_prompt = str(job.get("prompt") or "").strip()
+        expanded_prompt = (
+            "Refine the supplied flattened scene only inside the editable integration matte. "
+            "Integrate contact shadows, edge lighting, color bounce, and floor grounding naturally. "
+            "Do not introduce people, props, or scene changes outside the editable integration region. "
+            + user_prompt
+        )
+        settings.update({
+            "prompt": expanded_prompt,
+            "negative_prompt": "",
+            "resolution": internal_resolution,
+            "image_mode": 2,
+            "video_prompt_type": "VAG",
+            "prompt_enhancer": "",
+            "guidance_phases": 1,
+            "remove_background_images_ref": 0,
+            "model_mode": 0,
+            "denoising_strength": 1.0,
+            "masking_strength": 1.0,
+            "image_refs": [],
+            "_midom_image_task": "scene_integration",
+            "_midom_scene_integration_contract_version": QWEN21_SCENE_INTEGRATION_V2_CONTRACT_VERSION,
+            "_midom_scene_integration_profile_id": profile_id,
+            "_midom_scene_integration_mode": integration_mode,
+            "_midom_scene_integration_production": True,
+            "_midom_scene_integration_flattened_production": True,
+            "_midom_qwen21_reference_mode": "scene_integration",
+            "_midom_qwen21_reference_image_count": 1,
+            "_midom_requested_resolution": requested_resolution,
+            "_midom_internal_render_resolution": internal_resolution,
+            "_midom_final_output_resolution": requested_resolution,
+            "_midom_image_delivery_adapter": "qwen21_scene_integration_center_crop_downscale",
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": "RGB",
+            "_midom_qwen21_requested_profile_id": "standard",
+            "_midom_scene_integration_user_prompt": user_prompt,
+            "_midom_scene_integration_expanded_prompt": expanded_prompt,
+            "_midom_scene_integration_input_descriptors": [
+                {
+                    "input_id": self._coerce_input_id(item),
+                    "kind": str(item.get("kind") or ""),
+                    "role": str(item.get("role") or ""),
+                    "sequence": item.get("sequence"),
+                }
+                for item in inputs
+            ],
+            "_midom_scene_integration_output_validation": [],
+            "custom_settings": {"qwen21_kv_cache": "Disabled", "rgba": "Disabled"},
+        })
+
+    def _finalize_qwen21_scene_integration_settings(self, settings: dict[str, Any], profile_id: str) -> None:
+        if profile_id != "standard":
+            raise ValueError("Qwen Image 2.1 scene integration supports only accelerator_profile_id='standard'.")
+        production = bool(settings.get("_midom_scene_integration_production"))
+        settings.update({
+            "prompt_enhancer": "",
+            "num_inference_steps": QWEN21_SCENE_INTEGRATION_PRODUCTION_STEPS if production else 40,
+            "guidance_scale": QWEN21_SCENE_INTEGRATION_PRODUCTION_GUIDANCE if production else 4.0,
+            "sample_solver": "default",
+            "activated_loras": [],
+            "loras_multipliers": "",
+            "custom_settings": {"qwen21_kv_cache": "Disabled", "rgba": "Disabled"},
+        })
+
+    def _apply_qwen21_atmosphere_overlay_job_settings(
+        self,
+        settings: dict[str, Any],
+        job: dict[str, Any],
+        generation: dict[str, Any],
+        requested_resolution: str,
+        negative_prompt: str,
+    ) -> None:
+        if str(generation.get("atmosphere_overlay_contract_version") or "").strip() != QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION:
+            raise ValueError(
+                "Qwen Image 2.1 atmosphere overlay requires "
+                f"atmosphere_overlay_contract_version={QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION!r}."
+            )
+        if str(generation.get("atmosphere_overlay_mode") or "").strip().lower() != QWEN21_ATMOSPHERE_OVERLAY_MODE:
+            raise ValueError(
+                "Qwen Image 2.1 atmosphere overlay requires "
+                f"atmosphere_overlay_mode={QWEN21_ATMOSPHERE_OVERLAY_MODE!r}."
+            )
+        if negative_prompt:
+            raise ValueError("Qwen Image 2.1 atmosphere overlay does not support a negative prompt.")
+        if str(generation.get("reference_mode") or "").strip().lower() != "primary_image_edit":
+            raise ValueError("Qwen Image 2.1 atmosphere overlay requires reference_mode='primary_image_edit'.")
+        if str(generation.get("accelerator_profile_id") or "standard").strip() != "standard":
+            raise ValueError("Qwen Image 2.1 atmosphere overlay supports only accelerator_profile_id='standard'.")
+        output = job.get("output") or {}
+        if self._coerce_int(output.get("count"), 1, 1, 1) != 1:
+            raise ValueError("Qwen Image 2.1 atmosphere overlay requires output.count=1.")
+        if str(output.get("color_mode") or "").strip().lower() != "rgba":
+            raise ValueError("Qwen Image 2.1 atmosphere overlay output.color_mode must be 'rgba'.")
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list) or len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise ValueError("Qwen Image 2.1 atmosphere overlay requires exactly one scene_image input.")
+        source = inputs[0]
+        if (
+            source.get("kind") != "reference_image"
+            or source.get("role") != "scene_image"
+            or self._coerce_int(source.get("sequence"), -1, -1, 1) != 0
+        ):
+            raise ValueError("Qwen Image 2.1 atmosphere overlay requires reference_image role='scene_image' at sequence 0.")
+        internal_resolution = QWEN21_INTERNAL_RENDER_RESOLUTIONS.get(requested_resolution)
+        if not internal_resolution:
+            raise ValueError(f"Unsupported Qwen Image 2.1 atmosphere overlay delivery resolution: {requested_resolution}")
+        user_prompt = str(job.get("prompt") or "").strip()
+        expanded_prompt = (
+            "Generate only a full-frame RGBA atmosphere overlay aligned to the supplied scene image. "
+            "The overlay must contain transparent and mostly semi-transparent atmospheric effects such as "
+            "haze, diffused light, color tint, glow, fog, or particles. Do not render people, props, scenery, "
+            "text, or an opaque replacement scene. "
+            f"Atmosphere direction: {user_prompt}"
+        )
+        settings.update({
+            "prompt": expanded_prompt,
+            "negative_prompt": "",
+            "resolution": internal_resolution,
+            "image_mode": 1,
+            "video_prompt_type": "KI",
+            "prompt_enhancer": "",
+            "guidance_phases": 1,
+            "remove_background_images_ref": 0,
+            "model_mode": 0,
+            "denoising_strength": 1.0,
+            "image_refs": [],
+            "_midom_image_task": "atmosphere_overlay",
+            "_midom_qwen21_reference_mode": "primary_image_edit",
+            "_midom_qwen21_reference_image_count": 1,
+            "_midom_atmosphere_overlay_contract_version": QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION,
+            "_midom_atmosphere_overlay_mode": QWEN21_ATMOSPHERE_OVERLAY_MODE,
+            "_midom_atmosphere_overlay_user_prompt": user_prompt,
+            "_midom_atmosphere_overlay_expanded_prompt": expanded_prompt,
+            "_midom_atmosphere_overlay_source_input_id": self._coerce_input_id(source),
+            "_midom_atmosphere_overlay_output_validation": [],
+            "_midom_requested_resolution": requested_resolution,
+            "_midom_internal_render_resolution": internal_resolution,
+            "_midom_final_output_resolution": requested_resolution,
+            "_midom_image_delivery_adapter": "qwen21_32px_center_crop" if internal_resolution != requested_resolution else "",
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": "RGBA",
+            "_midom_require_atmosphere_alpha": True,
+            "_midom_qwen21_requested_profile_id": "standard",
+            "_midom_qwen21_reference_descriptors": [{
+                "input_id": self._coerce_input_id(source), "role": "scene_image", "sequence": 0,
+            }],
+            "custom_settings": {"qwen21_kv_cache": "Disabled", "rgba": "Enabled"},
+        })
+
+    def _finalize_qwen21_atmosphere_overlay_settings(self, settings: dict[str, Any], profile_id: str) -> None:
+        if profile_id != "standard":
+            raise ValueError("Qwen Image 2.1 atmosphere overlay supports only accelerator_profile_id='standard'.")
+        settings.update({
+            "prompt_enhancer": "",
+            "num_inference_steps": QWEN21_ATMOSPHERE_OVERLAY_STEPS,
+            "guidance_scale": QWEN21_ATMOSPHERE_OVERLAY_GUIDANCE,
+            "sample_solver": "default",
+            "activated_loras": [],
+            "loras_multipliers": "",
+            "custom_settings": {"qwen21_kv_cache": "Disabled", "rgba": "Enabled"},
+        })
+
+    def _validate_scene_integration_placement(self, placement: Any, requested_resolution: str) -> None:
+        if not isinstance(placement, dict) or set(placement) != {"x", "y", "width", "height"}:
+            raise ValueError("Qwen Image 2.1 Production Integration placed_asset requires integer placement x, y, width, and height.")
+        size = self._parse_resolution_size(requested_resolution)
+        if size is None:
+            raise ValueError("Qwen Image 2.1 Production Integration dimensions are invalid.")
+        values = {}
+        for key in ("x", "y", "width", "height"):
+            value = placement.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("Qwen Image 2.1 Production Integration placement values must be non-negative integers.")
+            values[key] = value
+        if values["width"] <= 0 or values["height"] <= 0 or values["x"] + values["width"] > size[0] or values["y"] + values["height"] > size[1]:
+            raise ValueError("Qwen Image 2.1 Production Integration placed_asset placement must be within the delivery canvas.")
 
     def _finalize_qwen21_profile_settings(self, settings: dict[str, Any], profile_id: str) -> None:
         settings["prompt_enhancer"] = ""
@@ -7160,6 +7741,54 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         settings.get("_midom_qwen21_native_rgba_output_validation") or []
                     ),
                 }
+            elif str(settings.get("_midom_image_task") or "") == "atmosphere_overlay":
+                metadata["image_task"] = "atmosphere_overlay"
+                metadata["atmosphere_overlay"] = {
+                    "contract_version": str(settings.get("_midom_atmosphere_overlay_contract_version") or ""),
+                    "recipe_version": QWEN21_ATMOSPHERE_OVERLAY_RECIPE_VERSION,
+                    "mode": str(settings.get("_midom_atmosphere_overlay_mode") or ""),
+                    "user_prompt": str(settings.get("_midom_atmosphere_overlay_user_prompt") or ""),
+                    "expanded_prompt": str(settings.get("_midom_atmosphere_overlay_expanded_prompt") or ""),
+                    "scene_reference": [dict(item) for item in metadata["ordered_reference_inputs"]],
+                    "requested_dimensions": str(settings.get("_midom_requested_resolution") or ""),
+                    "internal_dimensions": str(settings.get("_midom_internal_render_resolution") or ""),
+                    "final_output_dimensions": str(settings.get("_midom_final_output_resolution") or ""),
+                    "accelerator_profile_id": str(settings.get("_midom_accelerator_profile_id") or "standard"),
+                    "expanded_bridge_recipe": {
+                        "num_inference_steps": self._coerce_int(settings.get("num_inference_steps"), 50, 1, 100),
+                        "guidance_scale": self._coerce_float(settings.get("guidance_scale"), 8.0, 0.0, 100.0),
+                        "sample_solver": str(settings.get("sample_solver") or "default"),
+                        "rgba": str((settings.get("custom_settings") or {}).get("rgba") or ""),
+                    },
+                    "alpha_validation": list(settings.get("_midom_atmosphere_overlay_output_validation") or []),
+                    "experimental": True,
+                }
+            elif str(settings.get("_midom_image_task") or "") == "scene_integration":
+                production = bool(settings.get("_midom_scene_integration_production"))
+                metadata["image_task"] = "scene_integration"
+                metadata["scene_integration"] = {
+                    "contract_version": str(settings.get("_midom_scene_integration_contract_version") or ""),
+                    "profile_id": str(settings.get("_midom_scene_integration_profile_id") or ""),
+                    "integration_mode": str(settings.get("_midom_scene_integration_mode") or ""),
+                    "user_prompt": str(settings.get("_midom_scene_integration_user_prompt") or ""),
+                    "expanded_prompt": str(settings.get("_midom_scene_integration_expanded_prompt") or ""),
+                    "inputs": dict(settings.get("_midom_scene_integration_inputs") or {}),
+                    "requested_dimensions": str(settings.get("_midom_requested_resolution") or ""),
+                    "internal_dimensions": str(settings.get("_midom_internal_render_resolution") or ""),
+                    "final_output_dimensions": str(settings.get("_midom_final_output_resolution") or ""),
+                    "canvas_adapter": dict(settings.get("_midom_scene_integration_canvas_adapter") or {}),
+                    "accelerator_profile_id": str(settings.get("_midom_accelerator_profile_id") or "standard"),
+                    "expanded_bridge_recipe": {
+                        "image_mode": self._coerce_int(settings.get("image_mode"), 1, 0, 2),
+                        "video_prompt_type": str(settings.get("video_prompt_type") or ""),
+                        "model_mode": self._coerce_int(settings.get("model_mode"), 0, 0, 5),
+                        "num_inference_steps": self._coerce_int(settings.get("num_inference_steps"), 40, 1, 100),
+                        "guidance_scale": self._coerce_float(settings.get("guidance_scale"), 4.0, 0.0, 100.0),
+                        "protected_pixel_restore": production,
+                        "output_color_mode": "RGB",
+                    },
+                    "output_validation": list(settings.get("_midom_scene_integration_output_validation") or []),
+                }
             elif str(settings.get("_midom_image_task") or "") == "curated_variation":
                 variation_mode = str(settings.get("_midom_qwen21_visual_variation_mode") or "")
                 metadata["image_task"] = "curated_variation"
@@ -8430,6 +9059,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 is_masked_edit = image_task == "masked_edit"
                 is_outpaint = image_task == "outpaint"
                 is_curated_variation = image_task == "curated_variation"
+                is_scene_integration = image_task == "scene_integration"
+                is_atmosphere_overlay = image_task == "atmosphere_overlay"
                 rgba_contract_version = str(
                     summary.get("transparent_output_contract_version") or ""
                 ).strip()
@@ -8440,7 +9071,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 native_rgba_requested = bool(
                     rgba_contract_version
                     or rgba_mode
-                    or (output_color_mode == "rgba" and not is_curated_variation)
+                    or (output_color_mode == "rgba" and not is_curated_variation and not is_atmosphere_overlay)
                 )
                 if image_task not in {
                     "",
@@ -8450,6 +9081,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "masked_edit",
                     "outpaint",
                     "curated_variation",
+                    "scene_integration",
+                    "atmosphere_overlay",
                 }:
                     return f"Qwen Image 2.1 unsupported image_task: {image_task}"
                 reference_count_value = summary.get("reference_image_count")
@@ -8465,7 +9098,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 if control_count:
                     return f"Qwen Image 2.1 does not support control images; got {control_count}"
                 reference_mode = str(summary.get("reference_mode") or "").strip().lower()
-                if reference_mode and reference_mode not in QWEN21_REFERENCE_MODES:
+                if reference_mode and reference_mode not in QWEN21_REFERENCE_MODES and not (
+                    is_scene_integration and reference_mode == "scene_integration"
+                ):
                     return f"Qwen Image 2.1 unsupported reference_mode: {reference_mode}"
                 if reference_count is not None:
                     if reference_mode == "none" and reference_count:
@@ -8475,8 +9110,90 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 accelerator_profile_id = str(
                     summary.get("accelerator_profile_id") or summary.get("speed_profile_id") or "standard"
                 ).strip() or "standard"
+                if is_scene_integration:
+                    contract_version = str(summary.get("scene_integration_contract_version") or "").strip()
+                    if contract_version not in {
+                        QWEN21_SCENE_INTEGRATION_CONTRACT_VERSION,
+                        QWEN21_SCENE_INTEGRATION_V2_CONTRACT_VERSION,
+                    }:
+                        return (
+                            "Qwen Image 2.1 scene integration requires a supported contract version"
+                        )
+                    if contract_version == QWEN21_SCENE_INTEGRATION_V2_CONTRACT_VERSION:
+                        if str(summary.get("integration_profile_id") or "").strip().lower() != QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_PROFILE_ID:
+                            return (
+                                "Qwen Image 2.1 flattened Production Integration requires "
+                                f"integration_profile_id={QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_PROFILE_ID}"
+                            )
+                        if str(summary.get("integration_mode") or "").strip().lower() != QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_MODE:
+                            return (
+                                "Qwen Image 2.1 flattened Production Integration requires "
+                                f"integration_mode={QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_MODE}"
+                            )
+                        if reference_mode != "scene_integration" or reference_count != 1:
+                            return "Qwen Image 2.1 flattened Production Integration requires reference_image_count=1"
+                        if self._coerce_int(summary.get("mask_image_count"), 0, 0, 100) != 1:
+                            return "Qwen Image 2.1 flattened Production Integration requires mask_image_count=1"
+                        if accelerator_profile_id != "standard":
+                            return "Qwen Image 2.1 flattened Production Integration supports only accelerator_profile_id=standard"
+                        if output_color_mode != "rgb":
+                            return "Qwen Image 2.1 flattened Production Integration requires output_color_mode=rgb"
+                        if self._coerce_int(summary.get("output_count"), 1, 1, 6) != 1:
+                            return "Qwen Image 2.1 flattened Production Integration requires output_count=1"
+                        return None
+                    profile_id = str(summary.get("integration_profile_id") or "").strip().lower()
+                    production = profile_id == QWEN21_SCENE_INTEGRATION_PRODUCTION_PROFILE_ID
+                    if profile_id not in {
+                        QWEN21_SCENE_INTEGRATION_DRAFT_PROFILE_ID,
+                        QWEN21_SCENE_INTEGRATION_PRODUCTION_PROFILE_ID,
+                    }:
+                        return "Qwen Image 2.1 scene integration requires a supported integration_profile_id"
+                    expected_mode = (
+                        QWEN21_SCENE_INTEGRATION_PRODUCTION_MODE if production
+                        else QWEN21_SCENE_INTEGRATION_DRAFT_MODE
+                    )
+                    if str(summary.get("integration_mode") or "").strip().lower() != expected_mode:
+                        return f"Qwen Image 2.1 {profile_id} requires integration_mode={expected_mode}"
+                    if reference_mode != "scene_integration":
+                        return "Qwen Image 2.1 scene integration requires reference_mode=scene_integration"
+                    expected_reference_count = 2 if production else 1
+                    if reference_count != expected_reference_count:
+                        return (
+                            f"Qwen Image 2.1 {profile_id} requires reference_image_count="
+                            f"{expected_reference_count}"
+                        )
+                    mask_count = self._coerce_int(summary.get("mask_image_count"), 0, 0, 100)
+                    if mask_count != (1 if production else 0):
+                        return f"Qwen Image 2.1 {profile_id} requires mask_image_count={1 if production else 0}"
+                    if accelerator_profile_id != "standard":
+                        return "Qwen Image 2.1 scene integration supports only accelerator_profile_id=standard"
+                    if output_color_mode and output_color_mode != "rgb":
+                        return "Qwen Image 2.1 scene integration requires output_color_mode=rgb"
+                    output_count = self._coerce_int(
+                        summary.get("output_count"), 1, 1, QWEN21_SCENE_INTEGRATION_MAX_DRAFT_OUTPUTS
+                    )
+                    if production and output_count != 1:
+                        return "Qwen Image 2.1 Production Integration requires output_count=1"
+                if is_atmosphere_overlay:
+                    if str(summary.get("atmosphere_overlay_contract_version") or "").strip() != QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION:
+                        return (
+                            "Qwen Image 2.1 atmosphere overlay requires contract version "
+                            f"{QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION}"
+                        )
+                    if str(summary.get("atmosphere_overlay_mode") or "").strip().lower() != QWEN21_ATMOSPHERE_OVERLAY_MODE:
+                        return f"Qwen Image 2.1 atmosphere overlay requires atmosphere_overlay_mode={QWEN21_ATMOSPHERE_OVERLAY_MODE}"
+                    if reference_mode != "primary_image_edit" or reference_count != 1:
+                        return "Qwen Image 2.1 atmosphere overlay requires one primary_image_edit scene reference"
+                    if self._coerce_int(summary.get("mask_image_count"), 0, 0, 100):
+                        return "Qwen Image 2.1 atmosphere overlay does not accept mask images"
+                    if accelerator_profile_id != "standard":
+                        return "Qwen Image 2.1 atmosphere overlay supports only accelerator_profile_id=standard"
+                    if output_color_mode != "rgba":
+                        return "Qwen Image 2.1 atmosphere overlay requires output_color_mode=rgba"
+                    if self._coerce_int(summary.get("output_count"), 1, 1, 6) != 1:
+                        return "Qwen Image 2.1 atmosphere overlay requires output_count=1"
                 if native_rgba_requested:
-                    if is_masked_edit or is_outpaint or is_curated_variation:
+                    if is_masked_edit or is_outpaint or is_curated_variation or is_scene_integration:
                         return f"Qwen Image 2.1 native RGBA output is not supported for image_task={image_task}"
                     if rgba_contract_version != QWEN21_NATIVE_RGBA_CONTRACT_VERSION:
                         return (
@@ -9539,6 +10256,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 variation_output_validation = []
                 if str(settings.get("_midom_image_task") or "") == "curated_variation":
                     settings["_midom_qwen21_visual_variation_output_validation"] = variation_output_validation
+                elif str(settings.get("_midom_image_task") or "") == "atmosphere_overlay":
+                    settings["_midom_atmosphere_overlay_output_validation"] = variation_output_validation
                 elif settings.get("_midom_qwen21_native_rgba_contract_version"):
                     settings["_midom_qwen21_native_rgba_output_validation"] = variation_output_validation
                 for artifact_index, file_path in enumerate(generated_files[:output_count]):
@@ -9547,6 +10266,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     elif media_type == "video":
                         artifacts.append(self._upload_video_artifact(connection, job_id, file_path, artifact_index, settings))
                     else:
+                        if (
+                            str(settings.get("_midom_image_task") or "") == "scene_integration"
+                            and bool(settings.get("_midom_scene_integration_production"))
+                        ):
+                            file_path = self._finalize_qwen21_scene_integration_production_output(
+                                file_path,
+                                settings,
+                                artifact_index,
+                                temp_dir,
+                            )
                         artifacts.append(
                             self._upload_artifact(
                                 connection,
@@ -9562,8 +10291,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                 (
                                     settings.get("_midom_internal_render_resolution")
                                     if settings.get("_midom_require_meaningful_alpha")
+                                    or settings.get("_midom_require_atmosphere_alpha")
                                     else None
                                 ),
+                                bool(settings.get("_midom_require_atmosphere_alpha")),
                             )
                         )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
@@ -14662,6 +15393,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             model_id == QWEN21_MODEL_ID
             and str(generation.get("image_task") or "").strip().lower() == "masked_edit"
         )
+        is_qwen21_scene_integration = (
+            model_id == QWEN21_MODEL_ID
+            and str(generation.get("image_task") or "").strip().lower() == "scene_integration"
+        )
         self._log(
             f"Downloading job inputs; job_id={job_id} descriptors={len(inputs)} "
             f"max_reference_images={max_reference_images} max_control_images={max_control_images}."
@@ -14691,11 +15426,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             else:
                 control_mode = ""
             if kind == "mask_image":
-                if not is_qwen21_masked_edit:
+                if not (is_qwen21_masked_edit or is_qwen21_scene_integration):
                     raise ValueError(f"Model {model_id} does not support mask_image inputs for this task.")
                 role = str(item.get("role") or "").strip()
-                if role != "edit_mask":
-                    raise ValueError("Qwen Image 2.1 mask_image input requires role='edit_mask'.")
+                expected_role = "integration_matte" if is_qwen21_scene_integration else "edit_mask"
+                if role != expected_role:
+                    raise ValueError(f"Qwen Image 2.1 mask_image input requires role={expected_role!r}.")
                 mask_count += 1
                 if mask_count > 1:
                     raise ValueError("Qwen Image 2.1 masked editing requires exactly one mask_image input.")
@@ -14710,7 +15446,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
                 raise ValueError(f"Unsupported input MIME type: {mime_type}")
             if kind == "mask_image" and mime_type != "image/png":
-                raise ValueError("Qwen Image 2.1 masked-edit mask download must be image/png.")
+                raise ValueError("Qwen Image 2.1 mask download must be image/png.")
             data = self._read_limited_response_content(response, input_id, self._max_input_bytes_for_mime(mime_type))
             expected_size = item.get("bytes")
             if expected_size is not None and len(data) != int(expected_size):
@@ -14732,6 +15468,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "control_mode": control_mode,
                 "role": str(item.get("role") or "").strip(),
                 **({"sequence": int(item["sequence"])} if model_id == QWEN21_MODEL_ID and kind == "reference_image" else {}),
+                **({"placement": dict(item.get("placement") or {})} if is_qwen21_scene_integration and item.get("placement") else {}),
                 **({
                     "reference_purpose": str(item.get("reference_purpose") or "").strip().lower(),
                 } if model_id == QWEN21_MODEL_ID and kind == "reference_image" else {}),
@@ -16376,6 +17113,136 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     f"model_mode={settings.get('model_mode')} video_prompt_type={settings.get('video_prompt_type')!r}."
                 )
                 return
+            if qwen21_image_task == "scene_integration":
+                production = bool(settings.get("_midom_scene_integration_production"))
+                reference_inputs = sorted(
+                    [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
+                    key=lambda item: int(item.get("sequence", -1)),
+                )
+                mask_inputs = [item for item in downloaded_inputs if item.get("kind") == "mask_image"]
+                requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+                internal_size = self._parse_resolution_size(settings.get("_midom_internal_render_resolution"))
+                if requested_size is None or internal_size is None:
+                    raise ValueError("Qwen Image 2.1 scene integration dimensions are missing or invalid.")
+                if bool(settings.get("_midom_scene_integration_flattened_production")):
+                    if len(reference_inputs) != 1 or len(mask_inputs) != 1:
+                        raise ValueError(
+                            "Qwen Image 2.1 flattened Production Integration downloaded inputs are incomplete."
+                        )
+                    source = reference_inputs[0]
+                    matte = mask_inputs[0]
+                    if (
+                        source.get("role") != "scene_composite"
+                        or int(source.get("sequence", -1)) != 0
+                        or matte.get("role") != "integration_matte"
+                    ):
+                        raise ValueError(
+                            "Qwen Image 2.1 flattened Production Integration downloaded input roles do not match the claim."
+                        )
+                    prepared = self._prepare_qwen21_flattened_scene_integration_inputs(
+                        source,
+                        matte,
+                        requested_size,
+                        internal_size,
+                    )
+                    settings.update({
+                        "image_mode": 2,
+                        "image_refs": [],
+                        "image_guide": prepared["internal_composite_path"],
+                        "image_mask": prepared["internal_mask_path"],
+                        "video_prompt_type": "VAG",
+                        "_midom_scene_integration_inputs": prepared["provenance"],
+                        "_midom_scene_integration_base_composite_path": prepared["delivery_composite_path"],
+                        "_midom_scene_integration_delivery_mask_path": prepared["delivery_mask_path"],
+                        "_midom_scene_integration_canvas_adapter": prepared["canvas_adapter"],
+                    })
+                    self._log(
+                        "Applied Qwen Image 2.1 flattened Production Integration inputs; "
+                        f"scene_composite_input_id={source['input_id']} matte_input_id={matte['input_id']} "
+                        f"requested={requested_size[0]}x{requested_size[1]} internal={internal_size[0]}x{internal_size[1]}."
+                    )
+                elif production:
+                    if len(reference_inputs) != 2 or len(mask_inputs) != 1:
+                        raise ValueError("Qwen Image 2.1 Production Integration downloaded inputs are incomplete.")
+                    location, asset = reference_inputs
+                    matte = mask_inputs[0]
+                    if (
+                        location.get("role") != "location_plate"
+                        or int(location.get("sequence", -1)) != 0
+                        or asset.get("role") != "placed_asset"
+                        or int(asset.get("sequence", -1)) != 1
+                        or matte.get("role") != "integration_matte"
+                    ):
+                        raise ValueError("Qwen Image 2.1 Production Integration downloaded input roles do not match the claim.")
+                    prepared = self._prepare_qwen21_scene_integration_production_inputs(
+                        location,
+                        asset,
+                        matte,
+                        requested_size,
+                        internal_size,
+                    )
+                    settings.update({
+                        "image_mode": 2,
+                        "image_refs": [],
+                        "image_guide": prepared["internal_composite_path"],
+                        "image_mask": prepared["internal_mask_path"],
+                        "video_prompt_type": "VAG",
+                        "_midom_scene_integration_inputs": prepared["provenance"],
+                        "_midom_scene_integration_base_composite_path": prepared["delivery_composite_path"],
+                        "_midom_scene_integration_delivery_mask_path": prepared["delivery_mask_path"],
+                        "_midom_scene_integration_canvas_adapter": prepared["canvas_adapter"],
+                    })
+                    self._log(
+                        "Applied Qwen Image 2.1 Production Integration inputs; "
+                        f"location_input_id={location['input_id']} asset_input_id={asset['input_id']} "
+                        f"matte_input_id={matte['input_id']} placement={prepared['provenance']['placed_asset']['placement']} "
+                        f"requested={requested_size[0]}x{requested_size[1]} internal={internal_size[0]}x{internal_size[1]}."
+                    )
+                else:
+                    if len(reference_inputs) != 1 or mask_inputs:
+                        raise ValueError("Qwen Image 2.1 Draft Integration requires one downloaded scene_composite and no mask.")
+                    source = reference_inputs[0]
+                    if source.get("role") != "scene_composite" or int(source.get("sequence", -1)) != 0:
+                        raise ValueError("Qwen Image 2.1 Draft Integration downloaded input role does not match the claim.")
+                    self._validate_image_input_exact_size(Path(source["path"]), requested_size, "Qwen Image 2.1 Draft Integration scene_composite")
+                    settings.update({
+                        "image_mode": 1,
+                        "image_refs": [source["path"]],
+                        "video_prompt_type": "KI",
+                        "_midom_scene_integration_inputs": {
+                            "scene_composite": {
+                                "input_id": int(source["input_id"]),
+                                "role": "scene_composite",
+                                "sequence": 0,
+                                "sha256": str(source.get("sha256") or ""),
+                            },
+                        },
+                    })
+                return
+            if qwen21_image_task == "atmosphere_overlay":
+                reference_inputs = [item for item in downloaded_inputs if item.get("kind") == "reference_image"]
+                if len(reference_inputs) != 1 or any(item.get("kind") == "mask_image" for item in downloaded_inputs):
+                    raise ValueError("Qwen Image 2.1 atmosphere overlay requires exactly one downloaded scene_image and no mask.")
+                source = reference_inputs[0]
+                if (
+                    source.get("role") != "scene_image"
+                    or int(source.get("sequence", -1)) != 0
+                    or int(source.get("input_id") or 0) != int(settings.get("_midom_atmosphere_overlay_source_input_id") or 0)
+                ):
+                    raise ValueError("Qwen Image 2.1 atmosphere overlay downloaded source does not match the validated claim.")
+                requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+                if requested_size is None:
+                    raise ValueError("Qwen Image 2.1 atmosphere overlay dimensions are missing or invalid.")
+                self._validate_image_input_exact_size(Path(source["path"]), requested_size, "Qwen Image 2.1 atmosphere overlay scene_image")
+                settings["image_refs"] = [source["path"]]
+                settings["video_prompt_type"] = "KI"
+                settings["_midom_qwen21_reference_inputs"] = [{
+                    "input_id": int(source["input_id"]),
+                    "role": "scene_image",
+                    "sequence": 0,
+                    "sha256": str(source.get("sha256") or ""),
+                }]
+                return
             reference_mode = str(settings.get("_midom_qwen21_reference_mode") or "").strip().lower()
             ordered_inputs = sorted(
                 [item for item in downloaded_inputs if item.get("kind") == "reference_image"],
@@ -16811,6 +17678,370 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "canvas_adapter": adapter,
         }
 
+    def _prepare_qwen21_flattened_scene_integration_inputs(
+        self,
+        composite_input: dict[str, Any],
+        matte_input: dict[str, Any],
+        requested_size: tuple[int, int],
+        internal_size: tuple[int, int],
+    ) -> dict[str, Any]:
+        composite_path = Path(str(composite_input.get("path") or ""))
+        matte_path = Path(str(matte_input.get("path") or ""))
+        if not composite_path.is_file() or not matte_path.is_file():
+            raise ValueError("Qwen Image 2.1 flattened Production Integration input file is missing.")
+        try:
+            with Image.open(composite_path) as image_file:
+                if str(image_file.format or "").upper() != "PNG" or image_file.mode != "RGB":
+                    raise ValueError("scene_composite must be a decoded RGB PNG")
+                composite = ImageOps.exif_transpose(image_file).copy()
+                composite.load()
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(
+                f"Qwen Image 2.1 flattened Production Integration scene_composite could not be decoded: {exc}"
+            )
+        if composite.size != requested_size:
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration scene_composite dimensions must equal the requested output; "
+                f"scene_composite={composite.size[0]}x{composite.size[1]} "
+                f"requested={requested_size[0]}x{requested_size[1]}."
+            )
+        try:
+            with Image.open(matte_path) as mask_file:
+                if str(mask_file.format or "").upper() != "PNG" or mask_file.mode not in {"1", "L", "RGB"}:
+                    raise ValueError("integration_matte must be an opaque binary RGB/grayscale PNG without alpha")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(
+                f"Qwen Image 2.1 flattened Production Integration integration_matte could not be decoded: {exc}"
+            )
+        matte = self._load_qwen21_binary_mask(
+            matte_path,
+            requested_size,
+            "integration_matte",
+            allow_full_image_edit=False,
+        )
+        histogram = matte.histogram()
+        total_pixels = requested_size[0] * requested_size[1]
+        editable_pixels = int(histogram[255])
+        editable_fraction = editable_pixels / total_pixels
+        if editable_fraction > QWEN21_SCENE_INTEGRATION_FLATTENED_MAX_EDITABLE_AREA_FRACTION:
+            raise ValueError(
+                "Qwen Image 2.1 flattened Production Integration editable matte area exceeds the allowed fraction; "
+                f"editable_area_fraction={editable_fraction:.6f} "
+                f"maximum={QWEN21_SCENE_INTEGRATION_FLATTENED_MAX_EDITABLE_AREA_FRACTION:.6f}."
+            )
+
+        requested_width, requested_height = requested_size
+        internal_width, internal_height = internal_size
+        scale = min(internal_width / requested_width, internal_height / requested_height)
+        content_width = max(1, int(round(requested_width * scale)))
+        content_height = max(1, int(round(requested_height * scale)))
+        left = (internal_width - content_width) // 2
+        top = (internal_height - content_height) // 2
+        right = internal_width - content_width - left
+        bottom = internal_height - content_height - top
+        scaled_composite = composite.resize((content_width, content_height), Image.Resampling.LANCZOS)
+        internal_composite = self._edge_pad_rgb_image(scaled_composite, (left, top, right, bottom))
+        internal_matte = Image.new("L", internal_size, 0)
+        internal_matte.paste(
+            matte.resize((content_width, content_height), Image.Resampling.NEAREST),
+            (left, top),
+        )
+        delivery_composite_path = composite_path.with_name("midom-scene-integration-flattened-base.png")
+        delivery_mask_path = matte_path.with_name("midom-scene-integration-flattened-matte.png")
+        internal_composite_path = composite_path.with_name(
+            f"midom-scene-integration-flattened-source-{internal_width}x{internal_height}.png"
+        )
+        internal_mask_path = matte_path.with_name(
+            f"midom-scene-integration-flattened-mask-{internal_width}x{internal_height}.png"
+        )
+        composite.save(delivery_composite_path, format="PNG", optimize=True)
+        matte.save(delivery_mask_path, format="PNG", optimize=True)
+        internal_composite.save(internal_composite_path, format="PNG", optimize=True)
+        internal_matte.save(internal_mask_path, format="PNG", optimize=True)
+        canvas_adapter = {
+            "adapter_id": "qwen21_scene_integration_flattened_production_canvas_v1",
+            "requested_width": requested_width,
+            "requested_height": requested_height,
+            "internal_width": internal_width,
+            "internal_height": internal_height,
+            "content_width": content_width,
+            "content_height": content_height,
+            "pad_left": left,
+            "pad_right": right,
+            "pad_top": top,
+            "pad_bottom": bottom,
+            "composite_padding": "edge_replication",
+            "matte_padding": "black_protected",
+            "finalization": "center_crop_downscale_then_exact_protected_restore",
+        }
+        return {
+            "delivery_composite_path": str(delivery_composite_path),
+            "delivery_mask_path": str(delivery_mask_path),
+            "internal_composite_path": str(internal_composite_path),
+            "internal_mask_path": str(internal_mask_path),
+            "canvas_adapter": canvas_adapter,
+            "provenance": {
+                "scene_composite": {
+                    "input_id": int(composite_input["input_id"]),
+                    "role": "scene_composite",
+                    "sequence": 0,
+                    "sha256": str(composite_input.get("sha256") or ""),
+                    "color_mode": "RGB",
+                },
+                "integration_matte": {
+                    "input_id": int(matte_input["input_id"]),
+                    "role": "integration_matte",
+                    "sha256": str(matte_input.get("sha256") or ""),
+                    "editable_pixel_count": editable_pixels,
+                    "protected_pixel_count": int(histogram[0]),
+                    "editable_area_fraction": editable_fraction,
+                    "max_editable_area_fraction": QWEN21_SCENE_INTEGRATION_FLATTENED_MAX_EDITABLE_AREA_FRACTION,
+                },
+                "delivery_composite_sha256": self._sha256_file(delivery_composite_path),
+                "delivery_matte_sha256": self._sha256_file(delivery_mask_path),
+                "internal_composite_sha256": self._sha256_file(internal_composite_path),
+                "internal_matte_sha256": self._sha256_file(internal_mask_path),
+            },
+        }
+
+    def _prepare_qwen21_scene_integration_production_inputs(
+        self,
+        location_input: dict[str, Any],
+        asset_input: dict[str, Any],
+        matte_input: dict[str, Any],
+        requested_size: tuple[int, int],
+        internal_size: tuple[int, int],
+    ) -> dict[str, Any]:
+        location_path = Path(str(location_input.get("path") or ""))
+        asset_path = Path(str(asset_input.get("path") or ""))
+        matte_path = Path(str(matte_input.get("path") or ""))
+        if not location_path.is_file() or not asset_path.is_file() or not matte_path.is_file():
+            raise ValueError("Qwen Image 2.1 Production Integration input file is missing.")
+        try:
+            with Image.open(location_path) as image_file:
+                location = ImageOps.exif_transpose(image_file).convert("RGB")
+                location.load()
+            with Image.open(asset_path) as image_file:
+                if "A" not in image_file.getbands():
+                    raise ValueError("placed_asset must have an RGBA alpha channel")
+                asset = ImageOps.exif_transpose(image_file).convert("RGBA")
+                asset.load()
+                alpha_min, alpha_max = asset.getchannel("A").getextrema()
+                if alpha_min >= 255 or alpha_max <= 0:
+                    raise ValueError("placed_asset alpha must contain both transparent and visible pixels")
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Qwen Image 2.1 Production Integration image could not be decoded: {exc}")
+        if location.size != requested_size:
+            raise ValueError(
+                "Qwen Image 2.1 Production Integration location_plate dimensions must equal the requested output; "
+                f"location={location.size[0]}x{location.size[1]} requested={requested_size[0]}x{requested_size[1]}."
+            )
+        placement = dict(asset_input.get("placement") or {})
+        requested_resolution = f"{requested_size[0]}x{requested_size[1]}"
+        self._validate_scene_integration_placement(placement, requested_resolution)
+        matte = self._load_qwen21_binary_mask(matte_path, requested_size, "integration_matte", allow_full_image_edit=False)
+        fitted_asset = asset.resize(
+            (int(placement["width"]), int(placement["height"])),
+            Image.Resampling.LANCZOS,
+        )
+        composite = location.copy()
+        composite.paste(fitted_asset, (int(placement["x"]), int(placement["y"])), fitted_asset)
+
+        requested_width, requested_height = requested_size
+        internal_width, internal_height = internal_size
+        scale = min(internal_width / requested_width, internal_height / requested_height)
+        content_width = max(1, int(round(requested_width * scale)))
+        content_height = max(1, int(round(requested_height * scale)))
+        left = (internal_width - content_width) // 2
+        top = (internal_height - content_height) // 2
+        right = internal_width - content_width - left
+        bottom = internal_height - content_height - top
+        scaled_composite = composite.resize((content_width, content_height), Image.Resampling.LANCZOS)
+        internal_composite = self._edge_pad_rgb_image(scaled_composite, (left, top, right, bottom))
+        internal_matte = Image.new("L", internal_size, 0)
+        internal_matte.paste(
+            matte.resize((content_width, content_height), Image.Resampling.NEAREST),
+            (left, top),
+        )
+        delivery_composite_path = location_path.with_name("midom-scene-integration-base.png")
+        delivery_mask_path = matte_path.with_name("midom-scene-integration-matte.png")
+        internal_composite_path = location_path.with_name(
+            f"midom-scene-integration-source-{internal_width}x{internal_height}.png"
+        )
+        internal_mask_path = matte_path.with_name(
+            f"midom-scene-integration-mask-{internal_width}x{internal_height}.png"
+        )
+        composite.save(delivery_composite_path, format="PNG", optimize=True)
+        matte.save(delivery_mask_path, format="PNG", optimize=True)
+        internal_composite.save(internal_composite_path, format="PNG", optimize=True)
+        internal_matte.save(internal_mask_path, format="PNG", optimize=True)
+        histogram = matte.histogram()
+        canvas_adapter = {
+            "adapter_id": "qwen21_scene_integration_production_canvas_v1",
+            "requested_width": requested_width,
+            "requested_height": requested_height,
+            "internal_width": internal_width,
+            "internal_height": internal_height,
+            "content_width": content_width,
+            "content_height": content_height,
+            "pad_left": left,
+            "pad_right": right,
+            "pad_top": top,
+            "pad_bottom": bottom,
+            "composite_padding": "edge_replication",
+            "matte_padding": "black_protected",
+            "finalization": "center_crop_downscale_then_exact_protected_restore",
+        }
+        return {
+            "delivery_composite_path": str(delivery_composite_path),
+            "delivery_mask_path": str(delivery_mask_path),
+            "internal_composite_path": str(internal_composite_path),
+            "internal_mask_path": str(internal_mask_path),
+            "canvas_adapter": canvas_adapter,
+            "provenance": {
+                "location_plate": {
+                    "input_id": int(location_input["input_id"]),
+                    "role": "location_plate",
+                    "sequence": 0,
+                    "sha256": str(location_input.get("sha256") or ""),
+                },
+                "placed_asset": {
+                    "input_id": int(asset_input["input_id"]),
+                    "role": "placed_asset",
+                    "sequence": 1,
+                    "sha256": str(asset_input.get("sha256") or ""),
+                    "placement": placement,
+                },
+                "integration_matte": {
+                    "input_id": int(matte_input["input_id"]),
+                    "role": "integration_matte",
+                    "sha256": str(matte_input.get("sha256") or ""),
+                    "editable_pixel_count": int(histogram[255]),
+                    "protected_pixel_count": int(histogram[0]),
+                },
+                "delivery_composite_sha256": self._sha256_file(delivery_composite_path),
+                "internal_composite_sha256": self._sha256_file(internal_composite_path),
+                "internal_matte_sha256": self._sha256_file(internal_mask_path),
+            },
+        }
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as reader:
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _load_qwen21_binary_mask(
+        mask_path: Path,
+        expected_size: tuple[int, int],
+        label: str,
+        allow_full_image_edit: bool,
+    ) -> Image.Image:
+        try:
+            with Image.open(mask_path) as mask_file:
+                if str(mask_file.format or "").upper() != "PNG":
+                    raise ValueError(f"{label} is not a decoded PNG")
+                mask = ImageOps.exif_transpose(mask_file)
+                mask.load()
+                if mask.size != expected_size:
+                    raise ValueError(
+                        f"{label} dimensions must equal the requested output; "
+                        f"mask={mask.size[0]}x{mask.size[1]} requested={expected_size[0]}x{expected_size[1]}"
+                    )
+                if mask.mode not in {"1", "L", "RGB", "RGBA"}:
+                    raise ValueError(f"{label} mode {mask.mode!r} is not canonical opaque grayscale")
+                if "A" in mask.getbands() and mask.getchannel("A").getextrema() != (255, 255):
+                    raise ValueError(f"{label} alpha must be fully opaque; alpha-only masks are not accepted")
+                red, green, blue = mask.convert("RGB").split()
+                if ImageChops.difference(red, green).getbbox() or ImageChops.difference(red, blue).getbbox():
+                    raise ValueError(f"{label} RGB channels must be equal grayscale values")
+                histogram = red.histogram()
+                if any(histogram[value] for value in range(1, 255)):
+                    raise ValueError(f"{label} must be binary black/white; gray pixels are not accepted")
+                if not histogram[255]:
+                    raise ValueError(f"{label} must contain editable white pixels")
+                if not histogram[0] and not allow_full_image_edit:
+                    raise ValueError(f"{label} must contain protected black pixels")
+                return red.copy()
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"{label} could not be decoded: {exc}")
+
+    def _finalize_qwen21_scene_integration_production_output(
+        self,
+        generated_path: str,
+        settings: dict[str, Any],
+        artifact_index: int,
+        temp_dir: str,
+    ) -> str:
+        requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+        base_path = Path(str(settings.get("_midom_scene_integration_base_composite_path") or ""))
+        mask_path = Path(str(settings.get("_midom_scene_integration_delivery_mask_path") or ""))
+        source_path = Path(str(generated_path or ""))
+        if requested_size is None or not base_path.is_file() or not mask_path.is_file() or not source_path.is_file():
+            raise ValueError("Qwen Image 2.1 Production Integration finalization inputs are missing.")
+        try:
+            with Image.open(source_path) as image_file:
+                generated = image_file.convert("RGB")
+                generated.load()
+            with Image.open(base_path) as image_file:
+                base = image_file.convert("RGB")
+                base.load()
+            matte = self._load_qwen21_binary_mask(mask_path, requested_size, "integration_matte", allow_full_image_edit=False)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"Qwen Image 2.1 Production Integration output could not be finalized: {exc}")
+        if base.size != requested_size:
+            raise ValueError("Qwen Image 2.1 Production Integration base composite dimensions are invalid.")
+        generated_delivery = self._resize_image_center_crop(generated, requested_size)
+        final = Image.composite(generated_delivery, base, matte)
+        mismatch_count = 0
+        maximum_channel_difference = 0
+        for final_pixel, base_pixel, matte_value in zip(final.getdata(), base.getdata(), matte.getdata()):
+            if matte_value == 0:
+                difference = max(abs(int(final_pixel[channel]) - int(base_pixel[channel])) for channel in range(3))
+                if difference:
+                    mismatch_count += 1
+                    maximum_channel_difference = max(maximum_channel_difference, difference)
+        if mismatch_count or maximum_channel_difference:
+            raise ValueError(
+                "Qwen Image 2.1 Production Integration protected-pixel restoration failed; "
+                f"mismatches={mismatch_count} maximum_channel_difference={maximum_channel_difference}."
+            )
+        output_path = Path(temp_dir) / f"midom-scene-integration-{artifact_index}.png"
+        final.save(output_path, format="PNG", optimize=True)
+        histogram = matte.histogram()
+        validation = {
+            "artifact_index": int(artifact_index),
+            "source_generated_dimensions": f"{generated.size[0]}x{generated.size[1]}",
+            "final_dimensions": f"{requested_size[0]}x{requested_size[1]}",
+            "editable_pixel_count": int(histogram[255]),
+            "protected_pixel_count": int(histogram[0]),
+            "compared_pixel_count": int(histogram[0]),
+            "pixel_mismatch_count": mismatch_count,
+            "maximum_channel_difference": maximum_channel_difference,
+            "verification_result": "passed",
+            "final_sha256": self._sha256_file(output_path),
+        }
+        settings.setdefault("_midom_scene_integration_output_validation", []).append(validation)
+        self._log(
+            "Finalized Qwen Image 2.1 Production Integration output; "
+            f"artifact_index={artifact_index} editable_pixels={validation['editable_pixel_count']} "
+            f"protected_pixels={validation['protected_pixel_count']} protected_mismatches=0."
+        )
+        return str(output_path)
+
     @staticmethod
     def _edge_pad_rgb_image(image: Image.Image, padding: tuple[int, int, int, int]) -> Image.Image:
         left, top, right, bottom = padding
@@ -16906,6 +18137,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         require_meaningful_alpha: bool = False,
         output_validation: Optional[list[dict[str, Any]]] = None,
         allowed_normalization_source_resolution: Any = None,
+        require_atmosphere_alpha: bool = False,
     ) -> dict[str, Any]:
         self._ensure_job_flow_enabled()
         path = Path(file_path)
@@ -16940,7 +18172,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         source_color_mode = decoded_color_mode
         expected_size = self._parse_resolution_size(expected_resolution)
         dimensions_mismatch = expected_size is not None and (decoded_width, decoded_height) != expected_size
-        if require_meaningful_alpha and dimensions_mismatch:
+        if (require_meaningful_alpha or require_atmosphere_alpha) and dimensions_mismatch:
             allowed_source_size = self._parse_resolution_size(allowed_normalization_source_resolution)
             if allowed_source_size is None or (decoded_width, decoded_height) != allowed_source_size:
                 raise ValueError(
@@ -16984,10 +18216,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if file_size > MAX_IMAGE_BYTES:
             raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
         alpha_validation = None
-        if require_meaningful_alpha:
+        if require_meaningful_alpha or require_atmosphere_alpha:
             if decoded_color_mode != "RGBA" or mime_type != "image/png" or decoded_format != "PNG":
                 raise ValueError(
-                    "Qwen Image 2.1 native alpha output must be a decoded RGBA PNG."
+                    "Qwen Image 2.1 alpha output must be a decoded RGBA PNG."
                 )
             with Image.open(path) as image:
                 rgba = image.convert("RGBA")
@@ -16998,12 +18230,26 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 opaque_pixels = int(histogram[255])
                 partial_pixels = int(sum(histogram[1:255]))
                 total_pixels = int(rgba.width * rgba.height)
-            if minimum_alpha != 0 or maximum_alpha != 255 or transparent_pixels <= 0 or opaque_pixels <= 0:
-                raise ValueError(
-                    "Qwen Image 2.1 output did not produce meaningful native alpha; "
-                    f"alpha_range={minimum_alpha}-{maximum_alpha} transparent_pixels={transparent_pixels} "
-                    f"opaque_pixels={opaque_pixels}."
-                )
+            if require_meaningful_alpha:
+                if minimum_alpha != 0 or maximum_alpha != 255 or transparent_pixels <= 0 or opaque_pixels <= 0:
+                    raise ValueError(
+                        "Qwen Image 2.1 output did not produce meaningful native alpha; "
+                        f"alpha_range={minimum_alpha}-{maximum_alpha} transparent_pixels={transparent_pixels} "
+                        f"opaque_pixels={opaque_pixels}."
+                    )
+            if require_atmosphere_alpha:
+                partial_fraction = partial_pixels / total_pixels
+                opaque_fraction = opaque_pixels / total_pixels
+                if partial_fraction < QWEN21_ATMOSPHERE_OVERLAY_MIN_PARTIAL_ALPHA_FRACTION:
+                    raise ValueError(
+                        "Qwen Image 2.1 atmosphere overlay did not produce enough semi-transparent pixels; "
+                        f"partial_alpha_fraction={partial_fraction:.6f}."
+                    )
+                if opaque_fraction > QWEN21_ATMOSPHERE_OVERLAY_MAX_OPAQUE_ALPHA_FRACTION:
+                    raise ValueError(
+                        "Qwen Image 2.1 atmosphere overlay is too opaque; "
+                        f"opaque_alpha_fraction={opaque_fraction:.6f}."
+                    )
             alpha_validation = {
                 "artifact_index": int(artifact_index),
                 "source_decoded_format": source_format,
@@ -17026,7 +18272,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "opaque_alpha_fraction": opaque_pixels / total_pixels,
                 "normalization_applied": normalized_temp_path is not None,
                 "normalization_mode": normalization_mode if normalized_temp_path is not None else "none",
-                "native_alpha_validation": "passed",
+                "native_alpha_validation": (
+                    "atmosphere_overlay_passed" if require_atmosphere_alpha else "passed"
+                ),
             }
         elif output_validation is not None:
             alpha_validation = {
