@@ -97,7 +97,10 @@ def test_prop_asset_contract_is_advertised_alongside_v1():
     assert contract["contract_version"] == "qwen21_visual_variation_v2"
     assert contract["recipe_version"] == "qwen21_prop_asset_candidate_v1"
     assert contract["max_source_images"] == 1
-    assert contract["max_supporting_reference_images"] == 0
+    assert contract["max_supporting_reference_images"] == 2
+    assert contract["max_reference_images"] == 3
+    assert contract["reference_roles"] == ["source_image", "supporting_reference_image"]
+    assert contract["reference_background_policies"] == ["keep_all"]
     assert contract["max_outputs"] == 1
     assert contract["modes"] == [{
         "mode_id": "prop_asset",
@@ -156,7 +159,11 @@ def test_prop_asset_uses_dedicated_standard_rgba_recipe_and_prompt():
         (lambda job: job["generation"].update(reference_background_policy="remove_supporting_backgrounds"), "background removal"),
         (lambda job: job["output"].update(color_mode="rgb"), "output.color_mode"),
         (lambda job: job["output"].update(count=2), "output.count=1"),
-        (lambda job: job["inputs"].append({"kind": "reference_image", "role": "supporting_reference_image", "sequence": 1, "input_id": 602}), "exactly one source_image"),
+        (lambda job: job["inputs"].extend([
+            {"kind": "reference_image", "role": "supporting_reference_image", "sequence": 1, "input_id": 602, "reference_purpose": "style"},
+            {"kind": "reference_image", "role": "supporting_reference_image", "sequence": 2, "input_id": 603, "reference_purpose": "style"},
+            {"kind": "reference_image", "role": "supporting_reference_image", "sequence": 3, "input_id": 604, "reference_purpose": "object"},
+        ]), "at most two supporting"),
         (lambda job: job["inputs"][0].update(kind="mask_image"), "accepts only reference_image"),
     ],
 )
@@ -168,22 +175,58 @@ def test_prop_asset_rejects_contract_drift(mutator, message):
         plugin_instance(module)._validate_image_job(job, 2502)
 
 
-def test_prop_asset_preserves_one_source_and_records_sha256_provenance():
+def test_prop_asset_preserves_ordered_references_and_records_sha256_provenance():
     module = load_plugin_module()
     plugin = plugin_instance(module)
     settings = plugin._validate_image_job(prop_job(), 2503)
-    plugin._apply_inputs_to_settings(settings, [{
-        "kind": "reference_image", "role": "source_image", "sequence": 0,
-        "input_id": 601, "path": "/tmp/prop.png", "sha256": "a" * 64,
-    }], prop_job())
+    job = prop_job()
+    job["inputs"].extend([
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 1,
+            "input_id": 602, "reference_purpose": "style", "mime_type": "image/png",
+        },
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 2,
+            "input_id": 603, "reference_purpose": "accessory", "mime_type": "image/png",
+        },
+    ])
+    settings = plugin._validate_image_job(job, 2503)
+    plugin._apply_inputs_to_settings(settings, [
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 2,
+            "reference_purpose": "accessory", "input_id": 603,
+            "path": "/tmp/accessory.png", "sha256": "c" * 64,
+        },
+        {
+            "kind": "reference_image", "role": "source_image", "sequence": 0,
+            "input_id": 601, "path": "/tmp/prop.png", "sha256": "a" * 64,
+        },
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 1,
+            "reference_purpose": "style", "input_id": 602,
+            "path": "/tmp/material.png", "sha256": "b" * 64,
+        },
+    ], job)
 
-    assert settings["image_refs"] == ["/tmp/prop.png"]
+    assert settings["image_refs"] == ["/tmp/prop.png", "/tmp/material.png", "/tmp/accessory.png"]
     assert settings["video_prompt_type"] == "KI"
-    assert settings["_midom_qwen21_reference_inputs"] == [{
-        "input_id": 601, "role": "source_image", "sequence": 0,
-        "reference_purpose": "primary_source", "sha256": "a" * 64,
-        "background_removal_applied": False,
-    }]
+    assert settings["_midom_qwen21_reference_inputs"] == [
+        {
+            "input_id": 601, "role": "source_image", "sequence": 0,
+            "reference_purpose": "primary_source", "sha256": "a" * 64,
+            "background_removal_applied": False,
+        },
+        {
+            "input_id": 602, "role": "supporting_reference_image", "sequence": 1,
+            "reference_purpose": "style", "sha256": "b" * 64,
+            "background_removal_applied": False,
+        },
+        {
+            "input_id": 603, "role": "supporting_reference_image", "sequence": 2,
+            "reference_purpose": "accessory", "sha256": "c" * 64,
+            "background_removal_applied": False,
+        },
+    ]
 
     settings["_midom_qwen21_visual_variation_output_validation"] = [{
         "artifact_index": 0, "color_mode": "RGBA", "native_alpha_validation": "passed",
@@ -192,13 +235,15 @@ def test_prop_asset_preserves_one_source_and_records_sha256_provenance():
     metadata = plugin._build_generation_metadata(settings, types.SimpleNamespace(), ["prop.png"])
     variation = metadata["visual_variation"]
     assert variation["variation_mode"] == "prop_asset"
-    assert variation["references"][0]["sha256"] == "a" * 64
+    assert [reference["sha256"] for reference in variation["references"]] == [
+        "a" * 64, "b" * 64, "c" * 64,
+    ]
     assert variation["output_color_mode"] == "RGBA"
     assert variation["alpha_required"] is True
     assert variation["output_validation"][0]["native_alpha_validation"] == "passed"
 
 
-def test_prop_asset_candidate_requires_one_rgba_source_and_standard_profile():
+def test_prop_asset_candidate_supports_ordered_references_and_rejects_excess():
     module = load_plugin_module()
     plugin = plugin_instance(module)
     candidate = {
@@ -224,6 +269,9 @@ def test_prop_asset_candidate_requires_one_rgba_source_and_standard_profile():
         },
     }
     assert plugin._candidate_incompatibility_reason(candidate, connection(module)) is None
-    candidate["summary"]["supporting_reference_image_count"] = 1
-    candidate["summary"]["reference_image_count"] = 2
-    assert "exactly one source reference" in plugin._candidate_incompatibility_reason(candidate, connection(module))
+    candidate["summary"]["supporting_reference_image_count"] = 2
+    candidate["summary"]["reference_image_count"] = 3
+    assert plugin._candidate_incompatibility_reason(candidate, connection(module)) is None
+    candidate["summary"]["supporting_reference_image_count"] = 3
+    candidate["summary"]["reference_image_count"] = 4
+    assert "at most two supporting references" in plugin._candidate_incompatibility_reason(candidate, connection(module))

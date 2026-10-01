@@ -98,8 +98,14 @@ def test_dressed_set_is_immediately_advertised_as_its_own_v3_contract():
         "recipe_version": "qwen21_dressed_set_candidate_v1",
         "reference_mode": "primary_image_edit",
         "max_source_images": 1,
-        "max_supporting_reference_images": 0,
-        "max_reference_images": 1,
+        "max_supporting_reference_images": 2,
+        "max_reference_images": 3,
+        "reference_roles": ["source_image", "supporting_reference_image"],
+        "supporting_reference_purposes": [
+            "accessory", "atmosphere", "composition", "identity", "lighting", "location",
+            "object", "prop", "style", "wardrobe",
+        ],
+        "reference_background_policies": ["keep_all"],
         "accelerator_profile_ids": ["standard"],
         "output_mime_types": ["image/png"],
         "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
@@ -145,7 +151,11 @@ def test_dressed_set_uses_its_own_rgb_scene_recipe():
         (lambda job: job["generation"].update(reference_background_policy="remove_supporting_backgrounds"), "background removal"),
         (lambda job: job["output"].update(color_mode="rgba"), "output.color_mode"),
         (lambda job: job["output"].update(count=2), "output.count=1"),
-        (lambda job: job["inputs"].append({"kind": "reference_image", "role": "supporting_reference_image", "sequence": 1, "input_id": 702}), "exactly one source_image"),
+        (lambda job: job["inputs"].extend([
+            {"kind": "reference_image", "role": "supporting_reference_image", "sequence": 1, "input_id": 702, "reference_purpose": "location"},
+            {"kind": "reference_image", "role": "supporting_reference_image", "sequence": 2, "input_id": 703, "reference_purpose": "prop"},
+            {"kind": "reference_image", "role": "supporting_reference_image", "sequence": 3, "input_id": 704, "reference_purpose": "lighting"},
+        ]), "at most two supporting"),
         (lambda job: job["inputs"][0].update(kind="control_image"), "accepts only reference_image"),
         (lambda job: job["generation"]["variation"].update(raw_ffmpeg="no"), "unsupported variation fields"),
     ],
@@ -158,19 +168,47 @@ def test_dressed_set_rejects_contract_drift(mutator, message):
         plugin_instance(module)._validate_image_job(job, 2602)
 
 
-def test_dressed_set_preserves_source_hash_and_rgb_provenance():
+def test_dressed_set_preserves_ordered_reference_hashes_and_rgb_provenance():
     module = load_plugin_module()
     plugin = plugin_instance(module)
     job = dressed_set_job()
+    job["inputs"].extend([
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 1,
+            "input_id": 702, "reference_purpose": "prop", "mime_type": "image/png",
+        },
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 2,
+            "input_id": 703, "reference_purpose": "lighting", "mime_type": "image/png",
+        },
+    ])
     settings = plugin._validate_image_job(job, 2603)
-    plugin._apply_inputs_to_settings(settings, [{
-        "kind": "reference_image", "role": "source_image", "sequence": 0,
-        "input_id": 701, "path": "/tmp/staged-scene.png", "sha256": "b" * 64,
-    }], job)
+    plugin._apply_inputs_to_settings(settings, [
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 2,
+            "reference_purpose": "lighting", "input_id": 703,
+            "path": "/tmp/lighting.png", "sha256": "d" * 64,
+        },
+        {
+            "kind": "reference_image", "role": "source_image", "sequence": 0,
+            "input_id": 701, "path": "/tmp/staged-scene.png", "sha256": "b" * 64,
+        },
+        {
+            "kind": "reference_image", "role": "supporting_reference_image", "sequence": 1,
+            "reference_purpose": "prop", "input_id": 702,
+            "path": "/tmp/lantern.png", "sha256": "c" * 64,
+        },
+    ], job)
 
-    assert settings["image_refs"] == ["/tmp/staged-scene.png"]
+    assert settings["image_refs"] == ["/tmp/staged-scene.png", "/tmp/lantern.png", "/tmp/lighting.png"]
     assert settings["video_prompt_type"] == "KI"
-    assert settings["_midom_qwen21_reference_inputs"][0]["sha256"] == "b" * 64
+    assert [reference["sha256"] for reference in settings["_midom_qwen21_reference_inputs"]] == [
+        "b" * 64, "c" * 64, "d" * 64,
+    ]
+    assert all(
+        reference["background_removal_applied"] is False
+        for reference in settings["_midom_qwen21_reference_inputs"]
+    )
     settings["_midom_qwen21_visual_variation_output_validation"] = [{
         "artifact_index": 0, "color_mode": "RGB", "final_sha256": "c" * 64,
         "native_alpha_validation": "not_required",
@@ -179,13 +217,15 @@ def test_dressed_set_preserves_source_hash_and_rgb_provenance():
     variation = metadata["visual_variation"]
     assert variation["variation_mode"] == "dressed_set"
     assert variation["recipe_version"] == "qwen21_dressed_set_candidate_v1"
-    assert variation["references"][0]["sha256"] == "b" * 64
+    assert [reference["sha256"] for reference in variation["references"]] == [
+        "b" * 64, "c" * 64, "d" * 64,
+    ]
     assert variation["output_color_mode"] == "RGB"
     assert variation["alpha_required"] is False
     assert variation["output_validation"][0]["final_sha256"] == "c" * 64
 
 
-def test_dressed_set_candidate_requires_one_rgb_source():
+def test_dressed_set_candidate_supports_ordered_references_and_rejects_excess():
     module = load_plugin_module()
     plugin = plugin_instance(module)
     candidate = {
@@ -207,5 +247,13 @@ def test_dressed_set_candidate_requires_one_rgb_source():
         },
     }
     assert plugin._candidate_incompatibility_reason(candidate, connection(module)) is None
+    candidate["summary"]["supporting_reference_image_count"] = 2
+    candidate["summary"]["reference_image_count"] = 3
+    assert plugin._candidate_incompatibility_reason(candidate, connection(module)) is None
+    candidate["summary"]["supporting_reference_image_count"] = 3
+    candidate["summary"]["reference_image_count"] = 4
+    assert "at most two supporting references" in plugin._candidate_incompatibility_reason(candidate, connection(module))
+    candidate["summary"]["supporting_reference_image_count"] = 0
+    candidate["summary"]["reference_image_count"] = 1
     candidate["summary"]["output_color_mode"] = "rgba"
     assert "requires output color mode rgb" in plugin._candidate_incompatibility_reason(candidate, connection(module))

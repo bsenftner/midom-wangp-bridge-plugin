@@ -197,10 +197,20 @@ QWEN21_VISUAL_VARIATION_V2_CONTRACT_VERSION = "qwen21_visual_variation_v2"
 QWEN21_PROP_ASSET_VARIATION_MODE = "prop_asset"
 QWEN21_PROP_ASSET_RECIPE_VERSION = "qwen21_prop_asset_candidate_v1"
 QWEN21_PROP_ASSET_MAX_SOURCE_IMAGES = 1
+QWEN21_PROP_ASSET_MAX_SUPPORTING_REFERENCE_IMAGES = 2
+QWEN21_PROP_ASSET_MAX_TOTAL_REFERENCE_IMAGES = (
+    QWEN21_PROP_ASSET_MAX_SOURCE_IMAGES
+    + QWEN21_PROP_ASSET_MAX_SUPPORTING_REFERENCE_IMAGES
+)
 QWEN21_VISUAL_VARIATION_V3_CONTRACT_VERSION = "qwen21_visual_variation_v3"
 QWEN21_DRESSED_SET_VARIATION_MODE = "dressed_set"
 QWEN21_DRESSED_SET_RECIPE_VERSION = "qwen21_dressed_set_candidate_v1"
 QWEN21_DRESSED_SET_MAX_SOURCE_IMAGES = 1
+QWEN21_DRESSED_SET_MAX_SUPPORTING_REFERENCE_IMAGES = 2
+QWEN21_DRESSED_SET_MAX_TOTAL_REFERENCE_IMAGES = (
+    QWEN21_DRESSED_SET_MAX_SOURCE_IMAGES
+    + QWEN21_DRESSED_SET_MAX_SUPPORTING_REFERENCE_IMAGES
+)
 QWEN21_DRESSED_SET_RECIPE_STEPS = 50
 QWEN21_DRESSED_SET_RECIPE_GUIDANCE = 8.0
 QWEN21_VISUAL_VARIATION_CAMERA_VIEWS = {
@@ -1428,7 +1438,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "recipe_version": QWEN21_PROP_ASSET_RECIPE_VERSION,
             "reference_mode": "primary_image_edit",
             "max_source_images": QWEN21_PROP_ASSET_MAX_SOURCE_IMAGES,
-            "max_supporting_reference_images": 0,
+            "max_supporting_reference_images": QWEN21_PROP_ASSET_MAX_SUPPORTING_REFERENCE_IMAGES,
+            "max_reference_images": QWEN21_PROP_ASSET_MAX_TOTAL_REFERENCE_IMAGES,
+            "reference_roles": ["source_image", "supporting_reference_image"],
+            "supporting_reference_purposes": sorted(QWEN21_VISUAL_VARIATION_REFERENCE_PURPOSES),
+            "reference_background_policies": ["keep_all"],
             "accelerator_profile_ids": ["standard"],
             "output_mime_types": ["image/png"],
             "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
@@ -1448,8 +1462,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "recipe_version": QWEN21_DRESSED_SET_RECIPE_VERSION,
             "reference_mode": "primary_image_edit",
             "max_source_images": QWEN21_DRESSED_SET_MAX_SOURCE_IMAGES,
-            "max_supporting_reference_images": 0,
-            "max_reference_images": 1,
+            "max_supporting_reference_images": QWEN21_DRESSED_SET_MAX_SUPPORTING_REFERENCE_IMAGES,
+            "max_reference_images": QWEN21_DRESSED_SET_MAX_TOTAL_REFERENCE_IMAGES,
+            "reference_roles": ["source_image", "supporting_reference_image"],
+            "supporting_reference_purposes": sorted(QWEN21_VISUAL_VARIATION_REFERENCE_PURPOSES),
+            "reference_background_policies": ["keep_all"],
             "accelerator_profile_ids": ["standard"],
             "output_mime_types": ["image/png"],
             "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
@@ -3505,9 +3522,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             contract_version == QWEN21_VISUAL_VARIATION_V3_CONTRACT_VERSION
             and variation_mode == QWEN21_DRESSED_SET_VARIATION_MODE
         )
-        is_single_source_mode = is_prop_asset or is_dressed_set
+        is_v2_or_v3_mode = is_prop_asset or is_dressed_set
         if (is_v1 and variation_mode not in QWEN21_VISUAL_VARIATION_MODES) or (
-            not is_v1 and not is_single_source_mode
+            not is_v1 and not is_v2_or_v3_mode
         ):
             raise ValueError(f"Unsupported Qwen Image 2.1 variation_mode: {variation_mode or 'missing'}")
         if negative_prompt:
@@ -3613,14 +3630,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if not isinstance(inputs, list):
             raise ValueError("Job inputs must be a list.")
         max_reference_images = (
-            QWEN21_PROP_ASSET_MAX_SOURCE_IMAGES
-            if is_single_source_mode
+            QWEN21_PROP_ASSET_MAX_TOTAL_REFERENCE_IMAGES
+            if is_prop_asset
+            else QWEN21_DRESSED_SET_MAX_TOTAL_REFERENCE_IMAGES
+            if is_dressed_set
             else QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES
         )
         if not 1 <= len(inputs) <= max_reference_images:
             raise ValueError(
-                f"Qwen Image 2.1 {variation_mode} requires exactly one source_image."
-                if is_single_source_mode
+                f"Qwen Image 2.1 {variation_mode} requires one source_image and at most two supporting reference images."
+                if is_v2_or_v3_mode
                 else "Qwen Image 2.1 curated variation requires one source_image and at most "
                 f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting reference images."
             )
@@ -3652,8 +3671,6 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "reference_purpose": "primary_source",
         }]
         for sequence, item in reference_inputs[1:]:
-            if is_single_source_mode:
-                raise ValueError(f"Qwen Image 2.1 {variation_mode} does not support supporting reference images.")
             if str(item.get("role") or "").strip() != "supporting_reference_image":
                 raise ValueError(
                     "Qwen Image 2.1 curated variation supporting references require "
@@ -3678,13 +3695,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting reference images."
             )
         default_background_policy = (
-            "keep_all" if is_single_source_mode
+            "keep_all" if is_v2_or_v3_mode
             else "remove_supporting_backgrounds" if variation_mode == "character_asset" else "keep_all"
         )
         reference_background_policy = str(
             generation.get("reference_background_policy") or default_background_policy
         ).strip().lower()
-        if is_single_source_mode and reference_background_policy != "keep_all":
+        if is_v2_or_v3_mode and reference_background_policy != "keep_all":
             raise ValueError(f"Qwen Image 2.1 {variation_mode} does not support reference background removal.")
         if reference_background_policy not in QWEN21_VISUAL_VARIATION_REFERENCE_BACKGROUND_POLICIES:
             raise ValueError(
@@ -3692,7 +3709,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"{reference_background_policy or 'missing'}"
             )
         output = job.get("output") or {}
-        if is_single_source_mode and self._coerce_int(output.get("count"), 1, 1, QWEN21_VISUAL_VARIATION_MAX_OUTPUTS) != 1:
+        if is_v2_or_v3_mode and self._coerce_int(output.get("count"), 1, 1, QWEN21_VISUAL_VARIATION_MAX_OUTPUTS) != 1:
             raise ValueError(f"Qwen Image 2.1 {variation_mode} requires output.count=1; Midom creates one child job per candidate.")
         expected_color_mode = "rgba" if variation_mode in {"character_asset", QWEN21_PROP_ASSET_VARIATION_MODE} else "rgb"
         color_mode = str(output.get("color_mode") or "").strip().lower()
@@ -8515,7 +8532,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         and str(summary.get("variation_mode") or "").strip().lower()
                         == QWEN21_DRESSED_SET_VARIATION_MODE
                     )
-                    is_single_source_mode = is_prop_asset or is_dressed_set
+                    is_v2_or_v3_mode = is_prop_asset or is_dressed_set
                     if contract_version not in {
                         QWEN21_VISUAL_VARIATION_CONTRACT_VERSION,
                         QWEN21_VISUAL_VARIATION_V2_CONTRACT_VERSION,
@@ -8539,15 +8556,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     if reference_mode and reference_mode != "primary_image_edit":
                         return "Qwen Image 2.1 curated variation requires reference_mode=primary_image_edit"
                     max_reference_images = (
-                        QWEN21_PROP_ASSET_MAX_SOURCE_IMAGES
-                        if is_single_source_mode
+                        QWEN21_PROP_ASSET_MAX_TOTAL_REFERENCE_IMAGES
+                        if is_prop_asset
+                        else QWEN21_DRESSED_SET_MAX_TOTAL_REFERENCE_IMAGES
+                        if is_dressed_set
                         else QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES
                     )
                     if reference_count is None or not (1 <= reference_count <= max_reference_images):
                         return (
-                            f"Qwen Image 2.1 {variation_mode} requires exactly one source reference; "
+                            f"Qwen Image 2.1 {variation_mode} requires one source and at most two supporting references; "
                             f"got {reference_count if reference_count is not None else 'missing'}"
-                            if is_single_source_mode
+                            if is_v2_or_v3_mode
                             else "Qwen Image 2.1 curated variation requires one source and at most "
                             f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting references; "
                             f"got {reference_count if reference_count is not None else 'missing'}"
@@ -8575,8 +8594,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             f"reference_image_count; got {supporting_reference_count} supporting and "
                             f"{reference_count} total"
                         )
-                    if is_single_source_mode and supporting_reference_count:
-                        return f"Qwen Image 2.1 {variation_mode} does not support supporting references"
+                    if is_prop_asset and supporting_reference_count > QWEN21_PROP_ASSET_MAX_SUPPORTING_REFERENCE_IMAGES:
+                        return f"Qwen Image 2.1 {variation_mode} supports at most two supporting references"
+                    if is_dressed_set and supporting_reference_count > QWEN21_DRESSED_SET_MAX_SUPPORTING_REFERENCE_IMAGES:
+                        return f"Qwen Image 2.1 {variation_mode} supports at most two supporting references"
                     if supporting_reference_count > QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES:
                         return (
                             "Qwen Image 2.1 curated variation supports at most "
@@ -8586,7 +8607,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     if mask_image_count:
                         return f"Qwen Image 2.1 curated variation does not support mask images; got {mask_image_count}"
                     default_background_policy = (
-                        "keep_all" if is_single_source_mode else "remove_supporting_backgrounds"
+                        "keep_all" if is_v2_or_v3_mode else "remove_supporting_backgrounds"
                         if variation_mode == "character_asset"
                         else "keep_all"
                     )
@@ -8598,13 +8619,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             "Qwen Image 2.1 curated variation unsupported "
                             f"reference_background_policy: {background_policy or 'missing'}"
                         )
-                    if is_single_source_mode and background_policy != "keep_all":
+                    if is_v2_or_v3_mode and background_policy != "keep_all":
                         return f"Qwen Image 2.1 {variation_mode} does not support reference background removal"
                     if bool(summary.get("has_negative_prompt")):
                         return "Qwen Image 2.1 curated variation does not support a negative prompt"
                     if accelerator_profile_id != "standard":
                         return "Qwen Image 2.1 curated variation supports only accelerator_profile_id=standard"
-                    if is_single_source_mode and self._coerce_int(summary.get("output_count"), 1, 1, QWEN21_VISUAL_VARIATION_MAX_OUTPUTS) != 1:
+                    if is_v2_or_v3_mode and self._coerce_int(summary.get("output_count"), 1, 1, QWEN21_VISUAL_VARIATION_MAX_OUTPUTS) != 1:
                         return f"Qwen Image 2.1 {variation_mode} requires output_count=1; Midom creates one child job per candidate"
                     expected_color_mode = "rgba" if variation_mode in {
                         "character_asset",
@@ -16114,16 +16135,18 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 variation_mode = str(settings.get("_midom_qwen21_visual_variation_mode") or "").strip()
                 is_prop_asset = variation_mode == QWEN21_PROP_ASSET_VARIATION_MODE
                 is_dressed_set = variation_mode == QWEN21_DRESSED_SET_VARIATION_MODE
-                is_single_source_mode = is_prop_asset or is_dressed_set
+                is_v2_or_v3_mode = is_prop_asset or is_dressed_set
                 max_reference_images = (
-                    QWEN21_PROP_ASSET_MAX_SOURCE_IMAGES
-                    if is_single_source_mode
+                    QWEN21_PROP_ASSET_MAX_TOTAL_REFERENCE_IMAGES
+                    if is_prop_asset
+                    else QWEN21_DRESSED_SET_MAX_TOTAL_REFERENCE_IMAGES
+                    if is_dressed_set
                     else QWEN21_VISUAL_VARIATION_MAX_TOTAL_REFERENCE_IMAGES
                 )
                 if not 1 <= len(ordered_references) <= max_reference_images:
                     raise ValueError(
-                        f"Qwen Image 2.1 {variation_mode} requires exactly one downloaded source image."
-                        if is_single_source_mode
+                        f"Qwen Image 2.1 {variation_mode} requires one downloaded source image and at most two supporting references."
+                        if is_v2_or_v3_mode
                         else "Qwen Image 2.1 curated variation requires one downloaded source image and at most "
                         f"{QWEN21_VISUAL_VARIATION_MAX_SUPPORTING_REFERENCE_IMAGES} supporting references."
                     )
@@ -16142,8 +16165,6 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 for index, (downloaded, descriptor) in enumerate(
                     zip(ordered_references, expected_descriptors)
                 ):
-                    if is_single_source_mode and index > 0:
-                        raise ValueError(f"Qwen Image 2.1 {variation_mode} does not support supporting references.")
                     expected_role = "source_image" if index == 0 else "supporting_reference_image"
                     if int(downloaded.get("sequence", -1)) != index:
                         raise ValueError(
