@@ -206,6 +206,7 @@ QWEN21_NATIVE_RGBA_MODE = "isolated_asset"
 QWEN21_NATIVE_RGBA_PROMPT_POLICY = "bridge_wrapped_native_rgba_v1"
 QWEN21_NATIVE_RGBA_ALPHA_VALIDATION = "transparent_and_opaque_pixels_v1"
 QWEN21_NATIVE_RGBA_MAX_REFERENCE_IMAGES = 3
+QWEN21_ASSET_ALPHA_NEAR_OPAQUE_MIN = 250
 # Enabled on the local qualification worker; Midom still gates the UI on the full nested contract.
 QWEN21_NATIVE_RGBA_ADVERTISE = True
 QWEN21_ATMOSPHERE_OVERLAY_CONTRACT_VERSION = "qwen21_atmosphere_overlay_v1"
@@ -1569,7 +1570,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "mode_id": QWEN21_PROP_ASSET_VARIATION_MODE,
                 "output_color_mode": "rgba",
                 "reference_background_policy": "keep_all",
-                "alpha_validation": QWEN21_NATIVE_RGBA_ALPHA_VALIDATION,
+                "alpha_validation": "native_alpha_cleanup_review_v1",
             }],
         }
 
@@ -1617,6 +1618,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 {
                     "mode_id": "character_asset",
                     "output_color_mode": "rgba",
+                    "alpha_validation": "native_alpha_cleanup_review_v1",
                     "default_reference_background_policy": "remove_supporting_backgrounds",
                 },
                 {
@@ -3934,6 +3936,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_output_mime_type": "image/png",
             "_midom_output_color_mode": expected_color_mode.upper(),
             "_midom_require_meaningful_alpha": variation_mode in {
+                "character_asset",
+                QWEN21_PROP_ASSET_VARIATION_MODE,
+            },
+            "_midom_allow_alpha_cleanup": variation_mode in {
                 "character_asset",
                 QWEN21_PROP_ASSET_VARIATION_MODE,
             },
@@ -10295,6 +10301,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                     else None
                                 ),
                                 bool(settings.get("_midom_require_atmosphere_alpha")),
+                                bool(settings.get("_midom_allow_alpha_cleanup")),
                             )
                         )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
@@ -18138,6 +18145,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         output_validation: Optional[list[dict[str, Any]]] = None,
         allowed_normalization_source_resolution: Any = None,
         require_atmosphere_alpha: bool = False,
+        allow_alpha_cleanup: bool = False,
     ) -> dict[str, Any]:
         self._ensure_job_flow_enabled()
         path = Path(file_path)
@@ -18229,9 +18237,27 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 transparent_pixels = int(histogram[0])
                 opaque_pixels = int(histogram[255])
                 partial_pixels = int(sum(histogram[1:255]))
+                near_opaque_pixels = int(sum(histogram[QWEN21_ASSET_ALPHA_NEAR_OPAQUE_MIN:256]))
                 total_pixels = int(rgba.width * rgba.height)
+            alpha_quality = ""
             if require_meaningful_alpha:
-                if minimum_alpha != 0 or maximum_alpha != 255 or transparent_pixels <= 0 or opaque_pixels <= 0:
+                if allow_alpha_cleanup:
+                    if (
+                        minimum_alpha >= maximum_alpha
+                        or near_opaque_pixels <= 0
+                        or (transparent_pixels <= 0 and partial_pixels <= 0)
+                    ):
+                        raise ValueError(
+                            "Qwen Image 2.1 output did not produce usable native alpha for cleanup review; "
+                            f"alpha_range={minimum_alpha}-{maximum_alpha} partial_pixels={partial_pixels} "
+                            f"near_opaque_pixels={near_opaque_pixels}."
+                        )
+                    alpha_quality = (
+                        "passed_native_alpha"
+                        if transparent_pixels > 0 and opaque_pixels > 0
+                        else "needs_cleanup"
+                    )
+                elif minimum_alpha != 0 or maximum_alpha != 255 or transparent_pixels <= 0 or opaque_pixels <= 0:
                     raise ValueError(
                         "Qwen Image 2.1 output did not produce meaningful native alpha; "
                         f"alpha_range={minimum_alpha}-{maximum_alpha} transparent_pixels={transparent_pixels} "
@@ -18266,16 +18292,34 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "transparent_pixel_count": transparent_pixels,
                 "partial_alpha_pixel_count": partial_pixels,
                 "opaque_pixel_count": opaque_pixels,
+                "near_opaque_pixel_count": near_opaque_pixels,
                 "total_pixel_count": total_pixels,
                 "zero_alpha_fraction": transparent_pixels / total_pixels,
                 "partial_alpha_fraction": partial_pixels / total_pixels,
                 "opaque_alpha_fraction": opaque_pixels / total_pixels,
+                "near_opaque_fraction": near_opaque_pixels / total_pixels,
                 "normalization_applied": normalized_temp_path is not None,
                 "normalization_mode": normalization_mode if normalized_temp_path is not None else "none",
                 "native_alpha_validation": (
-                    "atmosphere_overlay_passed" if require_atmosphere_alpha else "passed"
+                    "atmosphere_overlay_passed" if require_atmosphere_alpha
+                    else alpha_quality or "passed"
                 ),
             }
+            if alpha_quality:
+                alpha_validation["quality"] = alpha_quality
+                alpha_validation["alpha_validation"] = {
+                    "quality": alpha_quality,
+                    "alpha_min": int(minimum_alpha),
+                    "alpha_max": int(maximum_alpha),
+                    "zero_alpha_pixels": transparent_pixels,
+                    "partial_alpha_pixels": partial_pixels,
+                    "opaque_alpha_pixels": opaque_pixels,
+                    "near_opaque_pixels": near_opaque_pixels,
+                    "total_pixels": total_pixels,
+                    "transparent_fraction": transparent_pixels / total_pixels,
+                    "partial_fraction": partial_pixels / total_pixels,
+                    "opaque_fraction": opaque_pixels / total_pixels,
+                }
         elif output_validation is not None:
             alpha_validation = {
                 "artifact_index": int(artifact_index),

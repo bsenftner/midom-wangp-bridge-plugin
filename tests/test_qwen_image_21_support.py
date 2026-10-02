@@ -262,10 +262,11 @@ def test_qwen21_capability_reports_first_pass_contract():
         "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
         "max_outputs": 10,
         "modes": [
-            {
-                "mode_id": "character_asset",
-                "output_color_mode": "rgba",
-                "default_reference_background_policy": "remove_supporting_backgrounds",
+                {
+                    "mode_id": "character_asset",
+                    "output_color_mode": "rgba",
+                    "alpha_validation": "native_alpha_cleanup_review_v1",
+                    "default_reference_background_policy": "remove_supporting_backgrounds",
             },
             {
                 "mode_id": "location_plate",

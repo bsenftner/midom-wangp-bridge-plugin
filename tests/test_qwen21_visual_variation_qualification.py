@@ -170,10 +170,11 @@ def test_visual_variation_advertises_complete_capability_for_local_qualification
         "delivery_resolutions": ["768x768", "1024x1024", "1280x720", "720x1280"],
         "max_outputs": 10,
         "modes": [
-            {
-                "mode_id": "character_asset",
-                "output_color_mode": "rgba",
-                "default_reference_background_policy": "remove_supporting_backgrounds",
+                {
+                    "mode_id": "character_asset",
+                    "output_color_mode": "rgba",
+                    "alpha_validation": "native_alpha_cleanup_review_v1",
+                    "default_reference_background_policy": "remove_supporting_backgrounds",
             },
             {
                 "mode_id": "location_plate",
@@ -199,6 +200,7 @@ def test_character_variation_uses_isolated_50_step_rgba_recipe():
     assert settings["_midom_output_mime_type"] == "image/png"
     assert settings["_midom_output_color_mode"] == "RGBA"
     assert settings["_midom_require_meaningful_alpha"] is True
+    assert settings["_midom_allow_alpha_cleanup"] is True
     assert "transparent background stored in the alpha channel" in settings["prompt"]
     assert "Camera view: front right" in settings["prompt"]
     assert settings["multi_prompts_gen_type"] == "FG"
@@ -538,20 +540,50 @@ def test_character_upload_requires_meaningful_native_alpha(tmp_path, monkeypatch
         "RGBA",
         True,
         validation,
+        None,
+        False,
+        True,
     )
 
     assert captured["mime_type"] == "image/png"
     assert captured["payload"].startswith(b"\x89PNG\r\n\x1a\n")
-    assert validation[0]["native_alpha_validation"] == "passed"
+    assert validation[0]["native_alpha_validation"] == "passed_native_alpha"
+    assert validation[0]["quality"] == "passed_native_alpha"
     assert validation[0]["transparent_pixel_count"] > 0
     assert validation[0]["opaque_pixel_count"] > 0
 
+    soft_path = tmp_path / "soft-alpha.png"
+    soft = Image.new("RGBA", (64, 64), (20, 30, 40, 7))
+    soft.paste((200, 100, 50, 255), (16, 8, 48, 56))
+    soft.save(soft_path)
+    soft_validation = []
+    plugin._upload_artifact(
+        connection(module),
+        2207,
+        str(soft_path),
+        0,
+        "64x64",
+        "resize",
+        "image/png",
+        "RGBA",
+        True,
+        soft_validation,
+        None,
+        False,
+        True,
+    )
+    assert captured["payload"] == soft_path.read_bytes()
+    assert soft_validation[0]["native_alpha_validation"] == "needs_cleanup"
+    assert soft_validation[0]["quality"] == "needs_cleanup"
+    assert soft_validation[0]["alpha_validation"]["zero_alpha_pixels"] == 0
+    assert soft_validation[0]["alpha_validation"]["opaque_alpha_pixels"] > 0
+
     opaque_path = tmp_path / "opaque.png"
     Image.new("RGBA", (64, 64), (20, 30, 40, 255)).save(opaque_path)
-    with pytest.raises(ValueError, match="meaningful native alpha"):
+    with pytest.raises(ValueError, match="usable native alpha"):
         plugin._upload_artifact(
             connection(module),
-            2207,
+            2208,
             str(opaque_path),
             0,
             "64x64",
@@ -560,6 +592,9 @@ def test_character_upload_requires_meaningful_native_alpha(tmp_path, monkeypatch
             "RGBA",
             True,
             [],
+            None,
+            False,
+            True,
         )
 
 

@@ -106,7 +106,7 @@ def test_prop_asset_contract_is_advertised_alongside_v1():
         "mode_id": "prop_asset",
         "output_color_mode": "rgba",
         "reference_background_policy": "keep_all",
-        "alpha_validation": "transparent_and_opaque_pixels_v1",
+        "alpha_validation": "native_alpha_cleanup_review_v1",
     }]
 
     plugin._curated_tools_for_model = lambda _model_id: []
@@ -144,6 +144,7 @@ def test_prop_asset_uses_dedicated_standard_rgba_recipe_and_prompt():
     assert settings["custom_settings"] == {"qwen21_kv_cache": "Disabled", "rgba": "Enabled"}
     assert settings["_midom_output_color_mode"] == "RGBA"
     assert settings["_midom_require_meaningful_alpha"] is True
+    assert settings["_midom_allow_alpha_cleanup"] is True
     assert settings["remove_background_images_ref"] == 0
     assert "isolated prop asset" in settings["prompt"]
     assert "cast shadow" in settings["prompt"]
@@ -229,7 +230,7 @@ def test_prop_asset_preserves_ordered_references_and_records_sha256_provenance()
     ]
 
     settings["_midom_qwen21_visual_variation_output_validation"] = [{
-        "artifact_index": 0, "color_mode": "RGBA", "native_alpha_validation": "passed",
+        "artifact_index": 0, "color_mode": "RGBA", "native_alpha_validation": "passed_native_alpha",
         "transparent_pixel_count": 100, "opaque_pixel_count": 200,
     }]
     metadata = plugin._build_generation_metadata(settings, types.SimpleNamespace(), ["prop.png"])
@@ -240,7 +241,7 @@ def test_prop_asset_preserves_ordered_references_and_records_sha256_provenance()
     ]
     assert variation["output_color_mode"] == "RGBA"
     assert variation["alpha_required"] is True
-    assert variation["output_validation"][0]["native_alpha_validation"] == "passed"
+    assert variation["output_validation"][0]["native_alpha_validation"] == "passed_native_alpha"
 
 
 def test_prop_asset_candidate_supports_ordered_references_and_rejects_excess():
