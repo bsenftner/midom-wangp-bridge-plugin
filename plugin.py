@@ -39,6 +39,18 @@ MAX_EVENT_ASSET_PIXELS = 33_177_600
 MIN_EVENT_ASSET_DIMENSION = 16
 EVENT_VIDEO_PROCESSOR_ID = "event_video_ffmpeg_processor"
 EVENT_VIDEO_PROCESSING_TASK = "event_video_processing"
+FLASHVSR_IMAGE_PROCESSOR_ID = "flashvsr_image_processor"
+IMAGE_DETAIL_RESTORATION_PROCESSING_TASK = "image_detail_restoration"
+RESTORE_CROP_UPSCALE_DETAIL_OPERATION = "restore_crop_upscale_detail"
+RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION = "crop_upscale_detail_restoration_v1"
+FLASHVSR_X2_STANDARD_PROFILE_ID = "flashvsr_x2_standard_v1"
+FLASHVSR_X2_SPATIAL_UPSAMPLING = "flashvsr*2"
+FLASHVSR_CROP_UPSCALE_SUPPORTED_RESOLUTIONS = {
+    (768, 768),
+    (1024, 1024),
+    (1280, 720),
+    (720, 1280),
+}
 EVENT_VIDEO_OUTPUT_PROFILE = "mobile_public_720p"
 EVENT_VIDEO_BUMPER_SECONDS = 2
 EVENT_VIDEO_H264_ENCODER = "libx264"
@@ -2144,6 +2156,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         storyboard_capability = self._storyboard_ffmpeg_processing_capability()
         if storyboard_capability:
             media_processing.append(storyboard_capability)
+        flashvsr_image_capability = self._flashvsr_image_processing_capability()
+        if flashvsr_image_capability:
+            media_processing.append(flashvsr_image_capability)
         curated_tools = [
             dict(tool)
             for model in models
@@ -2477,6 +2492,89 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     },
                 },
             },
+        }
+
+    def _flashvsr_image_processing_runtime(self) -> Optional[dict[str, Any]]:
+        """Return the active WanGP FlashVSR configuration without loading its models."""
+        try:
+            from postprocessing import spatial_upsamplers as upsampler_api
+
+            handler = upsampler_api.find_postprocessing_upsampler(FLASHVSR_X2_SPATIAL_UPSAMPLING)
+            if handler is None:
+                return None
+            validation_error = upsampler_api.validate_postprocessing_spatial_upsampling(
+                FLASHVSR_X2_SPATIAL_UPSAMPLING,
+                1,
+            )
+            if validation_error:
+                return None
+            enabled, variant = handler.settings()
+            if not enabled or not variant:
+                return None
+            config = handler.config()
+            return {
+                "method": "flashvsr",
+                "spatial_upsampling": FLASHVSR_X2_SPATIAL_UPSAMPLING,
+                "model_variant": str(variant),
+                "sparse_backend": str(config.get("backend") or "auto"),
+                "topk_ratio": float(config.get("topk_ratio") or 0.0),
+            }
+        except Exception as exc:
+            self._log(f"FlashVSR image processing runtime probe failed: {type(exc).__name__}: {exc}", force=True)
+            return None
+
+    def _flashvsr_image_processing_capability(self) -> Optional[dict[str, Any]]:
+        runtime = self._flashvsr_image_processing_runtime()
+        if runtime is None:
+            self._log(
+                "FlashVSR Crop & Upscale detail restoration capability is unavailable; "
+                "enable FlashVSR and its required WanGP dependencies in Configuration > Extensions.",
+                force=True,
+            )
+            return None
+        delivery_resolutions = ["768x768", "1024x1024", "1280x720", "720x1280"]
+        return {
+            "family": "media_processing",
+            "media_type": "image",
+            "processing_task": IMAGE_DETAIL_RESTORATION_PROCESSING_TASK,
+            "processor_id": FLASHVSR_IMAGE_PROCESSOR_ID,
+            "display_name": "FlashVSR Crop Detail Restoration",
+            "supported": True,
+            "detected": True,
+            "operation_types": [RESTORE_CROP_UPSCALE_DETAIL_OPERATION],
+            "supported_operations": [RESTORE_CROP_UPSCALE_DETAIL_OPERATION],
+            "input_mime_types": {"source_image": ["image/png"]},
+            "output_mime_types": ["image/png"],
+            "operation_features": {
+                RESTORE_CROP_UPSCALE_DETAIL_OPERATION: [
+                    FLASHVSR_X2_STANDARD_PROFILE_ID,
+                    "rgb_png_only",
+                    "exact_final_dimensions",
+                    "deterministic_lanczos_post_resize",
+                    "single_output_typed_artifact",
+                ],
+            },
+            "contracts": {
+                RESTORE_CROP_UPSCALE_DETAIL_OPERATION: {
+                    "contract_version": RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION,
+                    "input_roles": ["crop_upscale_derivative"],
+                    "required_output_roles": ["restored_crop_image"],
+                    "input_mime_types": ["image/png"],
+                    "output_mime_types_by_role": {"restored_crop_image": ["image/png"]},
+                },
+            },
+            "limits": {
+                "crop_upscale_detail_restoration": {
+                    "profile_ids": [FLASHVSR_X2_STANDARD_PROFILE_ID],
+                    "input_color_modes": ["rgb"],
+                    "output_color_modes": ["rgb"],
+                    "delivery_resolutions": delivery_resolutions,
+                    "max_outputs": 1,
+                    "native_intermediate_scale": 2,
+                    "post_resize_method": "lanczos",
+                },
+            },
+            "flashvsr_runtime": runtime,
         }
 
     def _audio_output_mime_types(self) -> list[str]:
@@ -3093,6 +3191,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError("Job payload must be a JSON object.")
         job_id = self._coerce_job_id(job)
         self._validate_job_scope(job, config)
+        if self._is_flashvsr_image_processing_job(job):
+            return self._validate_flashvsr_image_processing_job(job, job_id)
         if self._is_event_video_processing_job(job):
             return self._validate_event_video_processing_job(job, job_id)
         if self._is_storyboard_ffmpeg_processing_job(job):
@@ -5193,6 +5293,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             and (processing_task == EVENT_VIDEO_PROCESSING_TASK or processor_id == EVENT_VIDEO_PROCESSOR_ID)
         )
 
+    def _is_flashvsr_image_processing_job(self, job: dict[str, Any]) -> bool:
+        processing_task = str(job.get("processing_task") or "").strip().lower()
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        operation_type = self._storyboard_operation_type(job)
+        return (
+            operation_type == RESTORE_CROP_UPSCALE_DETAIL_OPERATION
+            or processing_task == IMAGE_DETAIL_RESTORATION_PROCESSING_TASK
+            or processor_id == FLASHVSR_IMAGE_PROCESSOR_ID
+        )
+
     def _is_storyboard_ffmpeg_processing_job(self, job: dict[str, Any]) -> bool:
         family = str(job.get("family") or "").strip().lower()
         processing_task = str(job.get("processing_task") or "").strip().lower()
@@ -5747,6 +5857,193 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Control-guided input {item.get('input_id')} source_start_seconds exceeds source_duration_seconds.")
             if duration is not None and end is not None and end > duration + 0.05:
                 raise ValueError(f"Control-guided input {item.get('input_id')} source_end_seconds exceeds source_duration_seconds.")
+
+    def _validate_flashvsr_image_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
+        family = str(job.get("family") or "").strip().lower()
+        if family != "media_processing":
+            raise ValueError(f"Unsupported FlashVSR image processing family: {family}")
+        media_type = str(job.get("media_type") or "").strip().lower()
+        if media_type != "image":
+            raise ValueError(f"Unsupported FlashVSR image processing media_type: {media_type}")
+        processing_task = str(job.get("processing_task") or "").strip().lower()
+        if processing_task != IMAGE_DETAIL_RESTORATION_PROCESSING_TASK:
+            raise ValueError(f"Unsupported FlashVSR image processing task: {processing_task}")
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        if processor_id != FLASHVSR_IMAGE_PROCESSOR_ID:
+            raise ValueError(f"Unsupported FlashVSR image processor_id: {processor_id}")
+        operation_type = self._storyboard_operation_type(job)
+        if operation_type != RESTORE_CROP_UPSCALE_DETAIL_OPERATION:
+            raise ValueError(f"Unsupported FlashVSR image operation_type: {operation_type}")
+        if str(job.get("prompt") or "").strip() or str(job.get("negative_prompt") or "").strip():
+            raise ValueError("restore_crop_upscale_detail does not accept prompts.")
+        generation = job.get("generation")
+        if generation not in (None, {}) and not (isinstance(generation, dict) and not generation):
+            raise ValueError("restore_crop_upscale_detail does not accept generation settings.")
+        processing = job.get("processing") or {}
+        if not isinstance(processing, dict):
+            raise ValueError("FlashVSR image processing payload must be a JSON object.")
+        allowed_processing_keys = {
+            "operation_type",
+            "operation",
+            "contract_version",
+            "profile_id",
+            "method",
+            "intermediate_scale",
+            "post_resize",
+            "target_filename",
+        }
+        unknown_processing_keys = sorted(set(processing) - allowed_processing_keys)
+        if unknown_processing_keys:
+            raise ValueError(
+                "Unsupported restore_crop_upscale_detail processing field(s): "
+                + ", ".join(unknown_processing_keys)
+            )
+        contract_version = str(processing.get("contract_version") or "").strip()
+        if contract_version != RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION:
+            raise ValueError(
+                "Unsupported restore_crop_upscale_detail contract_version: "
+                f"{contract_version or 'missing'}"
+            )
+        processing_operation = str(processing.get("operation_type") or processing.get("operation") or "").strip()
+        if processing_operation != RESTORE_CROP_UPSCALE_DETAIL_OPERATION:
+            raise ValueError(
+                "Unsupported restore_crop_upscale_detail processing operation_type: "
+                f"{processing_operation or 'missing'}"
+            )
+        profile_id = str(processing.get("profile_id") or "").strip()
+        if profile_id != FLASHVSR_X2_STANDARD_PROFILE_ID:
+            raise ValueError(f"Unsupported restore_crop_upscale_detail profile_id: {profile_id or 'missing'}")
+        if str(processing.get("method") or "").strip().lower() != "flashvsr":
+            raise ValueError("restore_crop_upscale_detail requires method='flashvsr'.")
+        intermediate_scale = self._coerce_int(processing.get("intermediate_scale"), 0, 1, 4)
+        if intermediate_scale != 2:
+            raise ValueError("restore_crop_upscale_detail requires intermediate_scale=2.")
+        post_resize = processing.get("post_resize") or {}
+        if not isinstance(post_resize, dict):
+            raise ValueError("restore_crop_upscale_detail post_resize must be a JSON object.")
+        unknown_post_resize_keys = sorted(set(post_resize) - {"method", "target_width", "target_height"})
+        if unknown_post_resize_keys:
+            raise ValueError(
+                "Unsupported restore_crop_upscale_detail post_resize field(s): "
+                + ", ".join(unknown_post_resize_keys)
+            )
+        if str(post_resize.get("method") or "").strip().lower() != "lanczos":
+            raise ValueError("restore_crop_upscale_detail requires post_resize.method='lanczos'.")
+        output = job.get("output") or {}
+        if not isinstance(output, dict):
+            raise ValueError("FlashVSR image processing output must be a JSON object.")
+        allowed_output_keys = {
+            "count", "format", "width", "height", "color_mode", "mime_type", "artifacts",
+            "contract_version", "target_filename", "filename",
+        }
+        unknown_output_keys = sorted(set(output) - allowed_output_keys)
+        if unknown_output_keys:
+            raise ValueError(
+                "Unsupported restore_crop_upscale_detail output field(s): "
+                + ", ".join(unknown_output_keys)
+            )
+        try:
+            output_count = int(output.get("count"))
+        except (TypeError, ValueError):
+            output_count = 0
+        if output_count != 1:
+            raise ValueError("restore_crop_upscale_detail requires output.count=1.")
+        output_format = str(output.get("format") or "").strip().lower()
+        if output_format != "png":
+            raise ValueError("restore_crop_upscale_detail requires output.format='png'.")
+        output_color_mode = str(output.get("color_mode") or "").strip().lower()
+        if output_color_mode != "rgb":
+            raise ValueError("restore_crop_upscale_detail requires output.color_mode='rgb'.")
+        output_mime_type = str(output.get("mime_type") or "image/png").strip().lower()
+        if output_mime_type != "image/png":
+            raise ValueError("restore_crop_upscale_detail requires output MIME type image/png.")
+        output_width = self._coerce_int(output.get("width"), 0, 1, 4096)
+        output_height = self._coerce_int(output.get("height"), 0, 1, 4096)
+        if (output_width, output_height) not in FLASHVSR_CROP_UPSCALE_SUPPORTED_RESOLUTIONS:
+            raise ValueError(
+                "restore_crop_upscale_detail requires one supported output resolution; "
+                f"got {output_width}x{output_height}."
+            )
+        post_width = self._coerce_int(post_resize.get("target_width"), 0, 1, 4096)
+        post_height = self._coerce_int(post_resize.get("target_height"), 0, 1, 4096)
+        if (post_width, post_height) != (output_width, output_height):
+            raise ValueError(
+                "restore_crop_upscale_detail post_resize target must equal the requested output dimensions; "
+                f"got {post_width}x{post_height}, expected {output_width}x{output_height}."
+            )
+        output_declarations = output.get("artifacts")
+        if not isinstance(output_declarations, list) or len(output_declarations) != 1:
+            raise ValueError("restore_crop_upscale_detail requires exactly one typed output artifact declaration.")
+        output_declaration = output_declarations[0]
+        if not isinstance(output_declaration, dict):
+            raise ValueError("restore_crop_upscale_detail output artifact declaration must be a JSON object.")
+        if self._coerce_int(output_declaration.get("artifact_index"), -1, -1, 100) != 0:
+            raise ValueError("restore_crop_upscale_detail output artifact_index must be 0.")
+        if str(output_declaration.get("role") or "").strip().lower() != "restored_crop_image":
+            raise ValueError("restore_crop_upscale_detail output role must be restored_crop_image.")
+        if str(output_declaration.get("mime_type") or "").strip().lower() != "image/png":
+            raise ValueError("restore_crop_upscale_detail output artifact MIME type must be image/png.")
+        if output_declaration.get("required") is not True:
+            raise ValueError("restore_crop_upscale_detail output artifact must be required.")
+        inputs = job.get("inputs") or []
+        if not isinstance(inputs, list) or len(inputs) != 1:
+            raise ValueError("restore_crop_upscale_detail requires exactly one source_image input.")
+        source = inputs[0]
+        if not isinstance(source, dict):
+            raise ValueError("restore_crop_upscale_detail source_image descriptor must be a JSON object.")
+        if str(source.get("kind") or "").strip() != "source_image":
+            raise ValueError("restore_crop_upscale_detail input kind must be source_image.")
+        if str(source.get("role") or "").strip().lower() != "crop_upscale_derivative":
+            raise ValueError("restore_crop_upscale_detail source_image role must be crop_upscale_derivative.")
+        if self._coerce_int(source.get("sequence"), -1, -1, 100) != 0:
+            raise ValueError("restore_crop_upscale_detail source_image sequence must be 0.")
+        declared_mime = str(source.get("mime_type") or "image/png").strip().lower()
+        if declared_mime != "image/png":
+            raise ValueError("restore_crop_upscale_detail source_image MIME type must be image/png.")
+        self._coerce_input_id(source)
+        capability = self._flashvsr_image_processing_capability()
+        if capability is None:
+            raise ValueError("FlashVSR Crop & Upscale detail restoration is unavailable on this worker.")
+        requested_resolution = f"{output_width}x{output_height}"
+        self._log(
+            "Validated claimed FlashVSR Crop & Upscale detail restoration job; "
+            f"job_id={job_id} profile_id={profile_id} input_id={source.get('input_id')} "
+            f"output={requested_resolution} intermediate_scale=2 post_resize=lanczos."
+        )
+        return {
+            "model_type": FLASHVSR_IMAGE_PROCESSOR_ID,
+            "_midom_job_id": job_id,
+            "_midom_media_type": "media_processing",
+            "_midom_processing_family": "media_processing",
+            "_midom_processing_task": IMAGE_DETAIL_RESTORATION_PROCESSING_TASK,
+            "_midom_processor_id": FLASHVSR_IMAGE_PROCESSOR_ID,
+            "_midom_operation_type": RESTORE_CROP_UPSCALE_DETAIL_OPERATION,
+            "_midom_output_count": 1,
+            "_midom_output_format": "png",
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": "rgb",
+            "_midom_requested_resolution": requested_resolution,
+            "_midom_max_artifact_bytes": self._coerce_int(
+                (job.get("limits") or {}).get("max_artifact_bytes"), MAX_IMAGE_BYTES, 1, MAX_IMAGE_BYTES
+            ),
+            "_midom_output_declarations": [
+                {"artifact_index": 0, "role": "restored_crop_image", "mime_type": "image/png"}
+            ],
+            "_midom_processing": {
+                "operation_type": RESTORE_CROP_UPSCALE_DETAIL_OPERATION,
+                "contract_version": RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION,
+                "profile_id": FLASHVSR_X2_STANDARD_PROFILE_ID,
+                "method": "flashvsr",
+                "intermediate_scale": 2,
+                "post_resize": {
+                    "method": "lanczos",
+                    "target_width": output_width,
+                    "target_height": output_height,
+                },
+                "target_filename": str(processing.get("target_filename") or output.get("target_filename") or output.get("filename") or ""),
+            },
+            "_midom_flashvsr_runtime": capability.get("flashvsr_runtime") or {},
+        }
 
     def _validate_event_video_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
         family = str(job.get("family") or "").strip().lower()
@@ -9019,6 +9316,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return f"requested_by_user_id mismatch: {requested_by_user_id}"
         media_type = str(candidate.get("media_type") or "").lower()
         model_id = str(candidate.get("model_id") or "").strip()
+        if self._candidate_is_flashvsr_image_processing(candidate):
+            return self._flashvsr_image_candidate_incompatibility_reason(candidate)
         if self._candidate_is_event_video_processing(candidate):
             return self._event_video_candidate_incompatibility_reason(candidate)
         if self._candidate_is_storyboard_ffmpeg_processing(candidate):
@@ -9712,6 +10011,64 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             and (processing_task == EVENT_VIDEO_PROCESSING_TASK or processor_id == EVENT_VIDEO_PROCESSOR_ID)
         )
 
+    def _candidate_is_flashvsr_image_processing(self, candidate: dict[str, Any]) -> bool:
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
+        processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
+        operation_type = self._storyboard_operation_type(candidate)
+        return (
+            operation_type == RESTORE_CROP_UPSCALE_DETAIL_OPERATION
+            or processing_task == IMAGE_DETAIL_RESTORATION_PROCESSING_TASK
+            or processor_id == FLASHVSR_IMAGE_PROCESSOR_ID
+        )
+
+    def _flashvsr_image_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
+        if self._flashvsr_image_processing_capability() is None:
+            return "FlashVSR Crop & Upscale detail restoration is unavailable on this worker"
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        family = str(candidate.get("family") or summary.get("family") or "").strip().lower()
+        if family and family != "media_processing":
+            return f"unsupported FlashVSR image processing family: {family}"
+        media_type = str(candidate.get("media_type") or summary.get("media_type") or "").strip().lower()
+        if media_type != "image":
+            return f"unsupported FlashVSR image processing media_type: {media_type}"
+        processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
+        if processing_task != IMAGE_DETAIL_RESTORATION_PROCESSING_TASK:
+            return f"unsupported processing_task: {processing_task}"
+        processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
+        if processor_id != FLASHVSR_IMAGE_PROCESSOR_ID:
+            return f"unsupported processor_id: {processor_id}"
+        operation_type = self._storyboard_operation_type(candidate)
+        if operation_type != RESTORE_CROP_UPSCALE_DETAIL_OPERATION:
+            return f"unsupported operation_type: {operation_type}"
+        profile_id = str(summary.get("profile_id") or "").strip()
+        if profile_id != FLASHVSR_X2_STANDARD_PROFILE_ID:
+            return f"unsupported profile_id: {profile_id or 'missing'}"
+        source_image_count = self._coerce_int(summary.get("source_image_count"), 0, 0, 10)
+        if source_image_count != 1:
+            return f"restore_crop_upscale_detail requires source_image_count=1; got {source_image_count}"
+        input_color_mode = str(summary.get("input_color_mode") or "").strip().lower()
+        if input_color_mode != "rgb":
+            return f"restore_crop_upscale_detail requires input_color_mode='rgb'; got {input_color_mode or 'missing'}"
+        output_format = str(summary.get("output_format") or summary.get("format") or "").strip().lower()
+        if output_format != "png":
+            return f"restore_crop_upscale_detail requires output_format='png'; got {output_format or 'missing'}"
+        output_color_mode = str(summary.get("output_color_mode") or "").strip().lower()
+        if output_color_mode != "rgb":
+            return f"restore_crop_upscale_detail requires output_color_mode='rgb'; got {output_color_mode or 'missing'}"
+        output_count = self._coerce_int(summary.get("output_count"), 0, 0, 10)
+        if output_count != 1:
+            return f"restore_crop_upscale_detail requires output_count=1; got {output_count}"
+        output_width = self._coerce_int(summary.get("output_width"), 0, 0, 4096)
+        output_height = self._coerce_int(summary.get("output_height"), 0, 0, 4096)
+        if (output_width, output_height) not in FLASHVSR_CROP_UPSCALE_SUPPORTED_RESOLUTIONS:
+            return f"unsupported output dimensions: {output_width}x{output_height}"
+        return None
+
     def _candidate_is_storyboard_ffmpeg_processing(self, candidate: dict[str, Any]) -> bool:
         summary = candidate.get("summary") or {}
         if not isinstance(summary, dict):
@@ -10019,6 +10376,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             f"image_count={sum(1 for item in downloaded_inputs if item.get('category') == 'image')} "
                             f"audio_count={sum(1 for item in downloaded_inputs if item.get('category') == 'audio')}."
                         )
+                    elif processor_id == FLASHVSR_IMAGE_PROCESSOR_ID:
+                        source = downloaded_inputs[0] if downloaded_inputs else {}
+                        self._log(
+                            "Prepared FlashVSR Crop & Upscale detail restoration settings; "
+                            f"job_id={job_id} processor_id={processor_id} "
+                            f"operation_type={settings.get('_midom_operation_type')} "
+                            f"profile_id={(settings.get('_midom_processing') or {}).get('profile_id')} "
+                            f"input_id={source.get('input_id')} "
+                            f"input_dimensions={source.get('width')}x{source.get('height')} "
+                            f"requested_resolution={settings.get('_midom_requested_resolution')}."
+                        )
                     else:
                         raise ValueError(f"Unsupported media processing processor_id: {processor_id}")
                 elif media_type == "audio":
@@ -10084,7 +10452,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     )
                 self._set_active_job_status(
                     phase="starting",
-                    status="Processing started; running local FFmpeg." if media_type == "media_processing" else "Generation started; submitting to WanGP.",
+                    status=(
+                        "Processing started; running FlashVSR restoration."
+                        if str(settings.get("_midom_processor_id") or "") == FLASHVSR_IMAGE_PROCESSOR_ID
+                        else "Processing started; running local FFmpeg."
+                    ) if media_type == "media_processing" else "Generation started; submitting to WanGP.",
                     progress=0,
                 )
                 self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
@@ -10122,6 +10494,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                     process_handle,
                                 )
                                 cancel_message = "Storyboard FFmpeg Processing was cancelled."
+                            elif processor_id == FLASHVSR_IMAGE_PROCESSOR_ID:
+                                output_path, processing_metadata = self._run_flashvsr_image_processing_job(
+                                    connection,
+                                    job_id,
+                                    settings,
+                                    downloaded_inputs,
+                                    temp_dir,
+                                    process_handle,
+                                )
+                                cancel_message = "FlashVSR Crop & Upscale detail restoration was cancelled."
                             else:
                                 raise ValueError(f"Unsupported media processing processor_id: {processor_id}")
                         except RuntimeError as exc:
@@ -10156,7 +10538,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         artifacts = [artifact]
                     complete_payload = {
                         "artifacts": artifacts,
-                        "backend": "ffmpeg",
+                        "backend": "wangp_flashvsr" if processor_id == FLASHVSR_IMAGE_PROCESSOR_ID else "ffmpeg",
                         "model_id": processor_id,
                         "processor_id": processor_id,
                         "processing_metadata": processing_metadata,
@@ -10341,6 +10723,218 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._active_job_status = {}
             self._reset_idle_backoff_for_active_use(f"finished Midom job {job_id}", wake=True)
             self._log(f"Cleared active job state; job_id={job_id}.")
+
+    def _run_flashvsr_image_processing_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        processing = settings.get("_midom_processing") or {}
+        source_inputs = [item for item in downloaded_inputs if item.get("kind") == "source_image"]
+        if len(source_inputs) != 1:
+            raise ValueError(
+                "FlashVSR Crop & Upscale detail restoration requires exactly one source_image input; "
+                f"got {len(source_inputs)}."
+            )
+        source = source_inputs[0]
+        source_path = Path(str(source.get("path") or ""))
+        if not source_path.is_file():
+            raise ValueError("FlashVSR Crop & Upscale source image is missing.")
+        target_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+        if target_size is None or target_size not in FLASHVSR_CROP_UPSCALE_SUPPORTED_RESOLUTIONS:
+            raise ValueError("FlashVSR Crop & Upscale target dimensions are invalid.")
+        source_size = (int(source.get("width") or 0), int(source.get("height") or 0))
+        if source_size != target_size:
+            raise ValueError(
+                "FlashVSR Crop & Upscale source dimensions must equal the requested output dimensions; "
+                f"got {source_size[0]}x{source_size[1]}, expected {target_size[0]}x{target_size[1]}."
+            )
+        runtime = self._flashvsr_image_processing_runtime()
+        if runtime is None:
+            raise ValueError("FlashVSR Crop & Upscale detail restoration is unavailable on this worker.")
+        native_settings = {
+            "mode": "edit_postprocessing",
+            "model_type": "__system_image_postprocessing",
+            "image_mode": 1,
+            "video_source": str(source_path),
+            "video_length": 1,
+            "keep_frames_video_source": "1",
+            "temporal_upsampling": "",
+            "spatial_upsampling": FLASHVSR_X2_SPATIAL_UPSAMPLING,
+            "film_grain_intensity": 0,
+            "film_grain_saturation": 0.5,
+            "postprocess_audio": "",
+            "repeat_generation": 1,
+            "batch_size": 1,
+            "seed": 0,
+            "_api": {
+                "return_media": True,
+                "suppress_source_audio": True,
+                "suppress_metadata_images": True,
+            },
+        }
+        self._set_active_job_status(
+            phase="restoring_detail",
+            status="Running FlashVSR native x2 detail restoration.",
+            progress=8,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "Submitting FlashVSR Crop & Upscale detail restoration to WanGP; "
+            f"job_id={job_id} input_id={source.get('input_id')} input={source_size[0]}x{source_size[1]} "
+            f"native_scale=2 profile_id={processing.get('profile_id')!r} "
+            f"model_variant={runtime.get('model_variant')!r}."
+        )
+        callbacks = self._callbacks_for_job(connection, job_id)
+        api_session = self._get_generation_session()
+        job_handle = api_session.submit_task(native_settings, callbacks=callbacks)
+        self._active_job = job_handle
+        try:
+            result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
+        finally:
+            if self._active_job is job_handle:
+                self._active_job = process_handle
+        if self._cancel_requested_by_midom or process_handle.cancelled or getattr(result, "cancelled", False):
+            raise RuntimeError("cancel_requested")
+        if not getattr(result, "success", False):
+            errors = list(getattr(result, "errors", None) or [])
+            raise ValueError(str(errors[0] if errors else "WanGP FlashVSR restoration failed."))
+        generated_files = self._result_image_files(result)
+        if len(generated_files) != 1:
+            raise ValueError(
+                "FlashVSR Crop & Upscale detail restoration must return exactly one image; "
+                f"got {len(generated_files)}."
+            )
+        self._set_active_job_status(
+            phase="post_resize",
+            status="Resizing FlashVSR result to the Crop & Upscale delivery canvas.",
+            progress=84,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        output_path, output_metadata = self._finalize_flashvsr_crop_upscale_output(
+            Path(str(generated_files[0])),
+            Path(temp_dir),
+            target_size,
+            (target_size[0] * 2, target_size[1] * 2),
+            processing,
+        )
+        self._set_active_job_status(
+            phase="uploading",
+            status="FlashVSR detail restoration finished; uploading RGB PNG.",
+            progress=96,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        metadata = {
+            "processing_task": IMAGE_DETAIL_RESTORATION_PROCESSING_TASK,
+            "processor_id": FLASHVSR_IMAGE_PROCESSOR_ID,
+            "operation_type": RESTORE_CROP_UPSCALE_DETAIL_OPERATION,
+            "contract_version": RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION,
+            "profile_id": FLASHVSR_X2_STANDARD_PROFILE_ID,
+            "method": "flashvsr",
+            "input_project_derivative_id": source.get("input_id"),
+            "input_sha256": source.get("sha256"),
+            "input_dimensions": f"{source_size[0]}x{source_size[1]}",
+            "requested_dimensions": f"{target_size[0]}x{target_size[1]}",
+            "native_intermediate_dimensions": output_metadata["native_intermediate_dimensions"],
+            "post_resize": {"method": "lanczos", "target_width": target_size[0], "target_height": target_size[1]},
+            "final_dimensions": output_metadata["final_dimensions"],
+            "flashvsr_runtime": runtime,
+            "artifact_index": 0,
+            "artifact_role": "restored_crop_image",
+            "artifact_mime_type": "image/png",
+            "final_sha256": output_metadata["final_sha256"],
+            "worker_id": connection.worker_id,
+        }
+        self._log(
+            "Finalized FlashVSR Crop & Upscale detail restoration; "
+            f"job_id={job_id} native={output_metadata['native_intermediate_dimensions']} "
+            f"final={output_metadata['final_dimensions']} sha256={output_metadata['final_sha256'][:12]}...."
+        )
+        return [
+            {
+                "path": str(output_path),
+                "artifact_index": 0,
+                "role": "restored_crop_image",
+                "mime_type": "image/png",
+            }
+        ], metadata
+
+    def _finalize_flashvsr_crop_upscale_output(
+        self,
+        generated_path: Path,
+        temp_dir: Path,
+        target_size: tuple[int, int],
+        expected_native_size: tuple[int, int],
+        processing: dict[str, Any],
+    ) -> tuple[Path, dict[str, Any]]:
+        if not generated_path.is_file():
+            raise ValueError("FlashVSR Crop & Upscale detail restoration output is missing.")
+        try:
+            with Image.open(generated_path) as generated_file:
+                generated_file.load()
+                restored = generated_file.convert("RGB")
+                native_size = restored.size
+        except Exception as exc:
+            raise ValueError(f"FlashVSR Crop & Upscale output could not be decoded: {exc}") from exc
+        if native_size[0] <= 0 or native_size[1] <= 0:
+            raise ValueError("FlashVSR Crop & Upscale output dimensions are invalid.")
+        if native_size != expected_native_size:
+            raise ValueError(
+                "FlashVSR Crop & Upscale native output must be exactly x2 before post-resize; "
+                f"expected {expected_native_size[0]}x{expected_native_size[1]}, "
+                f"got {native_size[0]}x{native_size[1]}."
+            )
+        final = restored.resize(target_size, Image.Resampling.LANCZOS)
+        target_filename = Path(str(processing.get("target_filename") or "")).name
+        safe_filename = target_filename or "midom-restored-crop.png"
+        output_path = temp_dir / safe_filename
+        if output_path.suffix.lower() != ".png":
+            output_path = output_path.with_suffix(".png")
+        final.save(output_path, format="PNG", optimize=True)
+        return output_path, self._validate_flashvsr_crop_upscale_output(output_path, target_size, native_size)
+
+    def _validate_flashvsr_crop_upscale_output(
+        self,
+        path: Path,
+        expected_size: tuple[int, int],
+        native_size: tuple[int, int],
+    ) -> dict[str, Any]:
+        if not path.is_file():
+            raise ValueError("FlashVSR Crop & Upscale final PNG is missing.")
+        file_size = path.stat().st_size
+        if file_size <= 0 or file_size > MAX_IMAGE_BYTES:
+            raise ValueError(f"FlashVSR Crop & Upscale final PNG size is outside allowed bounds: {file_size} bytes.")
+        with path.open("rb") as reader:
+            header = reader.read(8)
+        if header != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("FlashVSR Crop & Upscale final artifact does not look like PNG bytes.")
+        try:
+            with Image.open(path) as image:
+                decoded_format = str(image.format or "").upper()
+                decoded_mode = str(image.mode or "").upper()
+                decoded_size = image.size
+                image.load()
+        except Exception as exc:
+            raise ValueError(f"FlashVSR Crop & Upscale final PNG could not be decoded: {exc}") from exc
+        if decoded_format != "PNG" or decoded_mode != "RGB":
+            raise ValueError(
+                "FlashVSR Crop & Upscale final artifact must decode as RGB PNG; "
+                f"got format={decoded_format or 'unknown'} mode={decoded_mode or 'unknown'}."
+            )
+        if decoded_size != expected_size:
+            raise ValueError(
+                "FlashVSR Crop & Upscale final dimensions do not match the requested output; "
+                f"expected {expected_size[0]}x{expected_size[1]}, got {decoded_size[0]}x{decoded_size[1]}."
+            )
+        return {
+            "native_intermediate_dimensions": f"{native_size[0]}x{native_size[1]}",
+            "final_dimensions": f"{decoded_size[0]}x{decoded_size[1]}",
+            "final_sha256": self._sha256_file(path),
+        }
 
     def _run_event_video_processing_job(
         self,
@@ -15358,6 +15952,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         inputs = job.get("inputs") or []
         if not isinstance(inputs, list):
             raise ValueError("Job inputs must be a list.")
+        if self._is_flashvsr_image_processing_job(job):
+            return self._download_flashvsr_image_processing_inputs(connection, job, temp_dir, inputs)
         if self._is_event_video_processing_job(job):
             return self._download_event_video_processing_inputs(connection, job, temp_dir, inputs)
         if self._is_storyboard_ffmpeg_processing_job(job):
@@ -15493,6 +16089,101 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if control_count != 1:
                 raise ValueError("Qwen Image Layered requires exactly one Control Image.")
         return downloaded
+
+    def _download_flashvsr_image_processing_inputs(
+        self,
+        connection: ConnectionContext,
+        job: dict[str, Any],
+        temp_dir: str,
+        inputs: list[Any],
+    ) -> list[dict[str, Any]]:
+        if len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise ValueError("restore_crop_upscale_detail requires exactly one source_image descriptor.")
+        item = inputs[0]
+        job_id = self._coerce_job_id(job)
+        input_id = self._coerce_input_id(item)
+        if str(item.get("kind") or "").strip() != "source_image":
+            raise ValueError("restore_crop_upscale_detail input kind must be source_image.")
+        if str(item.get("role") or "").strip().lower() != "crop_upscale_derivative":
+            raise ValueError("restore_crop_upscale_detail source_image role must be crop_upscale_derivative.")
+        if self._coerce_int(item.get("sequence"), -1, -1, 100) != 0:
+            raise ValueError("restore_crop_upscale_detail source_image sequence must be 0.")
+        self._log(
+            "Requesting FlashVSR Crop & Upscale input download; "
+            f"job_id={job_id} input_id={input_id} declared_mime={item.get('mime_type')!r} "
+            f"declared_bytes={item.get('bytes')!r}."
+        )
+        response = requests.get(
+            f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
+            headers=self._headers(connection),
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            stream=True,
+        )
+        response.raise_for_status()
+        mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if mime_type != "image/png":
+            raise ValueError(f"restore_crop_upscale_detail source_image MIME type must be image/png; got {mime_type!r}.")
+        data = self._read_limited_response_content(response, input_id, MAX_IMAGE_BYTES)
+        expected_size = item.get("bytes")
+        if expected_size is not None and len(data) != int(expected_size):
+            raise ValueError(f"restore_crop_upscale_detail input {input_id} size mismatch.")
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        expected_sha256 = str(item.get("sha256") or response.headers.get("X-Midom-SHA256") or "").strip().lower()
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise ValueError(f"restore_crop_upscale_detail input {input_id} SHA-256 mismatch.")
+        path = Path(temp_dir) / self._safe_input_filename(item.get("filename"), input_id, mime_type)
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+        with path.open("wb") as writer:
+            writer.write(data)
+        try:
+            with Image.open(path) as image:
+                decoded_format = str(image.format or "").upper()
+                decoded_mode = str(image.mode or "").upper()
+                width, height = image.size
+                image.load()
+        except Exception as exc:
+            raise ValueError(f"restore_crop_upscale_detail source_image could not be decoded: {exc}") from exc
+        if decoded_format != "PNG":
+            raise ValueError("restore_crop_upscale_detail source_image must decode as PNG.")
+        if decoded_mode != "RGB":
+            raise ValueError(
+                "restore_crop_upscale_detail source_image must decode as RGB PNG; "
+                f"got {decoded_mode or 'unknown'}."
+            )
+        if (int(width), int(height)) not in FLASHVSR_CROP_UPSCALE_SUPPORTED_RESOLUTIONS:
+            raise ValueError(
+                "restore_crop_upscale_detail source_image dimensions are unsupported; "
+                f"got {width}x{height}."
+            )
+        output = job.get("output") if isinstance(job.get("output"), dict) else {}
+        expected_dimensions = (
+            self._coerce_int(output.get("width"), 0, 1, 4096),
+            self._coerce_int(output.get("height"), 0, 1, 4096),
+        )
+        if (int(width), int(height)) != expected_dimensions:
+            raise ValueError(
+                "restore_crop_upscale_detail source_image dimensions must equal the requested output dimensions; "
+                f"got {width}x{height}, expected {expected_dimensions[0]}x{expected_dimensions[1]}."
+            )
+        self._log(
+            "Downloaded FlashVSR Crop & Upscale input; "
+            f"job_id={job_id} input_id={input_id} dimensions={width}x{height} "
+            f"bytes={len(data)} sha256={actual_sha256[:12]}..."
+        )
+        return [{
+            "input_id": input_id,
+            "kind": "source_image",
+            "role": "crop_upscale_derivative",
+            "sequence": 0,
+            "path": str(path),
+            "mime_type": "image/png",
+            "sha256": actual_sha256,
+            "width": int(width),
+            "height": int(height),
+            "decoded_format": decoded_format,
+            "decoded_color_mode": decoded_mode,
+        }]
 
     def _download_audio_job_inputs(
         self,

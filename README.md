@@ -345,7 +345,7 @@ Video output is MP4.
 
 Local media-processing capabilities are reported separately from AI generation. These jobs still use the same Midom worker pairing, token, candidate polling, claim, input download, progress, artifact upload, complete, fail, disconnect, and revoke routes.
 
-These operations are deterministic FFmpeg work. They are not WanGP AI generation jobs, but they run inside the same local worker process so project-owned hardware can take work off the shared Midom server.
+Most local media-processing operations below are deterministic FFmpeg work. FlashVSR Crop Detail Restoration is the deliberate exception: it uses WanGP's learned FlashVSR postprocessor, then returns to the exact Midom delivery canvas with deterministic Lanczos resizing. All run inside the same local worker process so project-owned hardware can take work off the shared Midom server.
 
 `event_video_ffmpeg_processor`
 
@@ -487,6 +487,15 @@ Source video frame extraction support includes:
 - Using Midom-supplied source duration metadata for raw WebM files that lack readable container duration metadata.
 - Keeping this as deterministic FFmpeg processing only; it does not call WanGP AI generation models.
 
+`flashvsr_image_processor`
+
+- Provides the optional final Restore Detail step for Midom Crop & Upscale Image.
+- Accepts exactly one already-cropped, RGB PNG `source_image` with role `crop_upscale_derivative` at `768x768`, `1024x1024`, `1280x720`, or `720x1280`.
+- Runs WanGP FlashVSR through its native x2 postprocessor, then deterministically Lanczos-resizes the result back to the same selected Crop & Upscale canvas.
+- Returns exactly one typed RGB PNG: artifact index `0`, role `restored_crop_image`, MIME type `image/png`.
+- Does not reconstruct or reinsert a region into the original image, accept alpha/masks/references/prompts, or promise source-pixel preservation. It creates a new generative detail-restoration derivative at the selected crop canvas size.
+- Reports source and final hashes, native intermediate dimensions, active FlashVSR runtime variant, and Lanczos post-resize provenance.
+
 ## WanGP Asset Requirements
 
 The local WanGP operator is responsible for installing and testing WanGP models, model assets, and accelerator LoRAs.
@@ -501,6 +510,7 @@ Some capabilities appear only when local runtime support is available:
 - Qwen Lightning accelerator profiles appear only when the required local Qwen accelerator files are installed.
 - Qwen Image 2.1 Fast - 6 steps appears only when the Viggle Turbo v0.2.1 LoRA is installed under WanGP's `loras/qwen21` directory.
 - Qwen Image 2.1 Pruna 8-step and 5-step profiles appear independently when their matching `p_qwen_image_2.1_*step_v0.1.safetensors` files are installed under WanGP's `loras/qwen21` directory.
+- FlashVSR Crop Detail Restoration appears only when the FlashVSR extension is enabled and its native `flashvsr*2` postprocessor validates locally. Install and configure FlashVSR through WanGP before refreshing worker capabilities.
 
 ## Basic Use
 
