@@ -6,6 +6,14 @@ WanGP provides local access to many open-source image, audio, music, and video m
 
 The plugin intentionally exposes a curated model set instead of raw WanGP controls. Normal Midom users should not need to know WanGP prompt-type letters, local LoRA filenames, filesystem paths, sampler internals, or experimental model switches.
 
+## Intended Use And Compatibility
+
+This plugin is supported only as a paired Midom worker. It is deliberately designed for Midom's project-scoped pairing, durable job queue, capability reporting, contract validation, artifact upload, provenance, and authorization flows.
+
+Although it may be technically possible to inspect its behavior or construct requests around it from another application, the plugin is **not** a standalone WanGP API, headless media-generation service, or supported backend for third-party user interfaces. Direct integrations are unsupported and expected to be unstable.
+
+Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
+
 ## Midom Media Generation Examples
 
 These Midom Blog posts show the kinds of organized media workflows this bridge is designed to support:
