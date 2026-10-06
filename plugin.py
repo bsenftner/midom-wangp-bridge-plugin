@@ -51,6 +51,30 @@ FLASHVSR_CROP_UPSCALE_SUPPORTED_RESOLUTIONS = {
     (1280, 720),
     (720, 1280),
 }
+LTX25_ALPHA_MATTE_PROCESSOR_ID = "ltx25_alpha_matte_processor"
+VIDEO_ALPHA_MATTING_PROCESSING_TASK = "video_alpha_matting"
+EXTRACT_VIDEO_ALPHA_MATTE_OPERATION = "extract_video_alpha_matte"
+LTX25_ALPHA_MATTE_CONTRACT_VERSION = "ltx25_alpha_matte_v1"
+LTX25_ALPHA_MATTE_PROFILE_ID = "ltx25_alpha_gen_windowed_v1"
+LTX25_ALPHA_GEN_LORA_FILENAME = "ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors"
+LTX25_ALPHA_MATTE_WINDOW_FRAMES = 145
+LTX25_ALPHA_MATTE_WINDOW_OVERLAP_FRAMES = 25
+LTX25_ALPHA_MATTE_MAX_DURATION_SECONDS = 30
+LTX25_ALPHA_MATTE_SUPPORTED_RESOLUTIONS = {"1280x720", "720x1280"}
+MATANYONE_V2_PROCESSOR_ID = "matanyone_v2_processor"
+MATANYONE_V2_ALPHA_MATTE_CONTRACT_VERSION = "matanyone_v2_alpha_matte_v1"
+MATANYONE_V2_ALPHA_MATTE_PROFILE_ID = "matanyone_v2_seeded_v1"
+MATANYONE_V2_ALPHA_MATTE_MAX_DURATION_SECONDS = 30
+MATANYONE_V2_ALPHA_MATTE_SUPPORTED_RESOLUTIONS = {"1280x720", "720x1280"}
+ALLOWED_MATANYONE_V2_SOURCE_VIDEO_MIME_TYPES = {"video/mp4"}
+SAM_SEED_MASK_PROCESSOR_ID = "sam_seed_mask_processor"
+VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK = "video_alpha_matte_seed"
+GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION = "generate_video_matte_seed_mask"
+SAM_CLICK_SEED_CONTRACT_VERSION = "video_matte_click_seed_v1"
+SAM_VIT_H_CLICK_SEED_PROFILE_ID = "sam_vit_h_click_seed_v1"
+SAM_CLICK_SEED_SUPPORTED_RESOLUTIONS = {"1280x720", "720x1280"}
+SAM_CLICK_SEED_MAX_POSITIVE_POINTS = 32
+SAM_CLICK_SEED_MAX_NEGATIVE_POINTS = 32
 EVENT_VIDEO_OUTPUT_PROFILE = "mobile_public_720p"
 EVENT_VIDEO_BUMPER_SECONDS = 2
 EVENT_VIDEO_H264_ENCODER = "libx264"
@@ -389,6 +413,7 @@ ALLOWED_VIDEO_OUTPUT_MIME_TYPES = {"video/mp4"}
 ALLOWED_VIDEO_SUFFIXES = {".mp4"}
 ALLOWED_EVENT_SOURCE_VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime"}
 ALLOWED_STORYBOARD_SOURCE_VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime", "video/webm"}
+ALLOWED_ALPHA_MATTE_SOURCE_VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime", "video/webm"}
 ALLOWED_STORYBOARD_AUDIO_CONTAINER_MIME_TYPES = ALLOWED_AUDIO_INPUT_MIME_TYPES | {"video/mp4", "video/quicktime", "video/webm"}
 ALLOWED_STORYBOARD_MATTE_MIME_TYPES = {"image/png", "image/jpeg"}
 ALLOWED_EVENT_OVERLAY_MIME_TYPES = {"image/png"}
@@ -2159,6 +2184,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         flashvsr_image_capability = self._flashvsr_image_processing_capability()
         if flashvsr_image_capability:
             media_processing.append(flashvsr_image_capability)
+        alpha_matte_capability = self._ltx25_alpha_matte_processing_capability()
+        if alpha_matte_capability:
+            media_processing.append(alpha_matte_capability)
+        matanyone_capability = self._matanyone_v2_alpha_matte_processing_capability()
+        if matanyone_capability:
+            media_processing.append(matanyone_capability)
+        sam_seed_capability = self._sam_click_seed_mask_processing_capability()
+        if sam_seed_capability:
+            media_processing.append(sam_seed_capability)
         curated_tools = [
             dict(tool)
             for model in models
@@ -2577,6 +2611,223 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "flashvsr_runtime": runtime,
         }
 
+    def _ltx25_alpha_matte_processing_capability(self) -> Optional[dict[str, Any]]:
+        lora_path = self._find_lora_relative_path("ltx2", LTX25_ALPHA_GEN_LORA_FILENAME)
+        if not lora_path:
+            self._log(
+                "LTX 2.5 Alpha Matte capability is unavailable; install "
+                f"{LTX25_ALPHA_GEN_LORA_FILENAME!r} in WanGP's loras/ltx2 directory.",
+                force=True,
+            )
+            return None
+        return {
+            "family": "media_processing",
+            "media_type": "video",
+            "processing_task": VIDEO_ALPHA_MATTING_PROCESSING_TASK,
+            "processor_id": LTX25_ALPHA_MATTE_PROCESSOR_ID,
+            "display_name": "Experimental LTX 2.5 Video Alpha Matte",
+            "supported": True,
+            "detected": True,
+            "experimental": True,
+            "operation_types": [EXTRACT_VIDEO_ALPHA_MATTE_OPERATION],
+            "supported_operations": [EXTRACT_VIDEO_ALPHA_MATTE_OPERATION],
+            "input_mime_types": {"source_video": sorted(ALLOWED_ALPHA_MATTE_SOURCE_VIDEO_MIME_TYPES)},
+            "output_mime_types": ["video/mp4"],
+            "operation_features": {
+                EXTRACT_VIDEO_ALPHA_MATTE_OPERATION: [
+                    LTX25_ALPHA_MATTE_PROFILE_ID,
+                    "ltx25_alpha_gen_lora",
+                    "raw_video_conditioning",
+                    "windowed_long_clip_processing",
+                    "grayscale_matte_mp4",
+                    "source_fps_and_geometry_preserved",
+                    "single_output_typed_artifact",
+                ],
+            },
+            "contracts": {
+                EXTRACT_VIDEO_ALPHA_MATTE_OPERATION: {
+                    "contract_version": LTX25_ALPHA_MATTE_CONTRACT_VERSION,
+                    "input_roles": ["matte_source"],
+                    "required_output_roles": ["alpha_matte_video"],
+                    "input_mime_types": sorted(ALLOWED_ALPHA_MATTE_SOURCE_VIDEO_MIME_TYPES),
+                    "output_mime_types_by_role": {"alpha_matte_video": ["video/mp4"]},
+                },
+            },
+            "limits": {
+                "video_alpha_matting": {
+                    "profile_ids": [LTX25_ALPHA_MATTE_PROFILE_ID],
+                    "model_id": LTX25_DISTILLED_VIDEO_MODEL_ID,
+                    "lora_filename": LTX25_ALPHA_GEN_LORA_FILENAME,
+                    "max_duration_seconds": LTX25_ALPHA_MATTE_MAX_DURATION_SECONDS,
+                    "source_fps": LTX_VIDEO_FPS,
+                    "delivery_resolutions": sorted(LTX25_ALPHA_MATTE_SUPPORTED_RESOLUTIONS),
+                    "window_frames": LTX25_ALPHA_MATTE_WINDOW_FRAMES,
+                    "window_overlap_frames": LTX25_ALPHA_MATTE_WINDOW_OVERLAP_FRAMES,
+                    "output_color_mode": "grayscale",
+                    "max_outputs": 1,
+                },
+            },
+        }
+
+    def _matanyone_v2_alpha_matte_runtime(self) -> Optional[dict[str, Any]]:
+        try:
+            from preprocessing.matanyone.utils.model_assets import get_selected_matanyone_weights_path
+            from shared.utils import files_locator as fl
+
+            runtime_config = {"matanyone_version": "v2"}
+            weights_path = get_selected_matanyone_weights_path(runtime_config)
+            config_path = fl.locate_file("mask/config.json", error_if_none=False)
+        except Exception as exc:
+            self._log(f"MatAnyone v2 runtime probe failed: {exc}", force=True)
+            return None
+        if not weights_path or not config_path:
+            self._log(
+                "MatAnyone v2 capability is unavailable; install WanGP mask/config.json and "
+                "mask/matanyone2.safetensors.",
+                force=True,
+            )
+            return None
+        return {
+            "matanyone_version": "v2",
+            "weights_path": str(weights_path),
+            "config_path": str(config_path),
+        }
+
+    def _matanyone_v2_alpha_matte_processing_capability(self) -> Optional[dict[str, Any]]:
+        runtime = self._matanyone_v2_alpha_matte_runtime()
+        probe = self._ffmpeg_processing_probe()
+        if runtime is None or not probe.get("ffmpeg_available") or not probe.get("ffprobe_available"):
+            return None
+        return {
+            "family": "media_processing",
+            "media_type": "video",
+            "processing_task": VIDEO_ALPHA_MATTING_PROCESSING_TASK,
+            "processor_id": MATANYONE_V2_PROCESSOR_ID,
+            "display_name": "MatAnyone v2 Seeded Video Alpha Matte",
+            "supported": True,
+            "detected": True,
+            "operation_types": [EXTRACT_VIDEO_ALPHA_MATTE_OPERATION],
+            "supported_operations": [EXTRACT_VIDEO_ALPHA_MATTE_OPERATION],
+            "input_mime_types": {
+                "source_video": sorted(ALLOWED_MATANYONE_V2_SOURCE_VIDEO_MIME_TYPES),
+                "mask_image": ["image/png"],
+            },
+            "output_mime_types": ["video/mp4"],
+            "operation_features": {
+                EXTRACT_VIDEO_ALPHA_MATTE_OPERATION: [
+                    MATANYONE_V2_ALPHA_MATTE_PROFILE_ID,
+                    "matanyone_v2_explicit_runtime",
+                    "binary_seed_mask_png",
+                    "forward_seed_frame_zero_only",
+                    "soft_grayscale_alpha_preserved",
+                    "silent_h264_mp4",
+                    "single_output_typed_artifact",
+                ],
+            },
+            "contracts": {
+                EXTRACT_VIDEO_ALPHA_MATTE_OPERATION: {
+                    "contract_version": MATANYONE_V2_ALPHA_MATTE_CONTRACT_VERSION,
+                    "input_roles": ["matte_source", "target_seed_mask"],
+                    "required_output_roles": ["alpha_matte_video"],
+                    "input_mime_types": ["video/mp4", "image/png"],
+                    "output_mime_types_by_role": {"alpha_matte_video": ["video/mp4"]},
+                },
+            },
+            "limits": {
+                "video_alpha_matting": {
+                    "profile_ids": [MATANYONE_V2_ALPHA_MATTE_PROFILE_ID],
+                    "matanyone_version": "v2",
+                    "max_duration_seconds": MATANYONE_V2_ALPHA_MATTE_MAX_DURATION_SECONDS,
+                    "source_fps": LTX_VIDEO_FPS,
+                    "source_containers": ["mp4"],
+                    "source_video_codecs": ["h264"],
+                    "source_rotation": "reject_nonzero",
+                    "delivery_resolutions": sorted(MATANYONE_V2_ALPHA_MATTE_SUPPORTED_RESOLUTIONS),
+                    "seed_frame_indices": [0],
+                    "seed_mask": "opaque_binary_luminance_white_foreground_v1",
+                    "output_color_mode": "grayscale",
+                    "output_video_codec": "h264",
+                    "output_audio": "none",
+                    "max_outputs": 1,
+                },
+            },
+            "matanyone_runtime": runtime,
+        }
+
+    def _sam_click_seed_mask_runtime(self) -> Optional[dict[str, Any]]:
+        try:
+            from shared.utils import files_locator as fl
+
+            checkpoint_path = fl.locate_file("mask/sam_vit_h_4b8939_fp16.safetensors", error_if_none=False)
+        except Exception as exc:
+            self._log(f"SAM ViT-H click-seed runtime probe failed: {exc}", force=True)
+            return None
+        if not checkpoint_path:
+            self._log(
+                "SAM click-seed capability is unavailable; install "
+                "mask/sam_vit_h_4b8939_fp16.safetensors.",
+                force=True,
+            )
+            return None
+        return {
+            "model": "sam_vit_h",
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_filename": Path(str(checkpoint_path)).name,
+        }
+
+    def _sam_click_seed_mask_processing_capability(self) -> Optional[dict[str, Any]]:
+        runtime = self._sam_click_seed_mask_runtime()
+        if runtime is None:
+            return None
+        delivery_resolutions = sorted(SAM_CLICK_SEED_SUPPORTED_RESOLUTIONS)
+        return {
+            "family": "media_processing",
+            "media_type": "image",
+            "processing_task": VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK,
+            "processor_id": SAM_SEED_MASK_PROCESSOR_ID,
+            "display_name": "SAM ViT-H Video Matte Seed Mask",
+            "supported": True,
+            "detected": True,
+            "operation_types": [GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION],
+            "supported_operations": [GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION],
+            "input_mime_types": {"source_image": ["image/png"]},
+            "output_mime_types": ["image/png"],
+            "operation_features": {
+                GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION: [
+                    SAM_VIT_H_CLICK_SEED_PROFILE_ID,
+                    "sam_vit_h_explicit_runtime",
+                    "delivery_pixel_clicks",
+                    "positive_negative_clicks",
+                    "binary_seed_mask_png",
+                    "single_output_typed_artifact",
+                ],
+            },
+            "contracts": {
+                GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION: {
+                    "contract_version": SAM_CLICK_SEED_CONTRACT_VERSION,
+                    "input_roles": ["seed_frame"],
+                    "required_output_roles": ["target_seed_mask"],
+                    "input_mime_types": ["image/png"],
+                    "output_mime_types_by_role": {"target_seed_mask": ["image/png"]},
+                },
+            },
+            "limits": {
+                "video_alpha_matte_seed": {
+                    "profile_ids": [SAM_VIT_H_CLICK_SEED_PROFILE_ID],
+                    "seed_frame_indices": [0],
+                    "coordinate_space": "delivery_pixels_v1",
+                    "delivery_resolutions": delivery_resolutions,
+                    "input_color_modes": ["rgb"],
+                    "output_color_mode": "grayscale",
+                    "mask_semantics": "binary_black_background_white_target_v1",
+                    "positive_points": {"min": 1, "max": SAM_CLICK_SEED_MAX_POSITIVE_POINTS},
+                    "negative_points": {"min": 0, "max": SAM_CLICK_SEED_MAX_NEGATIVE_POINTS},
+                    "max_outputs": 1,
+                },
+            },
+            "sam_runtime": runtime,
+        }
+
     def _audio_output_mime_types(self) -> list[str]:
         output_mime_types = ["audio/wav"]
         if self._mp3_transcode_available():
@@ -2593,8 +2844,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
 
     def _ffmpeg_processing_probe(self) -> dict[str, Any]:
         now = time.monotonic()
-        if self._ffmpeg_probe_cache is not None and now - self._ffmpeg_probe_cache_at < MP3_ENCODER_CACHE_SECONDS:
-            return dict(self._ffmpeg_probe_cache)
+        cached_probe = getattr(self, "_ffmpeg_probe_cache", None)
+        cached_at = float(getattr(self, "_ffmpeg_probe_cache_at", 0.0) or 0.0)
+        if cached_probe is not None and now - cached_at < MP3_ENCODER_CACHE_SECONDS:
+            return dict(cached_probe)
         ffmpeg_binary = self._ffmpeg_binary()
         ffprobe_binary = self._ffprobe_binary()
         probe = {
@@ -2646,7 +2899,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             probe["quicktime_demux_available"],
             probe["nvenc_available"],
         )
-        if signature != self._ffmpeg_probe_log_signature:
+        if signature != getattr(self, "_ffmpeg_probe_log_signature", None):
             self._ffmpeg_probe_log_signature = signature
             self._log(
                 "FFmpeg processing probe; "
@@ -3191,6 +3444,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError("Job payload must be a JSON object.")
         job_id = self._coerce_job_id(job)
         self._validate_job_scope(job, config)
+        if self._is_sam_click_seed_mask_processing_job(job):
+            return self._validate_sam_click_seed_mask_processing_job(job, job_id)
+        if self._is_matanyone_v2_alpha_matte_processing_job(job):
+            return self._validate_matanyone_v2_alpha_matte_processing_job(job, job_id)
+        if self._is_ltx25_alpha_matte_processing_job(job):
+            return self._validate_ltx25_alpha_matte_processing_job(job, job_id)
         if self._is_flashvsr_image_processing_job(job):
             return self._validate_flashvsr_image_processing_job(job, job_id)
         if self._is_event_video_processing_job(job):
@@ -5303,6 +5562,45 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             or processor_id == FLASHVSR_IMAGE_PROCESSOR_ID
         )
 
+    def _is_ltx25_alpha_matte_processing_job(self, job: dict[str, Any]) -> bool:
+        processing_task = str(job.get("processing_task") or "").strip().lower()
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        operation_type = self._storyboard_operation_type(job)
+        return (
+            operation_type == EXTRACT_VIDEO_ALPHA_MATTE_OPERATION
+            or processing_task == VIDEO_ALPHA_MATTING_PROCESSING_TASK
+            or processor_id == LTX25_ALPHA_MATTE_PROCESSOR_ID
+        )
+
+    def _is_matanyone_v2_alpha_matte_processing_job(self, job: dict[str, Any]) -> bool:
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        return processor_id == MATANYONE_V2_PROCESSOR_ID
+
+    def _is_sam_click_seed_mask_processing_job(self, job: dict[str, Any]) -> bool:
+        processing_task = str(job.get("processing_task") or "").strip().lower()
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        operation_type = self._sam_click_seed_operation_type(job)
+        return (
+            operation_type == GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION
+            or processing_task == VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK
+            or processor_id == SAM_SEED_MASK_PROCESSOR_ID
+        )
+
+    @staticmethod
+    def _sam_click_seed_operation_type(payload: dict[str, Any]) -> str:
+        """Prefer the worker operation nested in processing over a parent operation label."""
+        processing = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        summary_processing = summary.get("processing") if isinstance(summary.get("processing"), dict) else {}
+        return str(
+            processing.get("operation_type")
+            or processing.get("operation")
+            or summary_processing.get("operation_type")
+            or summary_processing.get("operation")
+            or AwsWorkerBridgePlugin._storyboard_operation_type(payload)
+            or ""
+        ).strip()
+
     def _is_storyboard_ffmpeg_processing_job(self, job: dict[str, Any]) -> bool:
         family = str(job.get("family") or "").strip().lower()
         processing_task = str(job.get("processing_task") or "").strip().lower()
@@ -5319,6 +5617,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def _storyboard_operation_type(payload: dict[str, Any]) -> str:
         processing = payload.get("processing") if isinstance(payload.get("processing"), dict) else {}
         summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        summary_processing = summary.get("processing") if isinstance(summary.get("processing"), dict) else {}
         return str(
             payload.get("operation_type")
             or payload.get("operation")
@@ -5333,6 +5632,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             or summary.get("operation")
             or summary.get("mediaassembly_operation_type")
             or summary.get("mediaassembly_operation")
+            or summary_processing.get("operation_type")
+            or summary_processing.get("operation")
+            or summary_processing.get("mediaassembly_operation_type")
+            or summary_processing.get("mediaassembly_operation")
             or ""
         ).strip()
 
@@ -5857,6 +6160,338 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 raise ValueError(f"Control-guided input {item.get('input_id')} source_start_seconds exceeds source_duration_seconds.")
             if duration is not None and end is not None and end > duration + 0.05:
                 raise ValueError(f"Control-guided input {item.get('input_id')} source_end_seconds exceeds source_duration_seconds.")
+
+    @staticmethod
+    def _validate_sam_click_seed_points(
+        value: Any,
+        label: str,
+        minimum: int,
+        maximum: int,
+        frame_size: tuple[int, int],
+    ) -> list[dict[str, int]]:
+        if not isinstance(value, list) or not (minimum <= len(value) <= maximum):
+            raise ValueError(f"SAM click seed requires {label} count between {minimum} and {maximum}.")
+        points: list[dict[str, int]] = []
+        width, height = frame_size
+        for index, point in enumerate(value):
+            if not isinstance(point, dict):
+                raise ValueError(f"SAM click seed {label}[{index}] must be an object.")
+            x, y = point.get("x"), point.get("y")
+            if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, int) or not isinstance(y, int):
+                raise ValueError(f"SAM click seed {label}[{index}] x and y must be integer delivery pixels.")
+            if not (0 <= x < width and 0 <= y < height):
+                raise ValueError(
+                    f"SAM click seed {label}[{index}] is outside frame bounds {width}x{height}: ({x}, {y})."
+                )
+            points.append({"x": x, "y": y})
+        return points
+
+    def _validate_sam_click_seed_mask_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
+        if str(job.get("family") or "").strip().lower() != "media_processing":
+            raise ValueError("SAM click seed requires family='media_processing'.")
+        if str(job.get("media_type") or "").strip().lower() != "image":
+            raise ValueError("SAM click seed requires media_type='image'.")
+        if str(job.get("processing_task") or "").strip().lower() != VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK:
+            raise ValueError("Unsupported SAM click seed processing_task.")
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        if processor_id != SAM_SEED_MASK_PROCESSOR_ID:
+            raise ValueError("Unsupported SAM click seed processor_id.")
+        processing = job.get("processing") or {}
+        if not isinstance(processing, dict):
+            raise ValueError("SAM click seed processing must be a JSON object.")
+        claimed_operation_type = self._sam_click_seed_operation_type(job)
+        if claimed_operation_type and claimed_operation_type != GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION:
+            raise ValueError("Unsupported SAM click seed operation_type.")
+        if str(job.get("prompt") or "").strip() or str(job.get("negative_prompt") or "").strip() or job.get("generation"):
+            raise ValueError("SAM click seed does not accept prompts or generation settings.")
+        unsupported = set(processing) - {
+            "operation_type", "operation", "contract_version", "profile_id", "seed_frame_index",
+            "coordinate_space", "positive_points", "negative_points", "target_filename",
+        }
+        if unsupported:
+            raise ValueError(f"Unsupported SAM click seed processing field(s): {', '.join(sorted(unsupported))}.")
+        if str(processing.get("contract_version") or "").strip() != SAM_CLICK_SEED_CONTRACT_VERSION:
+            raise ValueError("Unsupported SAM click seed contract_version.")
+        if str(processing.get("profile_id") or "").strip() != SAM_VIT_H_CLICK_SEED_PROFILE_ID:
+            raise ValueError("Unsupported SAM click seed profile_id.")
+        if self._coerce_int(processing.get("seed_frame_index"), -1, -1, 1_000_000) != 0:
+            raise ValueError("SAM click seed v1 requires seed_frame_index=0.")
+        if str(processing.get("coordinate_space") or "").strip() != "delivery_pixels_v1":
+            raise ValueError("SAM click seed requires coordinate_space='delivery_pixels_v1'.")
+        output = job.get("output") or {}
+        if not isinstance(output, dict):
+            raise ValueError("SAM click seed output must be a JSON object.")
+        if self._coerce_int(output.get("count"), 1, 1, 10) != 1:
+            raise ValueError("generate_video_matte_seed_mask requires output.count=1.")
+        if str(output.get("format") or "").strip().lower() != "png":
+            raise ValueError("generate_video_matte_seed_mask requires output.format='png'.")
+        if str(output.get("color_mode") or "").strip().lower() != "grayscale":
+            raise ValueError("generate_video_matte_seed_mask requires output.color_mode='grayscale'.")
+        output_width = self._coerce_int(output.get("width"), 0, 0, 4096)
+        output_height = self._coerce_int(output.get("height"), 0, 0, 4096)
+        frame_size = (output_width, output_height)
+        resolution = f"{output_width}x{output_height}"
+        if resolution not in SAM_CLICK_SEED_SUPPORTED_RESOLUTIONS:
+            raise ValueError(f"Unsupported SAM click seed output dimensions: {resolution}.")
+        declarations = output.get("artifacts") or []
+        if len(declarations) != 1 or not isinstance(declarations[0], dict):
+            raise ValueError("generate_video_matte_seed_mask requires exactly one typed output artifact.")
+        declaration = declarations[0]
+        if (
+            self._coerce_int(declaration.get("artifact_index"), -1, -1, 10) != 0
+            or str(declaration.get("role") or "").strip().lower() != "target_seed_mask"
+            or str(declaration.get("mime_type") or "").strip().lower() != "image/png"
+            or not self._coerce_bool(declaration.get("required"), False)
+        ):
+            raise ValueError("SAM click seed requires artifact 0 role=target_seed_mask MIME=image/png.")
+        inputs = job.get("inputs") or []
+        if len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise ValueError("SAM click seed requires exactly one source_image seed_frame input.")
+        source = inputs[0]
+        if (
+            str(source.get("kind") or "").strip() != "source_image"
+            or str(source.get("role") or "").strip().lower() != "seed_frame"
+            or self._coerce_int(source.get("sequence"), -1, -1, 10) != 0
+            or str(source.get("mime_type") or "").strip().lower() != "image/png"
+        ):
+            raise ValueError("SAM click seed requires source_image role=seed_frame sequence=0 MIME=image/png.")
+        self._coerce_input_id(source)
+        positive_points = self._validate_sam_click_seed_points(
+            processing.get("positive_points"), "positive_points", 1, SAM_CLICK_SEED_MAX_POSITIVE_POINTS, frame_size,
+        )
+        negative_points = self._validate_sam_click_seed_points(
+            processing.get("negative_points", []), "negative_points", 0, SAM_CLICK_SEED_MAX_NEGATIVE_POINTS, frame_size,
+        )
+        runtime = self._sam_click_seed_mask_runtime()
+        if runtime is None:
+            raise ValueError("SAM click seed is unavailable; install the SAM ViT-H checkpoint.")
+        return {
+            "_midom_job_id": job_id,
+            "_midom_media_type": "media_processing",
+            "_midom_processing_family": "media_processing",
+            "_midom_processing_task": VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK,
+            "_midom_processor_id": SAM_SEED_MASK_PROCESSOR_ID,
+            "_midom_operation_type": GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION,
+            "_midom_output_count": 1,
+            "_midom_output_format": "png",
+            "_midom_output_mime_type": "image/png",
+            "_midom_output_color_mode": "grayscale",
+            "_midom_requested_resolution": resolution,
+            "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), MAX_IMAGE_BYTES, 1, MAX_IMAGE_BYTES),
+            "_midom_output_declarations": [{"artifact_index": 0, "role": "target_seed_mask", "mime_type": "image/png"}],
+            "_midom_processing": {
+                "operation_type": GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION,
+                "contract_version": SAM_CLICK_SEED_CONTRACT_VERSION,
+                "profile_id": SAM_VIT_H_CLICK_SEED_PROFILE_ID,
+                "seed_frame_index": 0,
+                "coordinate_space": "delivery_pixels_v1",
+                "positive_points": positive_points,
+                "negative_points": negative_points,
+                "target_filename": str(processing.get("target_filename") or ""),
+                "runtime": runtime,
+            },
+        }
+
+    def _validate_matanyone_v2_alpha_matte_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
+        if str(job.get("family") or "").strip().lower() != "media_processing":
+            raise ValueError("MatAnyone v2 Alpha Matte requires family='media_processing'.")
+        if str(job.get("media_type") or "").strip().lower() != "video":
+            raise ValueError("MatAnyone v2 Alpha Matte requires media_type='video'.")
+        if str(job.get("processing_task") or "").strip().lower() != VIDEO_ALPHA_MATTING_PROCESSING_TASK:
+            raise ValueError("Unsupported MatAnyone v2 Alpha Matte processing_task.")
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        if processor_id != MATANYONE_V2_PROCESSOR_ID:
+            raise ValueError("Unsupported MatAnyone v2 Alpha Matte processor_id.")
+        if self._storyboard_operation_type(job) != EXTRACT_VIDEO_ALPHA_MATTE_OPERATION:
+            raise ValueError("Unsupported MatAnyone v2 Alpha Matte operation_type.")
+        if str(job.get("prompt") or "").strip() or str(job.get("negative_prompt") or "").strip() or job.get("generation"):
+            raise ValueError("MatAnyone v2 Alpha Matte does not accept prompts or generation settings.")
+        processing = job.get("processing") or {}
+        if not isinstance(processing, dict):
+            raise ValueError("MatAnyone v2 Alpha Matte processing must be a JSON object.")
+        unsupported = set(processing) - {
+            "operation_type", "operation", "contract_version", "profile_id", "seed_frame_index", "target_filename",
+        }
+        if unsupported:
+            raise ValueError(f"Unsupported MatAnyone v2 processing field(s): {', '.join(sorted(unsupported))}.")
+        if str(processing.get("contract_version") or "").strip() != MATANYONE_V2_ALPHA_MATTE_CONTRACT_VERSION:
+            raise ValueError("Unsupported MatAnyone v2 Alpha Matte contract_version.")
+        if str(processing.get("profile_id") or "").strip() != MATANYONE_V2_ALPHA_MATTE_PROFILE_ID:
+            raise ValueError("Unsupported MatAnyone v2 Alpha Matte profile_id.")
+        if self._coerce_int(processing.get("seed_frame_index"), -1, -1, 1_000_000) != 0:
+            raise ValueError("MatAnyone v2 Alpha Matte v1 requires seed_frame_index=0 for forward propagation.")
+        output = job.get("output") or {}
+        if not isinstance(output, dict):
+            raise ValueError("MatAnyone v2 Alpha Matte output must be a JSON object.")
+        if self._coerce_int(output.get("count"), 1, 1, 10) != 1:
+            raise ValueError("extract_video_alpha_matte requires output.count=1.")
+        if str(output.get("format") or "").strip().lower() != "mp4":
+            raise ValueError("extract_video_alpha_matte requires output.format='mp4'.")
+        if str(output.get("color_mode") or "").strip().lower() != "grayscale":
+            raise ValueError("extract_video_alpha_matte requires output.color_mode='grayscale'.")
+        output_width = self._coerce_int(output.get("width"), 0, 0, 4096)
+        output_height = self._coerce_int(output.get("height"), 0, 0, 4096)
+        resolution = f"{output_width}x{output_height}"
+        if resolution not in MATANYONE_V2_ALPHA_MATTE_SUPPORTED_RESOLUTIONS:
+            raise ValueError(f"Unsupported MatAnyone v2 Alpha Matte output dimensions: {resolution}.")
+        declarations = output.get("artifacts") or []
+        if len(declarations) != 1 or not isinstance(declarations[0], dict):
+            raise ValueError("extract_video_alpha_matte requires exactly one typed output artifact.")
+        declaration = declarations[0]
+        if (
+            self._coerce_int(declaration.get("artifact_index"), -1, -1, 10) != 0
+            or str(declaration.get("role") or "").strip().lower() != "alpha_matte_video"
+            or str(declaration.get("mime_type") or "").strip().lower() != "video/mp4"
+            or not self._coerce_bool(declaration.get("required"), False)
+        ):
+            raise ValueError("MatAnyone v2 Alpha Matte requires artifact 0 role=alpha_matte_video MIME=video/mp4.")
+        inputs = job.get("inputs") or []
+        if len(inputs) != 2 or not all(isinstance(item, dict) for item in inputs):
+            raise ValueError("MatAnyone v2 Alpha Matte requires one source_video and one target_seed_mask.")
+        source_inputs = [item for item in inputs if str(item.get("kind") or "").strip() == "source_video"]
+        mask_inputs = [item for item in inputs if str(item.get("kind") or "").strip() == "mask_image"]
+        if len(source_inputs) != 1 or len(mask_inputs) != 1:
+            raise ValueError("MatAnyone v2 Alpha Matte requires exactly one source_video and one mask_image.")
+        source, seed_mask = source_inputs[0], mask_inputs[0]
+        if (
+            str(source.get("role") or "").strip().lower() != "matte_source"
+            or self._coerce_int(source.get("sequence"), -1, -1, 10) != 0
+            or str(source.get("mime_type") or "").strip().lower() not in ALLOWED_MATANYONE_V2_SOURCE_VIDEO_MIME_TYPES
+        ):
+            raise ValueError("MatAnyone v2 Alpha Matte requires source_video role=matte_source sequence=0 MIME=video/mp4.")
+        if (
+            str(seed_mask.get("role") or "").strip().lower() != "target_seed_mask"
+            or self._coerce_int(seed_mask.get("sequence"), -1, -1, 10) != 1
+            or str(seed_mask.get("mime_type") or "").strip().lower() != "image/png"
+        ):
+            raise ValueError("MatAnyone v2 Alpha Matte requires mask_image role=target_seed_mask sequence=1 MIME=image/png.")
+        self._coerce_input_id(source)
+        self._coerce_input_id(seed_mask)
+        runtime = self._matanyone_v2_alpha_matte_runtime()
+        if runtime is None:
+            raise ValueError("MatAnyone v2 Alpha Matte is unavailable; install the MatAnyone v2 assets.")
+        return {
+            "_midom_job_id": job_id,
+            "_midom_media_type": "media_processing",
+            "_midom_processing_family": "media_processing",
+            "_midom_processing_task": VIDEO_ALPHA_MATTING_PROCESSING_TASK,
+            "_midom_processor_id": MATANYONE_V2_PROCESSOR_ID,
+            "_midom_operation_type": EXTRACT_VIDEO_ALPHA_MATTE_OPERATION,
+            "_midom_output_count": 1,
+            "_midom_output_format": "mp4",
+            "_midom_output_mime_type": "video/mp4",
+            "_midom_output_color_mode": "grayscale",
+            "_midom_requested_resolution": resolution,
+            "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), MAX_VIDEO_BYTES, 1, MAX_VIDEO_BYTES),
+            "_midom_output_declarations": [{"artifact_index": 0, "role": "alpha_matte_video", "mime_type": "video/mp4"}],
+            "_midom_processing": {
+                "operation_type": EXTRACT_VIDEO_ALPHA_MATTE_OPERATION,
+                "contract_version": MATANYONE_V2_ALPHA_MATTE_CONTRACT_VERSION,
+                "profile_id": MATANYONE_V2_ALPHA_MATTE_PROFILE_ID,
+                "seed_frame_index": 0,
+                "target_filename": str(processing.get("target_filename") or ""),
+                "runtime": runtime,
+            },
+        }
+
+    def _validate_ltx25_alpha_matte_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
+        family = str(job.get("family") or "").strip().lower()
+        if family != "media_processing":
+            raise ValueError(f"Unsupported LTX Alpha Matte family: {family}")
+        if str(job.get("media_type") or "").strip().lower() != "video":
+            raise ValueError("LTX Alpha Matte requires media_type='video'.")
+        if str(job.get("processing_task") or "").strip().lower() != VIDEO_ALPHA_MATTING_PROCESSING_TASK:
+            raise ValueError(f"Unsupported LTX Alpha Matte processing_task: {job.get('processing_task')}")
+        processor_id = str(job.get("processor_id") or job.get("model_id") or "").strip()
+        if processor_id != LTX25_ALPHA_MATTE_PROCESSOR_ID:
+            raise ValueError(f"Unsupported LTX Alpha Matte processor_id: {processor_id}")
+        if self._storyboard_operation_type(job) != EXTRACT_VIDEO_ALPHA_MATTE_OPERATION:
+            raise ValueError("Unsupported LTX Alpha Matte operation_type.")
+        if str(job.get("prompt") or "").strip() or str(job.get("negative_prompt") or "").strip() or job.get("generation"):
+            raise ValueError("extract_video_alpha_matte does not accept prompts or generation settings.")
+        processing = job.get("processing") or {}
+        if not isinstance(processing, dict):
+            raise ValueError("LTX Alpha Matte processing must be a JSON object.")
+        unsupported = set(processing) - {"operation_type", "operation", "contract_version", "profile_id", "target_filename"}
+        if unsupported:
+            raise ValueError(f"Unsupported LTX Alpha Matte processing field(s): {', '.join(sorted(unsupported))}.")
+        if str(processing.get("contract_version") or "").strip() != LTX25_ALPHA_MATTE_CONTRACT_VERSION:
+            raise ValueError("Unsupported LTX Alpha Matte contract_version.")
+        if str(processing.get("profile_id") or "").strip() != LTX25_ALPHA_MATTE_PROFILE_ID:
+            raise ValueError("Unsupported LTX Alpha Matte profile_id.")
+        output = job.get("output") or {}
+        if not isinstance(output, dict):
+            raise ValueError("LTX Alpha Matte output must be a JSON object.")
+        if self._coerce_int(output.get("count"), 1, 1, 10) != 1:
+            raise ValueError("extract_video_alpha_matte requires output.count=1.")
+        if str(output.get("format") or "").strip().lower() != "mp4":
+            raise ValueError("extract_video_alpha_matte requires output.format='mp4'.")
+        if str(output.get("color_mode") or "").strip().lower() != "grayscale":
+            raise ValueError("extract_video_alpha_matte requires output.color_mode='grayscale'.")
+        output_width = self._coerce_int(output.get("width"), 0, 0, 4096)
+        output_height = self._coerce_int(output.get("height"), 0, 0, 4096)
+        resolution = f"{output_width}x{output_height}"
+        if resolution not in LTX25_ALPHA_MATTE_SUPPORTED_RESOLUTIONS:
+            raise ValueError(f"Unsupported LTX Alpha Matte output dimensions: {resolution}.")
+        declarations = output.get("artifacts") or []
+        if len(declarations) != 1 or not isinstance(declarations[0], dict):
+            raise ValueError("extract_video_alpha_matte requires exactly one typed output artifact.")
+        declaration = declarations[0]
+        if self._coerce_int(declaration.get("artifact_index"), -1, -1, 10) != 0:
+            raise ValueError("LTX Alpha Matte output artifact_index must be 0.")
+        if str(declaration.get("role") or "").strip().lower() != "alpha_matte_video":
+            raise ValueError("LTX Alpha Matte output role must be alpha_matte_video.")
+        if str(declaration.get("mime_type") or "").strip().lower() != "video/mp4":
+            raise ValueError("LTX Alpha Matte output MIME type must be video/mp4.")
+        if not self._coerce_bool(declaration.get("required"), False):
+            raise ValueError("LTX Alpha Matte output artifact must be required.")
+        inputs = job.get("inputs") or []
+        if len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise ValueError("extract_video_alpha_matte requires exactly one matte_source input.")
+        source = inputs[0]
+        if str(source.get("kind") or "").strip() != "source_video":
+            raise ValueError("LTX Alpha Matte input kind must be source_video.")
+        if str(source.get("role") or "").strip().lower() != "matte_source":
+            raise ValueError("LTX Alpha Matte source_video role must be matte_source.")
+        if self._coerce_int(source.get("sequence"), -1, -1, 10) != 0:
+            raise ValueError("LTX Alpha Matte source_video sequence must be 0.")
+        if str(source.get("mime_type") or "").strip().lower() not in ALLOWED_ALPHA_MATTE_SOURCE_VIDEO_MIME_TYPES:
+            raise ValueError("Unsupported LTX Alpha Matte source_video MIME type.")
+        self._coerce_input_id(source)
+        lora_path = self._find_lora_relative_path("ltx2", LTX25_ALPHA_GEN_LORA_FILENAME)
+        if not lora_path:
+            raise ValueError(
+                "LTX Alpha Matte is unavailable on this worker; install "
+                f"{LTX25_ALPHA_GEN_LORA_FILENAME} in WanGP's loras/ltx2 directory."
+            )
+        return {
+            "model_type": LTX25_DISTILLED_VIDEO_MODEL_ID,
+            "_midom_job_id": job_id,
+            "_midom_media_type": "media_processing",
+            "_midom_processing_family": "media_processing",
+            "_midom_processing_task": VIDEO_ALPHA_MATTING_PROCESSING_TASK,
+            "_midom_processor_id": LTX25_ALPHA_MATTE_PROCESSOR_ID,
+            "_midom_operation_type": EXTRACT_VIDEO_ALPHA_MATTE_OPERATION,
+            "_midom_output_count": 1,
+            "_midom_output_format": "mp4",
+            "_midom_output_mime_type": "video/mp4",
+            "_midom_output_color_mode": "grayscale",
+            "_midom_requested_resolution": resolution,
+            "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), MAX_VIDEO_BYTES, 1, MAX_VIDEO_BYTES),
+            "_midom_output_declarations": [{"artifact_index": 0, "role": "alpha_matte_video", "mime_type": "video/mp4"}],
+            "_midom_processing": {
+                "operation_type": EXTRACT_VIDEO_ALPHA_MATTE_OPERATION,
+                "contract_version": LTX25_ALPHA_MATTE_CONTRACT_VERSION,
+                "profile_id": LTX25_ALPHA_MATTE_PROFILE_ID,
+                "model_id": LTX25_DISTILLED_VIDEO_MODEL_ID,
+                "lora_filename": LTX25_ALPHA_GEN_LORA_FILENAME,
+                "lora_relative_path": lora_path,
+                "lora_strength": 1.0,
+                "window_frames": LTX25_ALPHA_MATTE_WINDOW_FRAMES,
+                "window_overlap_frames": LTX25_ALPHA_MATTE_WINDOW_OVERLAP_FRAMES,
+                "target_filename": str(processing.get("target_filename") or ""),
+            },
+        }
 
     def _validate_flashvsr_image_processing_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
         family = str(job.get("family") or "").strip().lower()
@@ -9316,6 +9951,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return f"requested_by_user_id mismatch: {requested_by_user_id}"
         media_type = str(candidate.get("media_type") or "").lower()
         model_id = str(candidate.get("model_id") or "").strip()
+        if self._candidate_is_sam_click_seed_mask_processing(candidate):
+            return self._sam_click_seed_mask_candidate_incompatibility_reason(candidate)
+        if self._candidate_is_matanyone_v2_alpha_matte_processing(candidate):
+            return self._matanyone_v2_alpha_matte_candidate_incompatibility_reason(candidate)
+        if self._candidate_is_ltx25_alpha_matte_processing(candidate):
+            return self._ltx25_alpha_matte_candidate_incompatibility_reason(candidate)
         if self._candidate_is_flashvsr_image_processing(candidate):
             return self._flashvsr_image_candidate_incompatibility_reason(candidate)
         if self._candidate_is_event_video_processing(candidate):
@@ -10024,6 +10665,143 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             or processor_id == FLASHVSR_IMAGE_PROCESSOR_ID
         )
 
+    def _candidate_is_ltx25_alpha_matte_processing(self, candidate: dict[str, Any]) -> bool:
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
+        processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
+        operation_type = self._storyboard_operation_type(candidate)
+        return (
+            operation_type == EXTRACT_VIDEO_ALPHA_MATTE_OPERATION
+            or processing_task == VIDEO_ALPHA_MATTING_PROCESSING_TASK
+            or processor_id == LTX25_ALPHA_MATTE_PROCESSOR_ID
+        )
+
+    def _candidate_is_matanyone_v2_alpha_matte_processing(self, candidate: dict[str, Any]) -> bool:
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
+        return processor_id == MATANYONE_V2_PROCESSOR_ID
+
+    def _candidate_is_sam_click_seed_mask_processing(self, candidate: dict[str, Any]) -> bool:
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
+        processor_id = str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip()
+        operation_type = self._sam_click_seed_operation_type(candidate)
+        return (
+            operation_type == GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION
+            or processing_task == VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK
+            or processor_id == SAM_SEED_MASK_PROCESSOR_ID
+        )
+
+    def _sam_click_seed_mask_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
+        if self._sam_click_seed_mask_processing_capability() is None:
+            return "SAM click seed is unavailable on this worker"
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        operation_type = self._sam_click_seed_operation_type(candidate)
+        family = str(candidate.get("family") or summary.get("family") or "").strip().lower()
+        if family and family != "media_processing":
+            return "unsupported SAM click seed family"
+        media_type = str(candidate.get("media_type") or summary.get("media_type") or "").strip().lower()
+        if media_type and media_type != "image":
+            return "unsupported SAM click seed media_type"
+        processing_task = str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower()
+        if processing_task and processing_task != VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK:
+            return "unsupported SAM click seed processing_task"
+
+        # Candidate summaries are deliberately non-authoritative and may contain
+        # only enough data to route a claim. Validate every field they provide,
+        # but defer missing fields to the strict claimed-job validator.
+        if operation_type and operation_type != GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION:
+            return "unsupported SAM click seed operation_type"
+        profile_id = str(summary.get("profile_id") or "").strip()
+        if profile_id and profile_id != SAM_VIT_H_CLICK_SEED_PROFILE_ID:
+            return "unsupported SAM click seed profile_id"
+        if "source_image_count" in summary and self._coerce_int(summary.get("source_image_count"), 0, 0, 10) != 1:
+            return "generate_video_matte_seed_mask requires source_image_count=1"
+        if "seed_frame_index" in summary and self._coerce_int(summary.get("seed_frame_index"), -1, -1, 1_000_000) != 0:
+            return "SAM click seed requires seed_frame_index=0"
+        coordinate_space = str(summary.get("coordinate_space") or "").strip()
+        if coordinate_space and coordinate_space != "delivery_pixels_v1":
+            return "SAM click seed requires coordinate_space=delivery_pixels_v1"
+        if "positive_point_count" in summary and self._coerce_int(
+            summary.get("positive_point_count"), 0, 0, SAM_CLICK_SEED_MAX_POSITIVE_POINTS
+        ) < 1:
+            return "SAM click seed requires positive_point_count>=1"
+        if "negative_point_count" in summary and self._coerce_int(
+            summary.get("negative_point_count"), 0, 0, SAM_CLICK_SEED_MAX_NEGATIVE_POINTS + 1
+        ) > SAM_CLICK_SEED_MAX_NEGATIVE_POINTS:
+            return "SAM click seed has too many negative points"
+        if "output_count" in summary and self._coerce_int(summary.get("output_count"), 0, 0, 10) != 1:
+            return "generate_video_matte_seed_mask requires output_count=1"
+        output_format = str(summary.get("output_format") or "").strip().lower()
+        if output_format and output_format != "png":
+            return "generate_video_matte_seed_mask requires output_format=png"
+        output_color_mode = str(summary.get("output_color_mode") or "").strip().lower()
+        if output_color_mode and output_color_mode != "grayscale":
+            return "generate_video_matte_seed_mask requires output_color_mode=grayscale"
+        if "output_width" in summary or "output_height" in summary:
+            output_width = self._coerce_int(summary.get("output_width"), 0, 0, 4096)
+            output_height = self._coerce_int(summary.get("output_height"), 0, 0, 4096)
+            if (output_width, output_height) not in {(1280, 720), (720, 1280)}:
+                return "unsupported SAM click seed output dimensions"
+        return None
+
+    def _matanyone_v2_alpha_matte_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
+        if self._matanyone_v2_alpha_matte_processing_capability() is None:
+            return "MatAnyone v2 Alpha Matte is unavailable on this worker"
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        checks = (
+            (str(candidate.get("family") or summary.get("family") or "").strip().lower() == "media_processing", "unsupported MatAnyone v2 Alpha Matte family"),
+            (str(candidate.get("media_type") or summary.get("media_type") or "").strip().lower() == "video", "unsupported MatAnyone v2 Alpha Matte media_type"),
+            (str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower() == VIDEO_ALPHA_MATTING_PROCESSING_TASK, "unsupported MatAnyone v2 Alpha Matte processing_task"),
+            (self._storyboard_operation_type(candidate) == EXTRACT_VIDEO_ALPHA_MATTE_OPERATION, "unsupported MatAnyone v2 Alpha Matte operation_type"),
+            (str(summary.get("profile_id") or "").strip() == MATANYONE_V2_ALPHA_MATTE_PROFILE_ID, "unsupported MatAnyone v2 Alpha Matte profile_id"),
+            (self._coerce_int(summary.get("source_video_count"), 0, 0, 10) == 1, "extract_video_alpha_matte requires source_video_count=1"),
+            (self._coerce_int(summary.get("mask_image_count"), 0, 0, 10) == 1, "extract_video_alpha_matte requires mask_image_count=1"),
+            (self._coerce_int(summary.get("seed_frame_index"), -1, -1, 1_000_000) == 0, "MatAnyone v2 Alpha Matte requires seed_frame_index=0"),
+            (self._coerce_int(summary.get("output_count"), 0, 0, 10) == 1, "extract_video_alpha_matte requires output_count=1"),
+            (str(summary.get("output_format") or "").strip().lower() == "mp4", "extract_video_alpha_matte requires output_format=mp4"),
+            (str(summary.get("output_color_mode") or "").strip().lower() == "grayscale", "extract_video_alpha_matte requires output_color_mode=grayscale"),
+        )
+        return next((message for passed, message in checks if not passed), None)
+
+    def _ltx25_alpha_matte_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
+        if self._ltx25_alpha_matte_processing_capability() is None:
+            return "LTX 2.5 Alpha Matte is unavailable on this worker"
+        summary = candidate.get("summary") or {}
+        if not isinstance(summary, dict):
+            summary = {}
+        if str(candidate.get("family") or summary.get("family") or "").strip().lower() != "media_processing":
+            return "unsupported LTX Alpha Matte family"
+        if str(candidate.get("media_type") or summary.get("media_type") or "").strip().lower() != "video":
+            return "unsupported LTX Alpha Matte media_type"
+        if str(candidate.get("processing_task") or summary.get("processing_task") or "").strip().lower() != VIDEO_ALPHA_MATTING_PROCESSING_TASK:
+            return "unsupported LTX Alpha Matte processing_task"
+        if str(candidate.get("processor_id") or candidate.get("model_id") or summary.get("processor_id") or "").strip() != LTX25_ALPHA_MATTE_PROCESSOR_ID:
+            return "unsupported LTX Alpha Matte processor_id"
+        if self._storyboard_operation_type(candidate) != EXTRACT_VIDEO_ALPHA_MATTE_OPERATION:
+            return "unsupported LTX Alpha Matte operation_type"
+        if str(summary.get("profile_id") or "").strip() != LTX25_ALPHA_MATTE_PROFILE_ID:
+            return "unsupported LTX Alpha Matte profile_id"
+        if self._coerce_int(summary.get("source_video_count"), 0, 0, 10) != 1:
+            return "extract_video_alpha_matte requires source_video_count=1"
+        if self._coerce_int(summary.get("output_count"), 0, 0, 10) != 1:
+            return "extract_video_alpha_matte requires output_count=1"
+        if str(summary.get("output_format") or "").strip().lower() != "mp4":
+            return "extract_video_alpha_matte requires output_format=mp4"
+        if str(summary.get("output_color_mode") or "").strip().lower() != "grayscale":
+            return "extract_video_alpha_matte requires output_color_mode=grayscale"
+        return None
+
     def _flashvsr_image_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
         if self._flashvsr_image_processing_capability() is None:
             return "FlashVSR Crop & Upscale detail restoration is unavailable on this worker"
@@ -10387,6 +11165,35 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             f"input_dimensions={source.get('width')}x{source.get('height')} "
                             f"requested_resolution={settings.get('_midom_requested_resolution')}."
                         )
+                    elif processor_id == SAM_SEED_MASK_PROCESSOR_ID:
+                        source = downloaded_inputs[0] if downloaded_inputs else {}
+                        processing = settings.get("_midom_processing") or {}
+                        self._log(
+                            "Prepared SAM ViT-H click seed settings; "
+                            f"job_id={job_id} source_input_id={source.get('input_id')} "
+                            f"input_dimensions={source.get('width')}x{source.get('height')} "
+                            f"positive_points={len(processing.get('positive_points') or [])} "
+                            f"negative_points={len(processing.get('negative_points') or [])} "
+                            f"processing={processing}."
+                        )
+                    elif processor_id == MATANYONE_V2_PROCESSOR_ID:
+                        source = next((item for item in downloaded_inputs if item.get("kind") == "source_video"), {})
+                        seed_mask = next((item for item in downloaded_inputs if item.get("kind") == "mask_image"), {})
+                        self._log(
+                            "Prepared MatAnyone v2 Alpha Matte settings; "
+                            f"job_id={job_id} source_input_id={source.get('input_id')} "
+                            f"seed_mask_input_id={seed_mask.get('input_id')} "
+                            f"source_dimensions={(source.get('metadata') or {}).get('display_width')}x{(source.get('metadata') or {}).get('display_height')} "
+                            f"processing={settings.get('_midom_processing')}."
+                        )
+                    elif processor_id == LTX25_ALPHA_MATTE_PROCESSOR_ID:
+                        source = downloaded_inputs[0] if downloaded_inputs else {}
+                        self._log(
+                            "Prepared experimental LTX 2.5 Alpha Matte settings; "
+                            f"job_id={job_id} input_id={source.get('input_id')} "
+                            f"input_sha256={str(source.get('sha256') or '')[:12]}... "
+                            f"processing={settings.get('_midom_processing')}."
+                        )
                     else:
                         raise ValueError(f"Unsupported media processing processor_id: {processor_id}")
                 elif media_type == "audio":
@@ -10455,6 +11262,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     status=(
                         "Processing started; running FlashVSR restoration."
                         if str(settings.get("_midom_processor_id") or "") == FLASHVSR_IMAGE_PROCESSOR_ID
+                        else "Processing started; loading SAM ViT-H for the reviewed click seed mask."
+                        if str(settings.get("_midom_processor_id") or "") == SAM_SEED_MASK_PROCESSOR_ID
+                        else "Processing started; loading MatAnyone v2 for seeded alpha-matte propagation."
+                        if str(settings.get("_midom_processor_id") or "") == MATANYONE_V2_PROCESSOR_ID
+                        else "Processing started; running experimental LTX Alpha Matte extraction."
+                        if str(settings.get("_midom_processor_id") or "") == LTX25_ALPHA_MATTE_PROCESSOR_ID
                         else "Processing started; running local FFmpeg."
                     ) if media_type == "media_processing" else "Generation started; submitting to WanGP.",
                     progress=0,
@@ -10504,6 +11317,36 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                     process_handle,
                                 )
                                 cancel_message = "FlashVSR Crop & Upscale detail restoration was cancelled."
+                            elif processor_id == SAM_SEED_MASK_PROCESSOR_ID:
+                                output_path, processing_metadata = self._run_sam_click_seed_mask_processing_job(
+                                    connection,
+                                    job_id,
+                                    settings,
+                                    downloaded_inputs,
+                                    temp_dir,
+                                    process_handle,
+                                )
+                                cancel_message = "SAM click seed generation was cancelled."
+                            elif processor_id == MATANYONE_V2_PROCESSOR_ID:
+                                output_path, processing_metadata = self._run_matanyone_v2_alpha_matte_processing_job(
+                                    connection,
+                                    job_id,
+                                    settings,
+                                    downloaded_inputs,
+                                    temp_dir,
+                                    process_handle,
+                                )
+                                cancel_message = "MatAnyone v2 Alpha Matte extraction was cancelled."
+                            elif processor_id == LTX25_ALPHA_MATTE_PROCESSOR_ID:
+                                output_path, processing_metadata = self._run_ltx25_alpha_matte_processing_job(
+                                    connection,
+                                    job_id,
+                                    settings,
+                                    downloaded_inputs,
+                                    temp_dir,
+                                    process_handle,
+                                )
+                                cancel_message = "LTX Alpha Matte extraction was cancelled."
                             else:
                                 raise ValueError(f"Unsupported media processing processor_id: {processor_id}")
                         except RuntimeError as exc:
@@ -10538,7 +11381,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         artifacts = [artifact]
                     complete_payload = {
                         "artifacts": artifacts,
-                        "backend": "wangp_flashvsr" if processor_id == FLASHVSR_IMAGE_PROCESSOR_ID else "ffmpeg",
+                        "backend": (
+                            "wangp_flashvsr" if processor_id == FLASHVSR_IMAGE_PROCESSOR_ID
+                            else "wangp_sam_vit_h" if processor_id == SAM_SEED_MASK_PROCESSOR_ID
+                            else "wangp_matanyone_v2" if processor_id == MATANYONE_V2_PROCESSOR_ID
+                            else "wangp_ltx_alpha_gen" if processor_id == LTX25_ALPHA_MATTE_PROCESSOR_ID
+                            else "ffmpeg"
+                        ),
                         "model_id": processor_id,
                         "processor_id": processor_id,
                         "processing_metadata": processing_metadata,
@@ -10723,6 +11572,927 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._active_job_status = {}
             self._reset_idle_backoff_for_active_use(f"finished Midom job {job_id}", wake=True)
             self._log(f"Cleared active job state; job_id={job_id}.")
+
+    def _run_sam_click_seed_mask_processing_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if len(downloaded_inputs) != 1 or downloaded_inputs[0].get("kind") != "source_image":
+            raise ValueError("SAM click seed requires one downloaded source image.")
+        source = downloaded_inputs[0]
+        source_path = Path(str(source.get("path") or ""))
+        requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+        if not source_path.is_file() or requested_size is None:
+            raise ValueError("SAM click seed source frame or requested dimensions are missing.")
+        processing = settings.get("_midom_processing") or {}
+        positive_points = list(processing.get("positive_points") or [])
+        negative_points = list(processing.get("negative_points") or [])
+        if process_handle.cancelled or self._cancel_requested_by_midom:
+            raise RuntimeError("cancel_requested")
+
+        self._set_active_job_status(
+            phase="loading_sam",
+            status="Loading explicit SAM ViT-H for the click-guided seed mask.",
+            progress=10,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "Starting SAM ViT-H click seed mask generation; "
+            f"job_id={job_id} source_input_id={source.get('input_id')} "
+            f"size={requested_size[0]}x{requested_size[1]} "
+            f"positive_points={len(positive_points)} negative_points={len(negative_points)} "
+            f"source_sha256={str(source.get('sha256') or '')[:12]}...."
+        )
+        self._set_active_job_status(
+            phase="segmenting_seed_frame",
+            status="Running SAM ViT-H segmentation from delivery-pixel positive and negative clicks.",
+            progress=42,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        segmenter = None
+        try:
+            segmenter, runtime_diagnostics = self._load_sam_vit_h_click_seed_model()
+            mask_pixels, selected_score = self._run_sam_vit_h_click_seed_inference(
+                segmenter,
+                source_path,
+                requested_size,
+                positive_points,
+                negative_points,
+            )
+        finally:
+            self._release_sam_click_seed_model(segmenter)
+        if process_handle.cancelled or self._cancel_requested_by_midom:
+            raise RuntimeError("cancel_requested")
+
+        self._set_active_job_status(
+            phase="validating_seed_mask",
+            status="Validating binary SAM seed mask and preparing the typed PNG artifact.",
+            progress=82,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        output_path, output_metadata = self._write_sam_click_seed_mask(
+            mask_pixels,
+            Path(temp_dir),
+            requested_size,
+            processing,
+        )
+        if process_handle.cancelled or self._cancel_requested_by_midom:
+            raise RuntimeError("cancel_requested")
+        output_metadata.update({
+            "processing_task": VIDEO_ALPHA_MATTE_SEED_PROCESSING_TASK,
+            "processor_id": SAM_SEED_MASK_PROCESSOR_ID,
+            "operation_type": GENERATE_VIDEO_MATTE_SEED_MASK_OPERATION,
+            "contract_version": SAM_CLICK_SEED_CONTRACT_VERSION,
+            "profile_id": SAM_VIT_H_CLICK_SEED_PROFILE_ID,
+            "seed_frame_index": 0,
+            "coordinate_space": "delivery_pixels_v1",
+            "positive_points": positive_points,
+            "negative_points": negative_points,
+            "selected_score": selected_score,
+            "seed_frame_input_id": source.get("input_id"),
+            "seed_frame_sha256": source.get("sha256"),
+            "normalized_source_input_id": source.get("normalized_source_input_id"),
+            "normalized_source_sha256": source.get("normalized_source_sha256"),
+            "source_dimensions": f"{requested_size[0]}x{requested_size[1]}",
+            "runtime_diagnostics": runtime_diagnostics,
+            "artifact_index": 0,
+            "artifact_role": "target_seed_mask",
+            "artifact_mime_type": "image/png",
+            "worker_id": connection.worker_id,
+        })
+        self._log(
+            "SAM ViT-H click seed mask generation completed; "
+            f"job_id={job_id} foreground_pixels={output_metadata.get('foreground_pixels')} "
+            f"foreground_fraction={output_metadata.get('foreground_fraction')} "
+            f"sha256={str(output_metadata.get('final_sha256') or '')[:12]}...."
+        )
+        self._set_active_job_status(
+            phase="uploading",
+            status="SAM click seed mask finished; uploading binary PNG for review.",
+            progress=96,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        return [{
+            "path": str(output_path),
+            "artifact_index": 0,
+            "role": "target_seed_mask",
+            "mime_type": "image/png",
+        }], output_metadata
+
+    @staticmethod
+    def _load_sam_vit_h_click_seed_model() -> tuple[Any, dict[str, Any]]:
+        try:
+            import torch
+            from preprocessing.matanyone.tools.base_segmenter import BaseSegmenter
+            from shared.utils import files_locator as fl
+        except Exception as exc:
+            raise ValueError(f"SAM ViT-H click seed runtime imports failed: {exc}") from exc
+        if not torch.cuda.is_available():
+            raise ValueError("SAM ViT-H click seed requires an available CUDA GPU.")
+        checkpoint_path = fl.locate_file("mask/sam_vit_h_4b8939_fp16.safetensors", error_if_none=False)
+        if not checkpoint_path:
+            raise ValueError("SAM ViT-H click seed checkpoint is unavailable.")
+        segmenter = BaseSegmenter(None, "vit_h", "cuda")
+        return segmenter, {
+            "model": "sam_vit_h",
+            "checkpoint_filename": Path(str(checkpoint_path)).name,
+            "device": "cuda",
+            "torch_version": str(torch.__version__),
+            "cuda_version": str(torch.version.cuda or ""),
+        }
+
+    @staticmethod
+    def _release_sam_click_seed_model(segmenter: Any) -> None:
+        if segmenter is None:
+            return
+        try:
+            import torch
+
+            segmenter.reset_image()
+            model = getattr(segmenter, "model", None)
+            if model is not None:
+                model.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _run_sam_vit_h_click_seed_inference(
+        segmenter: Any,
+        source_path: Path,
+        expected_size: tuple[int, int],
+        positive_points: list[dict[str, int]],
+        negative_points: list[dict[str, int]],
+    ) -> tuple[Any, Optional[float]]:
+        import numpy as np
+
+        try:
+            with Image.open(source_path) as image:
+                if str(image.format or "").upper() != "PNG" or image.mode != "RGB":
+                    raise ValueError("source must be an opaque RGB PNG")
+                frame = np.asarray(image)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(f"SAM click seed could not decode source frame: {exc}") from exc
+        if frame.shape[:2] != (expected_size[1], expected_size[0]) or frame.ndim != 3 or frame.shape[2] != 3:
+            raise ValueError("SAM click seed source frame dimensions or channels do not match the requested profile.")
+        click_points = positive_points + negative_points
+        point_coords = np.asarray([[point["x"], point["y"]] for point in click_points], dtype=np.float32)
+        point_labels = np.asarray([1] * len(positive_points) + [0] * len(negative_points), dtype=np.int32)
+        segmenter.set_image(frame)
+        prompts = {"point_coords": point_coords, "point_labels": point_labels}
+        masks, scores, logits = segmenter.predict(prompts, "point", multimask=True)
+        selected_index = int(np.argmax(np.asarray(scores)))
+        if negative_points:
+            prompts["mask_input"] = np.asarray(logits[selected_index])[None, :, :]
+            masks, scores, _logits = segmenter.predict(prompts, "both", multimask=True)
+            selected_index = int(np.argmax(np.asarray(scores)))
+        mask = np.asarray(masks[selected_index], dtype=bool)
+        if mask.shape != (expected_size[1], expected_size[0]):
+            raise ValueError("SAM click seed returned unexpected mask dimensions.")
+        binary_mask = np.where(mask, 255, 0).astype(np.uint8)
+        if not bool(binary_mask.any()) or bool((binary_mask == 255).all()):
+            raise ValueError("SAM click seed produced an unusable empty or full-frame target mask.")
+        score_value = np.asarray(scores)[selected_index]
+        return binary_mask, float(score_value)
+
+    @staticmethod
+    def _write_sam_click_seed_mask(
+        mask_pixels: Any,
+        temp_dir: Path,
+        expected_size: tuple[int, int],
+        processing: dict[str, Any],
+    ) -> tuple[Path, dict[str, Any]]:
+        import numpy as np
+
+        pixels = np.asarray(mask_pixels)
+        if pixels.ndim != 2 or pixels.shape != (expected_size[1], expected_size[0]):
+            raise ValueError("SAM click seed output dimensions are invalid.")
+        pixels = np.where(pixels > 0, 255, 0).astype(np.uint8)
+        values = set(np.unique(pixels).tolist())
+        if values != {0, 255}:
+            raise ValueError("SAM click seed output must contain binary black and white pixels.")
+        target_name = Path(str(processing.get("target_filename") or "")).name or "midom-sam-click-seed-mask.png"
+        output_path = temp_dir / target_name
+        if output_path.suffix.lower() != ".png":
+            output_path = output_path.with_suffix(".png")
+        Image.fromarray(pixels, mode="L").save(output_path, format="PNG", optimize=True)
+        try:
+            with Image.open(output_path) as image:
+                if str(image.format or "").upper() != "PNG" or image.mode != "L" or image.size != expected_size:
+                    raise ValueError("decoded format, mode, or dimensions are invalid")
+                decoded_values = set(image.getdata())
+                if decoded_values != {0, 255}:
+                    raise ValueError("decoded pixels are not binary")
+        except ValueError as exc:
+            raise ValueError(f"SAM click seed output validation failed: {exc}") from exc
+        except Exception as exc:
+            raise ValueError(f"SAM click seed output could not be decoded as PNG: {exc}") from exc
+        total_pixels = int(pixels.size)
+        foreground_pixels = int(np.count_nonzero(pixels == 255))
+        return output_path, {
+            "requested_dimensions": f"{expected_size[0]}x{expected_size[1]}",
+            "final_dimensions": f"{expected_size[0]}x{expected_size[1]}",
+            "output_color_mode": "grayscale",
+            "binary_mask": True,
+            "foreground_pixels": foreground_pixels,
+            "background_pixels": total_pixels - foreground_pixels,
+            "total_pixels": total_pixels,
+            "foreground_fraction": round(foreground_pixels / total_pixels, 8),
+            "final_sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
+        }
+
+    def _run_matanyone_v2_alpha_matte_processing_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        source_inputs = [item for item in downloaded_inputs if item.get("kind") == "source_video"]
+        mask_inputs = [item for item in downloaded_inputs if item.get("kind") == "mask_image"]
+        if len(source_inputs) != 1 or len(mask_inputs) != 1:
+            raise ValueError("MatAnyone v2 Alpha Matte requires one downloaded source video and one seed mask.")
+        source = source_inputs[0]
+        seed_mask = mask_inputs[0]
+        source_path = Path(str(source.get("path") or ""))
+        seed_mask_path = Path(str(seed_mask.get("path") or ""))
+        if not source_path.is_file() or not seed_mask_path.is_file():
+            raise ValueError("MatAnyone v2 Alpha Matte source video or target seed mask is missing.")
+        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        source_size = (int(metadata.get("display_width") or 0), int(metadata.get("display_height") or 0))
+        source_duration = float(metadata.get("duration_seconds") or 0.0)
+        source_fps = float(metadata.get("fps") or 0.0)
+        requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+        if (
+            requested_size is None
+            or source_size != requested_size
+            or source_duration <= 0
+            or abs(source_fps - float(LTX_VIDEO_FPS)) > 0.05
+        ):
+            raise ValueError("MatAnyone v2 Alpha Matte downloaded source metadata is invalid.")
+        processing = settings.get("_midom_processing") or {}
+        if int(processing.get("seed_frame_index", -1)) != 0:
+            raise ValueError("MatAnyone v2 Alpha Matte v1 requires seed_frame_index=0.")
+
+        self._set_active_job_status(
+            phase="loading_matanyone",
+            status="Loading MatAnyone v2 and decoding the normalized source video.",
+            progress=8,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "Starting MatAnyone v2 seeded alpha-matte propagation; "
+            f"job_id={job_id} source_input_id={source.get('input_id')} "
+            f"seed_mask_input_id={seed_mask.get('input_id')} size={source_size[0]}x{source_size[1]} "
+            f"fps={source_fps:.3f} duration_seconds={source_duration:.3f} "
+            f"source_sha256={str(source.get('sha256') or '')[:12]}... "
+            f"seed_mask_sha256={str(seed_mask.get('sha256') or '')[:12]}...."
+        )
+        frames = self._decode_matanyone_v2_source_frames(source_path, source_size, process_handle)
+        if not frames:
+            raise ValueError("MatAnyone v2 Alpha Matte source video contains no decodable frames.")
+        if process_handle.cancelled or self._cancel_requested_by_midom:
+            raise RuntimeError("cancel_requested")
+        seed_mask_pixels = self._load_matanyone_v2_seed_mask(seed_mask_path, source_size)
+
+        self._set_active_job_status(
+            phase="propagating_alpha_matte",
+            status=(
+                "Running MatAnyone v2 forward propagation from the seed frame. "
+                "WanGP will report the next stage when propagation completes."
+            ),
+            progress=28,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        processor = None
+        model = None
+        runtime_diagnostics: dict[str, Any] = {}
+        try:
+            processor, model, runtime_diagnostics = self._load_matanyone_v2_alpha_matte_model()
+            alpha_frames = self._propagate_matanyone_v2_alpha(processor, frames, seed_mask_pixels)
+        finally:
+            self._release_matanyone_v2_alpha_matte_model(model)
+        if process_handle.cancelled or self._cancel_requested_by_midom:
+            raise RuntimeError("cancel_requested")
+        if len(alpha_frames) != len(frames):
+            raise ValueError(
+                "MatAnyone v2 Alpha Matte returned an unexpected frame count; "
+                f"expected {len(frames)}, got {len(alpha_frames)}."
+            )
+
+        self._set_active_job_status(
+            phase="encoding_alpha_matte",
+            status="Encoding MatAnyone v2 soft grayscale alpha values as a silent H.264 MP4.",
+            progress=78,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        output_path, output_metadata = self._write_matanyone_v2_alpha_matte_video(
+            alpha_frames,
+            Path(temp_dir),
+            requested_size,
+            source_duration,
+            processing,
+        )
+        if process_handle.cancelled or self._cancel_requested_by_midom:
+            raise RuntimeError("cancel_requested")
+        self._set_active_job_status(
+            phase="validating_alpha_matte",
+            status="Validated MatAnyone v2 grayscale alpha matte; preparing typed artifact upload.",
+            progress=94,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        output_metadata.update({
+            "processing_task": VIDEO_ALPHA_MATTING_PROCESSING_TASK,
+            "processor_id": MATANYONE_V2_PROCESSOR_ID,
+            "operation_type": EXTRACT_VIDEO_ALPHA_MATTE_OPERATION,
+            "contract_version": MATANYONE_V2_ALPHA_MATTE_CONTRACT_VERSION,
+            "profile_id": MATANYONE_V2_ALPHA_MATTE_PROFILE_ID,
+            "matanyone_version": "v2",
+            "seed_frame_index": 0,
+            "source_input_id": source.get("input_id"),
+            "source_sha256": source.get("sha256"),
+            "seed_mask_input_id": seed_mask.get("input_id"),
+            "seed_mask_sha256": seed_mask.get("sha256"),
+            "source_dimensions": f"{source_size[0]}x{source_size[1]}",
+            "source_fps": source_fps,
+            "source_duration_seconds": round(source_duration, 6),
+            "source_frame_count": len(frames),
+            "segment_start_seconds": source.get("segment_start_seconds"),
+            "segment_end_seconds": source.get("segment_end_seconds"),
+            "runtime_diagnostics": runtime_diagnostics,
+            "artifact_index": 0,
+            "artifact_role": "alpha_matte_video",
+            "artifact_mime_type": "video/mp4",
+            "worker_id": connection.worker_id,
+        })
+        self._log(
+            "MatAnyone v2 Alpha Matte propagation completed; "
+            f"job_id={job_id} frames={len(frames)} output_file={output_path.name!r} "
+            f"output_dimensions={output_metadata.get('output_dimensions')} "
+            f"duration_seconds={output_metadata.get('output_duration_seconds')} "
+            f"sha256={str(output_metadata.get('final_sha256') or '')[:12]}...."
+        )
+        self._set_active_job_status(
+            phase="uploading",
+            status="MatAnyone v2 Alpha Matte extraction finished; uploading grayscale MP4.",
+            progress=96,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        return [{
+            "path": str(output_path),
+            "artifact_index": 0,
+            "role": "alpha_matte_video",
+            "mime_type": "video/mp4",
+        }], output_metadata
+
+    @staticmethod
+    def _load_matanyone_v2_seed_mask(seed_mask_path: Path, expected_size: tuple[int, int]) -> Any:
+        import numpy as np
+
+        try:
+            with Image.open(seed_mask_path) as image:
+                if str(image.format or "").upper() != "PNG" or image.mode not in {"1", "L", "RGB"}:
+                    raise ValueError("must be an opaque grayscale or RGB PNG without alpha")
+                mask = image.convert("L")
+                if mask.size != expected_size:
+                    raise ValueError(
+                        f"dimensions must be {expected_size[0]}x{expected_size[1]}, "
+                        f"got {mask.size[0]}x{mask.size[1]}"
+                    )
+                values = set(mask.getdata())
+                if values != {0, 255}:
+                    raise ValueError("must contain both binary black (0) and white (255) pixels only")
+                return np.asarray(mask, dtype=np.uint8)
+        except ValueError as exc:
+            raise ValueError(f"MatAnyone v2 target seed mask {exc}.") from exc
+        except Exception as exc:
+            raise ValueError(f"MatAnyone v2 target seed mask is not a readable PNG: {exc}") from exc
+
+    @staticmethod
+    def _decode_matanyone_v2_source_frames(
+        source_path: Path,
+        expected_size: tuple[int, int],
+        process_handle: LocalProcessJob,
+    ) -> list[Any]:
+        try:
+            import cv2
+        except Exception as exc:
+            raise ValueError(f"MatAnyone v2 requires OpenCV video decoding: {exc}") from exc
+        capture = cv2.VideoCapture(str(source_path))
+        if not capture.isOpened():
+            raise ValueError("MatAnyone v2 could not open the source video for frame decoding.")
+        frames: list[Any] = []
+        try:
+            while True:
+                if process_handle.cancelled:
+                    raise RuntimeError("cancel_requested")
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                if frame.shape[1] != expected_size[0] or frame.shape[0] != expected_size[1]:
+                    raise ValueError(
+                        "MatAnyone v2 decoded source frame dimensions do not match the normalized source geometry; "
+                        f"expected {expected_size[0]}x{expected_size[1]}, got {frame.shape[1]}x{frame.shape[0]}."
+                    )
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        finally:
+            capture.release()
+        return frames
+
+    @staticmethod
+    def _load_matanyone_v2_alpha_matte_model() -> tuple[Any, Any, dict[str, Any]]:
+        try:
+            import torch
+            from preprocessing.matanyone.matanyone.inference.inference_core import InferenceCore
+            from preprocessing.matanyone.utils.model_assets import load_selected_matanyone_model
+        except Exception as exc:
+            raise ValueError(f"MatAnyone v2 runtime imports failed: {exc}") from exc
+        if not torch.cuda.is_available():
+            raise ValueError("MatAnyone v2 requires an available CUDA GPU.")
+        model, selected_version, weights_path = load_selected_matanyone_model({"matanyone_version": "v2"})
+        if str(selected_version) != "v2":
+            raise ValueError(f"MatAnyone v2 explicit load selected unexpected model version {selected_version!r}.")
+        model = model.to("cuda").eval()
+        processor = InferenceCore(model, cfg=model.cfg)
+        return processor, model, {
+            "matanyone_version": "v2",
+            "weights_filename": Path(str(weights_path)).name,
+            "device": str(next(model.parameters()).device),
+            "torch_version": str(torch.__version__),
+            "cuda_version": str(torch.version.cuda or ""),
+        }
+
+    @staticmethod
+    def _release_matanyone_v2_alpha_matte_model(model: Any) -> None:
+        if model is None:
+            return
+        try:
+            import torch
+            model.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _propagate_matanyone_v2_alpha(processor: Any, frames: list[Any], seed_mask: Any) -> list[Any]:
+        try:
+            from preprocessing.matanyone.matanyone_wrapper import matanyone
+        except Exception as exc:
+            raise ValueError(f"MatAnyone v2 propagation wrapper is unavailable: {exc}") from exc
+        _foreground, alpha_frames = matanyone(processor, frames, seed_mask, r_erode=0, r_dilate=0)
+        if not isinstance(alpha_frames, list):
+            raise ValueError("MatAnyone v2 propagation did not return alpha frames.")
+        return alpha_frames
+
+    def _write_matanyone_v2_alpha_matte_video(
+        self,
+        alpha_frames: list[Any],
+        temp_dir: Path,
+        expected_size: tuple[int, int],
+        source_duration: float,
+        processing: dict[str, Any],
+    ) -> tuple[Path, dict[str, Any]]:
+        import numpy as np
+
+        if not alpha_frames:
+            raise ValueError("MatAnyone v2 returned no alpha frames.")
+        target_name = Path(str(processing.get("target_filename") or "")).name or "midom-matanyone-v2-alpha-matte.mp4"
+        output_path = temp_dir / target_name
+        if output_path.suffix.lower() != ".mp4":
+            output_path = output_path.with_suffix(".mp4")
+        raw_path = temp_dir / f"{output_path.stem}-gray.raw"
+        try:
+            with raw_path.open("wb") as raw_writer:
+                for index, alpha_frame in enumerate(alpha_frames):
+                    pixels = np.asarray(alpha_frame)
+                    if pixels.ndim == 3 and pixels.shape[2] == 1:
+                        pixels = pixels[:, :, 0]
+                    if pixels.ndim != 2 or pixels.shape[1] != expected_size[0] or pixels.shape[0] != expected_size[1]:
+                        raise ValueError(
+                            "MatAnyone v2 alpha frame dimensions are invalid at frame "
+                            f"{index}; expected {expected_size[0]}x{expected_size[1]}."
+                        )
+                    if pixels.dtype != np.uint8:
+                        pixels = np.clip(pixels, 0, 255).astype(np.uint8)
+                    raw_writer.write(np.ascontiguousarray(pixels).tobytes())
+            command = [
+                self._ffmpeg_binary(), "-y", "-hide_banner", "-v", "error",
+                "-f", "rawvideo", "-pixel_format", "gray",
+                "-video_size", f"{expected_size[0]}x{expected_size[1]}",
+                "-framerate", str(LTX_VIDEO_FPS), "-i", str(raw_path),
+                "-map", "0:v:0", "-an", "-frames:v", str(len(alpha_frames)),
+                "-vf", "format=gray,setsar=1", "-r", str(LTX_VIDEO_FPS),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "15", "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", "-metadata:s:v:0", "rotate=0", str(output_path),
+            ]
+            completed = subprocess.run(
+                command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+            )
+        finally:
+            try:
+                raw_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if completed.returncode != 0:
+            raise ValueError(f"MatAnyone v2 alpha MP4 encoding failed: {str(completed.stderr or completed.stdout).strip()}")
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            raise ValueError("MatAnyone v2 alpha MP4 encoding produced no output.")
+        metadata = self._probe_event_video_metadata(output_path)
+        output_size = (int(metadata.get("display_width") or 0), int(metadata.get("display_height") or 0))
+        if output_size != expected_size:
+            raise ValueError(f"MatAnyone v2 output dimensions mismatch: expected {expected_size}, got {output_size}.")
+        if metadata.get("has_audio"):
+            raise ValueError("MatAnyone v2 output unexpectedly contains audio.")
+        if str(metadata.get("video_codec") or "").lower() != "h264":
+            raise ValueError(f"MatAnyone v2 output codec must be H.264; got {metadata.get('video_codec') or 'unknown'}.")
+        output_fps = float(metadata.get("fps") or 0.0)
+        if abs(output_fps - float(LTX_VIDEO_FPS)) > 0.05:
+            raise ValueError(f"MatAnyone v2 output FPS mismatch: expected {LTX_VIDEO_FPS}, got {output_fps}.")
+        output_duration = float(metadata.get("duration_seconds") or 0.0)
+        if abs(output_duration - source_duration) > (1.0 / LTX_VIDEO_FPS + 0.1):
+            raise ValueError(
+                "MatAnyone v2 output duration mismatch: "
+                f"expected {source_duration:.3f}s, got {output_duration:.3f}s."
+            )
+        output_frame_count = self._video_frame_count(output_path)
+        if output_frame_count != len(alpha_frames):
+            raise ValueError(
+                "MatAnyone v2 output frame count mismatch: "
+                f"expected {len(alpha_frames)}, got {output_frame_count}."
+            )
+        return output_path, {
+            "output_dimensions": f"{output_size[0]}x{output_size[1]}",
+            "final_dimensions": f"{output_size[0]}x{output_size[1]}",
+            "output_fps": output_fps,
+            "output_duration_seconds": round(output_duration, 6),
+            "output_frame_count": output_frame_count,
+            "output_audio_stream": False,
+            "soft_grayscale_preserved": True,
+            "final_sha256": self._sha256_file(output_path),
+        }
+
+    def _video_frame_count(self, path: Path) -> int:
+        command = [
+            self._ffprobe_binary(), "-v", "error", "-select_streams", "v:0", "-count_frames",
+            "-show_entries", "stream=nb_read_frames,nb_frames", "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+        ]
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+        )
+        if completed.returncode != 0:
+            raise ValueError(f"Could not count MatAnyone v2 output frames: {str(completed.stderr).strip()}")
+        for value in str(completed.stdout or "").splitlines():
+            try:
+                frame_count = int(value.strip())
+            except (TypeError, ValueError):
+                continue
+            if frame_count >= 0:
+                return frame_count
+        raise ValueError("Could not read MatAnyone v2 output frame count.")
+
+    def _run_ltx25_alpha_matte_processing_job(
+        self,
+        connection: ConnectionContext,
+        job_id: int,
+        settings: dict[str, Any],
+        downloaded_inputs: list[dict[str, Any]],
+        temp_dir: str,
+        process_handle: LocalProcessJob,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        source_inputs = [item for item in downloaded_inputs if item.get("kind") == "source_video"]
+        if len(source_inputs) != 1:
+            raise ValueError(f"LTX Alpha Matte requires exactly one downloaded source_video; got {len(source_inputs)}.")
+        source = source_inputs[0]
+        source_path = Path(str(source.get("path") or ""))
+        if not source_path.is_file():
+            raise ValueError("LTX Alpha Matte source video is missing.")
+        metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else self._probe_event_video_metadata(source_path)
+        source_duration = float(metadata.get("duration_seconds") or 0.0)
+        source_fps = float(metadata.get("fps") or 0.0)
+        source_size = (int(metadata.get("display_width") or 0), int(metadata.get("display_height") or 0))
+        expected_size = self._parse_resolution_size(settings.get("_midom_requested_resolution"))
+        if source_duration <= 0 or source_fps <= 0 or expected_size is None or source_size != expected_size:
+            raise ValueError("LTX Alpha Matte downloaded source metadata is invalid.")
+        processing = settings.get("_midom_processing") or {}
+        lora_path = str(processing.get("lora_relative_path") or "")
+        if not lora_path or not self._find_lora_relative_path("ltx2", LTX25_ALPHA_GEN_LORA_FILENAME):
+            raise ValueError("LTX Alpha Matte LoRA is no longer available on this worker.")
+        source_frames = max(1, int(math.ceil(source_duration * source_fps - 1e-6)))
+        # Alpha Gen is qualified for at most 145 frames per window. Preserve an
+        # already-valid 8n+1 source length rather than turning 145 into 153.
+        video_length = ((source_frames - 1 + 7) // 8) * 8 + 1
+        window_count = 1
+        if video_length > LTX25_ALPHA_MATTE_WINDOW_FRAMES:
+            window_count += int(math.ceil(
+                (video_length - LTX25_ALPHA_MATTE_WINDOW_FRAMES)
+                / (LTX25_ALPHA_MATTE_WINDOW_FRAMES - LTX25_ALPHA_MATTE_WINDOW_OVERLAP_FRAMES)
+            ))
+        native_settings = {
+            "model_type": LTX25_DISTILLED_VIDEO_MODEL_ID,
+            "prompt": ".",
+            "negative_prompt": "",
+            "resolution": f"{source_size[0]}x{source_size[1]}",
+            "image_mode": 0,
+            "image_prompt_type": "",
+            "video_prompt_type": "VG",
+            "audio_prompt_type": "",
+            "video_guide": str(source_path),
+            "video_length": video_length,
+            "num_inference_steps": 8,
+            "guidance_scale": 1.0,
+            "audio_guidance_scale": 1.0,
+            "audio_cfg_scale": 1.0,
+            "alt_guidance_scale": 1.0,
+            "alt_scale": 0.0,
+            "sample_solver": "distilled_8_steps",
+            "guidance_phases": 1,
+            "sliding_window_size": LTX25_ALPHA_MATTE_WINDOW_FRAMES,
+            "sliding_window_overlap": LTX25_ALPHA_MATTE_WINDOW_OVERLAP_FRAMES,
+            "sliding_window_color_correction_strength": 0,
+            "sliding_window_overlap_noise": 0,
+            "sliding_window_discard_last_frames": 0,
+            "sliding_window_trim_first_frames": 0,
+            "repeat_generation": 1,
+            "multi_prompts_gen_type": "FG",
+            "multi_images_gen_type": "SI",
+            "force_fps": "control",
+            "input_video_strength": 1.0,
+            "denoising_strength": 1.0,
+            "masking_strength": 0,
+            "activated_loras": [lora_path],
+            "loras_multipliers": "1",
+            "_api": {"return_media": True, "suppress_source_audio": True},
+            "_midom_input_video_paths": [str(source_path.resolve())],
+            "_midom_input_video_sha256s": [str(source.get("sha256") or "")],
+        }
+        self._apply_ltx_delivery_adapter(native_settings)
+        requested_size = self._ltx_requested_size(native_settings)
+        internal_size = self._ltx_internal_size(native_settings)
+        if requested_size != source_size:
+            raise ValueError(
+                "LTX Alpha Matte delivery adapter does not match the source delivery geometry; "
+                f"source={source_size[0]}x{source_size[1]} "
+                f"requested={requested_size[0]}x{requested_size[1]}."
+            )
+        self._set_active_job_status(
+            phase="preparing_alpha_matte",
+            status="Preparing the aligned LTX overscan control video.",
+            progress=6,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "Preparing LTX Alpha Matte overscan control video; "
+            f"job_id={job_id} delivery={requested_size[0]}x{requested_size[1]} "
+            f"internal={internal_size[0]}x{internal_size[1]} include_audio=False."
+        )
+        prepared_source_path = Path(self._prepare_ltx_overscan_control_video(
+            source_path,
+            requested_size,
+            internal_size,
+            source_duration,
+            include_audio=False,
+        ))
+        if not prepared_source_path.is_file():
+            raise ValueError("LTX Alpha Matte overscan control-video preparation produced no input video.")
+        prepared_source_sha256 = self._sha256_file(prepared_source_path)
+        native_settings["video_guide"] = str(prepared_source_path)
+        native_settings["_midom_input_video_paths"] = [
+            str(source_path.resolve()),
+            str(prepared_source_path.resolve()),
+        ]
+        native_settings["_midom_input_video_sha256s"] = [
+            str(source.get("sha256") or ""),
+            prepared_source_sha256,
+        ]
+        self._set_active_job_status(
+            phase="preparing_alpha_matte",
+            status="Validated source video and preparing LTX 2.5 Alpha Gen extraction.",
+            progress=8,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "Prepared experimental LTX Alpha Matte extraction; "
+            f"job_id={job_id} input_id={source.get('input_id')} size={source_size[0]}x{source_size[1]} "
+            f"internal_size={internal_size[0]}x{internal_size[1]} "
+            f"prepared_source={prepared_source_path.name!r} prepared_source_sha256={prepared_source_sha256[:12]}... "
+            f"fps={source_fps:.3f} source_duration={source_duration:.3f}s source_frames={source_frames} "
+            f"video_length={video_length} window={LTX25_ALPHA_MATTE_WINDOW_FRAMES} "
+            f"overlap={LTX25_ALPHA_MATTE_WINDOW_OVERLAP_FRAMES} expected_windows={window_count} "
+            f"source_sha256={str(source.get('sha256') or '')[:12]}... lora={lora_path!r}."
+        )
+        callbacks = self._callbacks_for_job(connection, job_id)
+        api_session = self._get_generation_session()
+        self._set_active_job_status(
+            phase="submitting_alpha_matte",
+            status="Submitting the Alpha Gen windowed extraction to WanGP.",
+            progress=10,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "Submitting experimental LTX Alpha Matte extraction to WanGP; "
+            f"job_id={job_id} model_id={LTX25_DISTILLED_VIDEO_MODEL_ID} "
+            f"video_prompt_type={native_settings['video_prompt_type']!r} "
+            f"video_length={video_length} expected_windows={window_count}."
+        )
+        # Bridge bookkeeping is retained in native_settings for result filtering
+        # and provenance, but must never be sent to WanGP's settings API.
+        submission_settings = {
+            key: value
+            for key, value in native_settings.items()
+            if not str(key).startswith("_midom_")
+        }
+        job_handle = api_session.submit_task(submission_settings, callbacks=callbacks)
+        self._active_job = job_handle
+        self._set_active_job_status(
+            phase="extracting_alpha_matte",
+            status=(
+                "WanGP accepted Alpha Gen extraction; loading the model and processing "
+                f"{window_count} window{'s' if window_count != 1 else ''}."
+            ),
+            progress=12,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "LTX Alpha Matte WanGP task accepted; "
+            f"job_id={job_id} expected_windows={window_count}. "
+            "WanGP callbacks and a ten-second wait log will report ongoing progress."
+        )
+        try:
+            result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
+        finally:
+            if self._active_job is job_handle:
+                self._active_job = process_handle
+        if self._cancel_requested_by_midom or process_handle.cancelled or getattr(result, "cancelled", False):
+            raise RuntimeError("cancel_requested")
+        if not getattr(result, "success", False):
+            errors = list(getattr(result, "errors", None) or [])
+            raise ValueError(str(errors[0] if errors else "WanGP LTX Alpha Matte extraction failed."))
+        generated_files = self._result_video_files(result, native_settings)
+        if len(generated_files) != 1:
+            raise ValueError(f"LTX Alpha Matte must return exactly one video; got {len(generated_files)}.")
+        generated_path = Path(str(generated_files[0]))
+        self._set_active_job_status(
+            phase="finalizing_alpha_matte",
+            status="WanGP extraction completed; converting the generated output to a silent grayscale MP4.",
+            progress=86,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "LTX Alpha Matte WanGP extraction completed; "
+            f"job_id={job_id} generated_file={generated_path.name!r}. Starting FFmpeg grayscale normalization."
+        )
+        self._set_active_job_status(
+            phase="finalizing_alpha_matte",
+            status="Normalizing the alpha matte to silent grayscale MP4.",
+            progress=88,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        output_path, output_metadata = self._finalize_ltx25_alpha_matte_output(
+            generated_path,
+            Path(temp_dir),
+            requested_size,
+            internal_size,
+            source_duration,
+            processing,
+        )
+        self._set_active_job_status(
+            phase="validating_alpha_matte",
+            status="Validated silent grayscale alpha matte output; preparing typed artifact upload.",
+            progress=94,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        self._log(
+            "LTX Alpha Matte normalization and validation completed; "
+            f"job_id={job_id} output_file={output_path.name!r} "
+            f"dimensions={output_metadata.get('output_dimensions')} "
+            f"fps={output_metadata.get('output_fps')} "
+            f"duration_seconds={output_metadata.get('output_duration_seconds')} "
+            f"crop={output_metadata.get('crop_offset_x')}:{output_metadata.get('crop_offset_y')} "
+            f"sha256={str(output_metadata.get('final_sha256') or '')[:12]}..."
+        )
+        self._set_active_job_status(
+            phase="uploading",
+            status="LTX Alpha Matte extraction finished; uploading grayscale MP4.",
+            progress=96,
+        )
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        output_metadata.update({
+            "processing_task": VIDEO_ALPHA_MATTING_PROCESSING_TASK,
+            "processor_id": LTX25_ALPHA_MATTE_PROCESSOR_ID,
+            "operation_type": EXTRACT_VIDEO_ALPHA_MATTE_OPERATION,
+            "contract_version": LTX25_ALPHA_MATTE_CONTRACT_VERSION,
+            "profile_id": LTX25_ALPHA_MATTE_PROFILE_ID,
+            "model_id": LTX25_DISTILLED_VIDEO_MODEL_ID,
+            "lora_filename": LTX25_ALPHA_GEN_LORA_FILENAME,
+            "lora_relative_path": lora_path,
+            "lora_strength": 1.0,
+            "neutral_prompt": ".",
+            "source_input_id": source.get("input_id"),
+            "source_sha256": source.get("sha256"),
+            "source_dimensions": f"{source_size[0]}x{source_size[1]}",
+            "requested_delivery_dimensions": f"{requested_size[0]}x{requested_size[1]}",
+            "internal_overscan_dimensions": f"{internal_size[0]}x{internal_size[1]}",
+            "prepared_overscan_source_dimensions": f"{internal_size[0]}x{internal_size[1]}",
+            "prepared_overscan_source_sha256": prepared_source_sha256,
+            "source_fps": source_fps,
+            "source_duration_seconds": round(source_duration, 6),
+            "window_frames": LTX25_ALPHA_MATTE_WINDOW_FRAMES,
+            "window_overlap_frames": LTX25_ALPHA_MATTE_WINDOW_OVERLAP_FRAMES,
+            "discard_last_frames": 0,
+            "trim_first_frames": 0,
+            "artifact_index": 0,
+            "artifact_role": "alpha_matte_video",
+            "artifact_mime_type": "video/mp4",
+            "worker_id": connection.worker_id,
+        })
+        return [{
+            "path": str(output_path),
+            "artifact_index": 0,
+            "role": "alpha_matte_video",
+            "mime_type": "video/mp4",
+        }], output_metadata
+
+    def _finalize_ltx25_alpha_matte_output(
+        self,
+        generated_path: Path,
+        temp_dir: Path,
+        requested_size: tuple[int, int],
+        internal_size: tuple[int, int],
+        source_duration: float,
+        processing: dict[str, Any],
+    ) -> tuple[Path, dict[str, Any]]:
+        if not generated_path.is_file():
+            raise ValueError("LTX Alpha Matte generated output is missing.")
+        generated_info = self._probe_video_display_info(generated_path)
+        if generated_info["display_size"] != internal_size:
+            raise ValueError(
+                "LTX Alpha Matte generated output does not match the expected internal overscan dimensions; "
+                f"expected {internal_size}, got {generated_info['display_size']}."
+            )
+        crop_x = (internal_size[0] - requested_size[0]) // 2
+        crop_y = (internal_size[1] - requested_size[1]) // 2
+        if crop_x < 0 or crop_y < 0:
+            raise ValueError(
+                "LTX Alpha Matte internal overscan dimensions are smaller than the requested delivery dimensions."
+            )
+        target_name = Path(str(processing.get("target_filename") or "")).name or "midom-alpha-matte.mp4"
+        output_path = temp_dir / target_name
+        if output_path.suffix.lower() != ".mp4":
+            output_path = output_path.with_suffix(".mp4")
+        command = [
+            self._ffmpeg_binary(), "-y", "-hide_banner", "-v", "error", "-i", str(generated_path),
+            "-map", "0:v:0", "-an", "-t", f"{source_duration:.6f}",
+            "-vf", (
+                f"crop={requested_size[0]}:{requested_size[1]}:{crop_x}:{crop_y},"
+                "format=gray,setsar=1"
+            ), "-r", str(LTX_VIDEO_FPS),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "15", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", "-metadata:s:v:0", "rotate=0", str(output_path),
+        ]
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=900,
+        )
+        if completed.returncode != 0:
+            raise ValueError(f"LTX Alpha Matte MP4 normalization failed: {str(completed.stderr or completed.stdout).strip()}")
+        if not output_path.is_file() or output_path.stat().st_size <= 0:
+            raise ValueError("LTX Alpha Matte MP4 normalization produced no output.")
+        metadata = self._probe_event_video_metadata(output_path)
+        output_size = (int(metadata.get("display_width") or 0), int(metadata.get("display_height") or 0))
+        if output_size != requested_size:
+            raise ValueError(f"LTX Alpha Matte output dimensions mismatch: expected {requested_size}, got {output_size}.")
+        if metadata.get("has_audio"):
+            raise ValueError("LTX Alpha Matte output unexpectedly contains audio.")
+        output_fps = float(metadata.get("fps") or 0.0)
+        if abs(output_fps - float(LTX_VIDEO_FPS)) > 0.05:
+            raise ValueError(f"LTX Alpha Matte output FPS mismatch: expected {LTX_VIDEO_FPS}, got {output_fps}.")
+        output_duration = float(metadata.get("duration_seconds") or 0.0)
+        if abs(output_duration - source_duration) > (1.0 / LTX_VIDEO_FPS + 0.1):
+            raise ValueError(
+                "LTX Alpha Matte output duration mismatch: "
+                f"expected {source_duration:.3f}s, got {output_duration:.3f}s."
+            )
+        return output_path, {
+            "output_dimensions": f"{output_size[0]}x{output_size[1]}",
+            "requested_delivery_dimensions": f"{requested_size[0]}x{requested_size[1]}",
+            "internal_overscan_dimensions": f"{internal_size[0]}x{internal_size[1]}",
+            "crop_offset_x": crop_x,
+            "crop_offset_y": crop_y,
+            "output_fps": output_fps,
+            "output_duration_seconds": round(output_duration, 6),
+            "output_audio_stream": False,
+            "final_sha256": self._sha256_file(output_path),
+        }
 
     def _run_flashvsr_image_processing_job(
         self,
@@ -15952,6 +17722,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         inputs = job.get("inputs") or []
         if not isinstance(inputs, list):
             raise ValueError("Job inputs must be a list.")
+        if self._is_sam_click_seed_mask_processing_job(job):
+            return self._download_sam_click_seed_mask_processing_inputs(connection, job, temp_dir, inputs)
+        if self._is_matanyone_v2_alpha_matte_processing_job(job):
+            return self._download_matanyone_v2_alpha_matte_processing_inputs(connection, job, temp_dir, inputs)
+        if self._is_ltx25_alpha_matte_processing_job(job):
+            return self._download_ltx25_alpha_matte_processing_inputs(connection, job, temp_dir, inputs)
         if self._is_flashvsr_image_processing_job(job):
             return self._download_flashvsr_image_processing_inputs(connection, job, temp_dir, inputs)
         if self._is_event_video_processing_job(job):
@@ -16089,6 +17865,246 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             if control_count != 1:
                 raise ValueError("Qwen Image Layered requires exactly one Control Image.")
         return downloaded
+
+    def _download_sam_click_seed_mask_processing_inputs(
+        self,
+        connection: ConnectionContext,
+        job: dict[str, Any],
+        temp_dir: str,
+        inputs: list[Any],
+    ) -> list[dict[str, Any]]:
+        if len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise ValueError("SAM click seed requires exactly one source_image descriptor.")
+        descriptor = inputs[0]
+        if (
+            str(descriptor.get("kind") or "").strip() != "source_image"
+            or str(descriptor.get("role") or "").strip().lower() != "seed_frame"
+            or self._coerce_int(descriptor.get("sequence"), -1, -1, 10) != 0
+        ):
+            raise ValueError("SAM click seed requires source_image role=seed_frame sequence=0.")
+        job_id = self._coerce_job_id(job)
+        input_id = self._coerce_input_id(descriptor)
+        response = requests.get(
+            f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
+            headers=self._headers(connection), timeout=REQUEST_TIMEOUT_SECONDS, stream=True,
+        )
+        response.raise_for_status()
+        mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if mime_type != "image/png":
+            raise ValueError(f"SAM click seed input {input_id} must be image/png; got {mime_type!r}.")
+        data = self._read_limited_response_content(response, input_id, MAX_IMAGE_BYTES)
+        expected_bytes = descriptor.get("bytes")
+        if expected_bytes is not None and len(data) != int(expected_bytes):
+            raise ValueError(f"SAM click seed input {input_id} size mismatch.")
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        expected_sha256 = str(descriptor.get("sha256") or response.headers.get("X-Midom-SHA256") or "").strip().lower()
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise ValueError(f"SAM click seed input {input_id} SHA-256 mismatch.")
+        source_path = Path(temp_dir) / self._safe_input_filename(descriptor.get("filename"), input_id, mime_type)
+        source_path.write_bytes(data)
+        requested_size = self._parse_resolution_size(f"{(job.get('output') or {}).get('width')}x{(job.get('output') or {}).get('height')}")
+        try:
+            with Image.open(source_path) as image:
+                if str(image.format or "").upper() != "PNG" or image.mode != "RGB":
+                    raise ValueError("must be an opaque RGB PNG without alpha")
+                if image.size != requested_size:
+                    raise ValueError(
+                        f"dimensions must be {requested_size[0]}x{requested_size[1]}, "
+                        f"got {image.size[0]}x{image.size[1]}"
+                    )
+                image.verify()
+        except ValueError as exc:
+            raise ValueError(f"SAM click seed frame {input_id} {exc}.") from exc
+        except Exception as exc:
+            raise ValueError(f"SAM click seed frame {input_id} is not a readable RGB PNG: {exc}") from exc
+        self._log(
+            "Downloaded SAM click seed frame; "
+            f"job_id={job_id} input_id={input_id} size={requested_size[0]}x{requested_size[1]} "
+            f"sha256={actual_sha256[:12]}...."
+        )
+        return [{
+            "input_id": input_id,
+            "kind": "source_image",
+            "role": "seed_frame",
+            "sequence": 0,
+            "path": str(source_path),
+            "mime_type": mime_type,
+            "sha256": actual_sha256,
+            "width": requested_size[0],
+            "height": requested_size[1],
+            "normalized_source_input_id": descriptor.get("normalized_source_input_id"),
+            "normalized_source_sha256": descriptor.get("normalized_source_sha256"),
+        }]
+
+    def _download_matanyone_v2_alpha_matte_processing_inputs(
+        self,
+        connection: ConnectionContext,
+        job: dict[str, Any],
+        temp_dir: str,
+        inputs: list[Any],
+    ) -> list[dict[str, Any]]:
+        if len(inputs) != 2 or not all(isinstance(item, dict) for item in inputs):
+            raise ValueError("MatAnyone v2 Alpha Matte requires exactly two input descriptors.")
+        source_descriptor = next((item for item in inputs if str(item.get("kind") or "").strip() == "source_video"), None)
+        mask_descriptor = next((item for item in inputs if str(item.get("kind") or "").strip() == "mask_image"), None)
+        if source_descriptor is None or mask_descriptor is None:
+            raise ValueError("MatAnyone v2 Alpha Matte requires source_video and mask_image inputs.")
+        job_id = self._coerce_job_id(job)
+
+        def download(descriptor: dict[str, Any], allowed_mime_types: set[str], max_bytes: int) -> tuple[int, str, bytes, str]:
+            input_id = self._coerce_input_id(descriptor)
+            response = requests.get(
+                f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
+                headers=self._headers(connection), timeout=REQUEST_TIMEOUT_SECONDS, stream=True,
+            )
+            response.raise_for_status()
+            mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            if mime_type not in allowed_mime_types:
+                raise ValueError(f"MatAnyone v2 Alpha Matte input {input_id} has unsupported MIME type {mime_type!r}.")
+            data = self._read_limited_response_content(response, input_id, max_bytes)
+            expected_bytes = descriptor.get("bytes")
+            if expected_bytes is not None and len(data) != int(expected_bytes):
+                raise ValueError(f"MatAnyone v2 Alpha Matte input {input_id} size mismatch.")
+            actual_sha256 = hashlib.sha256(data).hexdigest()
+            expected_sha256 = str(descriptor.get("sha256") or response.headers.get("X-Midom-SHA256") or "").strip().lower()
+            if expected_sha256 and actual_sha256 != expected_sha256:
+                raise ValueError(f"MatAnyone v2 Alpha Matte input {input_id} SHA-256 mismatch.")
+            return input_id, mime_type, data, actual_sha256
+
+        source_id, source_mime, source_data, source_sha256 = download(
+            source_descriptor, ALLOWED_MATANYONE_V2_SOURCE_VIDEO_MIME_TYPES, MAX_STORYBOARD_VIDEO_INPUT_BYTES
+        )
+        source_path = Path(temp_dir) / self._safe_input_filename(source_descriptor.get("filename"), source_id, source_mime)
+        source_path.write_bytes(source_data)
+        fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(source_descriptor, {})
+        metadata = self._probe_event_video_metadata(
+            source_path, duration_fallback_seconds=fallback_duration, duration_fallback_source=fallback_source,
+        )
+        duration = float(metadata.get("duration_seconds") or 0.0)
+        fps = float(metadata.get("fps") or 0.0)
+        display_size = (int(metadata.get("display_width") or 0), int(metadata.get("display_height") or 0))
+        output = job.get("output") or {}
+        requested_size = self._parse_resolution_size(f"{output.get('width')}x{output.get('height')}")
+        if duration <= 0 or duration > MATANYONE_V2_ALPHA_MATTE_MAX_DURATION_SECONDS + 0.05:
+            raise ValueError(f"MatAnyone v2 Alpha Matte source duration must be 0-{MATANYONE_V2_ALPHA_MATTE_MAX_DURATION_SECONDS}s; got {duration:.3f}s.")
+        if abs(fps - float(LTX_VIDEO_FPS)) > 0.05:
+            raise ValueError(f"MatAnyone v2 Alpha Matte source must be {LTX_VIDEO_FPS} fps; got {fps or 'unknown'}.")
+        if display_size != requested_size or f"{display_size[0]}x{display_size[1]}" not in MATANYONE_V2_ALPHA_MATTE_SUPPORTED_RESOLUTIONS:
+            raise ValueError("MatAnyone v2 Alpha Matte source display dimensions must exactly match a supported output profile.")
+        if str(metadata.get("video_codec") or "").strip().lower() != "h264":
+            raise ValueError(f"MatAnyone v2 Alpha Matte source must use H.264 video; got {metadata.get('video_codec') or 'unknown'}.")
+        if int(metadata.get("rotation_degrees") or 0) != 0:
+            raise ValueError("MatAnyone v2 Alpha Matte source must have physically oriented pixels and no rotation metadata.")
+
+        mask_id, mask_mime, mask_data, mask_sha256 = download(mask_descriptor, {"image/png"}, MAX_IMAGE_BYTES)
+        mask_path = Path(temp_dir) / self._safe_input_filename(mask_descriptor.get("filename"), mask_id, mask_mime)
+        mask_path.write_bytes(mask_data)
+        try:
+            with Image.open(mask_path) as image:
+                if str(image.format or "").upper() != "PNG" or image.mode not in {"1", "L", "RGB"}:
+                    raise ValueError("must be an opaque grayscale or RGB PNG without alpha")
+                if image.size != display_size:
+                    raise ValueError(f"dimensions must be {display_size[0]}x{display_size[1]}, got {image.size[0]}x{image.size[1]}")
+                values = set(image.convert("L").getdata())
+        except ValueError as exc:
+            raise ValueError(f"MatAnyone v2 target_seed_mask {mask_id} {exc}.") from exc
+        except Exception as exc:
+            raise ValueError(f"MatAnyone v2 target_seed_mask {mask_id} is not a readable PNG: {exc}") from exc
+        if not values.issubset({0, 255}) or values != {0, 255}:
+            raise ValueError("MatAnyone v2 target_seed_mask must contain both binary black (0) and white (255) pixels only.")
+        self._log(
+            "Downloaded MatAnyone v2 Alpha Matte inputs; "
+            f"job_id={job_id} source_input_id={source_id} mask_input_id={mask_id} "
+            f"size={display_size[0]}x{display_size[1]} fps={fps:.3f} duration_seconds={duration:.3f} "
+            f"source_sha256={source_sha256[:12]}... mask_sha256={mask_sha256[:12]}..."
+        )
+        return [
+            {
+                "input_id": source_id,
+                "kind": "source_video",
+                "role": "matte_source",
+                "path": str(source_path),
+                "mime_type": source_mime,
+                "sha256": source_sha256,
+                "metadata": metadata,
+                "segment_start_seconds": source_descriptor.get("source_start_seconds"),
+                "segment_end_seconds": source_descriptor.get("source_end_seconds"),
+            },
+            {"input_id": mask_id, "kind": "mask_image", "role": "target_seed_mask", "path": str(mask_path), "mime_type": mask_mime, "sha256": mask_sha256, "width": display_size[0], "height": display_size[1]},
+        ]
+
+    def _download_ltx25_alpha_matte_processing_inputs(
+        self,
+        connection: ConnectionContext,
+        job: dict[str, Any],
+        temp_dir: str,
+        inputs: list[Any],
+    ) -> list[dict[str, Any]]:
+        if len(inputs) != 1 or not isinstance(inputs[0], dict):
+            raise ValueError("extract_video_alpha_matte requires exactly one source_video descriptor.")
+        item = inputs[0]
+        job_id = self._coerce_job_id(job)
+        input_id = self._coerce_input_id(item)
+        if str(item.get("kind") or "").strip() != "source_video" or str(item.get("role") or "").strip().lower() != "matte_source":
+            raise ValueError("extract_video_alpha_matte requires source_video role=matte_source.")
+        response = requests.get(
+            f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
+            headers=self._headers(connection),
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            stream=True,
+        )
+        response.raise_for_status()
+        mime_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if mime_type not in ALLOWED_ALPHA_MATTE_SOURCE_VIDEO_MIME_TYPES:
+            raise ValueError(f"Unsupported LTX Alpha Matte source MIME type: {mime_type}")
+        data = self._read_limited_response_content(response, input_id, MAX_STORYBOARD_VIDEO_INPUT_BYTES)
+        expected_size = item.get("bytes")
+        if expected_size is not None and len(data) != int(expected_size):
+            raise ValueError(f"LTX Alpha Matte input {input_id} size mismatch.")
+        actual_sha256 = hashlib.sha256(data).hexdigest()
+        expected_sha256 = str(item.get("sha256") or response.headers.get("X-Midom-SHA256") or "").strip().lower()
+        if expected_sha256 and actual_sha256 != expected_sha256:
+            raise ValueError(f"LTX Alpha Matte input {input_id} SHA-256 mismatch.")
+        path = Path(temp_dir) / self._safe_input_filename(item.get("filename"), input_id, mime_type)
+        path.write_bytes(data)
+        fallback_duration, fallback_source = self._storyboard_input_source_duration_fallback(item, response.headers)
+        metadata = self._probe_event_video_metadata(
+            path,
+            duration_fallback_seconds=fallback_duration,
+            duration_fallback_source=fallback_source,
+        )
+        duration = float(metadata.get("duration_seconds") or 0.0)
+        fps = metadata.get("fps")
+        display_size = (int(metadata.get("display_width") or 0), int(metadata.get("display_height") or 0))
+        expected_size_tuple = self._parse_resolution_size(f"{(job.get('output') or {}).get('width')}x{(job.get('output') or {}).get('height')}")
+        if duration <= 0 or duration > LTX25_ALPHA_MATTE_MAX_DURATION_SECONDS + 0.05:
+            raise ValueError(
+                f"LTX Alpha Matte source duration must be 0-{LTX25_ALPHA_MATTE_MAX_DURATION_SECONDS}s; got {duration:.3f}s."
+            )
+        if fps is None or abs(float(fps) - float(LTX_VIDEO_FPS)) > 0.05:
+            raise ValueError(f"LTX Alpha Matte source must be {LTX_VIDEO_FPS} fps; got {fps if fps is not None else 'unknown'}.")
+        if expected_size_tuple is None or display_size != expected_size_tuple:
+            raise ValueError(
+                "LTX Alpha Matte source display dimensions must equal the requested output; "
+                f"got {display_size[0]}x{display_size[1]}, expected {expected_size_tuple}."
+            )
+        if int(metadata.get("rotation_degrees") or 0) != 0:
+            raise ValueError("LTX Alpha Matte source must have physically oriented pixels and no rotation metadata.")
+        self._log(
+            "Downloaded LTX Alpha Matte input; "
+            f"job_id={job_id} input_id={input_id} size={display_size[0]}x{display_size[1]} "
+            f"fps={float(fps):.3f} duration_seconds={duration:.3f} "
+            f"duration_source={metadata.get('duration_source')!r} sha256={actual_sha256[:12]}..."
+        )
+        return [{
+            "input_id": input_id,
+            "kind": "source_video",
+            "role": "matte_source",
+            "path": str(path),
+            "mime_type": mime_type,
+            "sha256": actual_sha256,
+            "metadata": metadata,
+        }]
 
     def _download_flashvsr_image_processing_inputs(
         self,

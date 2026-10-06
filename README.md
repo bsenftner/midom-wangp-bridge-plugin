@@ -14,6 +14,16 @@ Although it may be technically possible to inspect its behavior or construct req
 
 Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
 
+## Production Scope
+
+Midom is built for authored, storyboard-assembled media and controlled visual variations. A spoken audio spine can provide the timing and narrative framework for short shots and carefully curated cuts. Personalized Media is a future extension of that authored framework, not a blanket guarantee of automatic production.
+
+Multi-Camera Storyboards organize continued speech or dialogue into reviewed coverage, alternate angles, and frequent cuts. They do not guarantee frame-perfect synchronization between independently generated views or faithful reconstruction of a continuous recorded performance.
+
+Midom is not a precision rotoscoping or footage-preserving background-replacement system. Reimagining a character and setting generatively is different from retaining an exact recorded person, costume, and performance while seamlessly replacing the environment. Long-video segmentation makes processing manageable; it does not establish identity, motion, lighting, or boundary continuity across generative segments.
+
+Experimental matte tools below produce reviewable intermediate assets. Their availability does not imply production-quality extraction of arbitrary footage, especially motion-blurred hair, translucent clothing, or subjects against similarly colored backgrounds. Deterministic compositing remains useful with suitable prepared assets, but continuous-performance location replacement is outside Midom's intended production scope.
+
 ## Midom Media Generation Examples
 
 These Midom Blog posts show the kinds of organized media workflows this bridge is designed to support:
@@ -353,7 +363,39 @@ Video output is MP4.
 
 Local media-processing capabilities are reported separately from AI generation. These jobs still use the same Midom worker pairing, token, candidate polling, claim, input download, progress, artifact upload, complete, fail, disconnect, and revoke routes.
 
-Most local media-processing operations below are deterministic FFmpeg work. FlashVSR Crop Detail Restoration is the deliberate exception: it uses WanGP's learned FlashVSR postprocessor, then returns to the exact Midom delivery canvas with deterministic Lanczos resizing. All run inside the same local worker process so project-owned hardware can take work off the shared Midom server.
+Most local media-processing operations below are deterministic FFmpeg work. FlashVSR Crop Detail Restoration and the experimental segmentation/matting processors use learned models; a media-processing job is not necessarily deterministic or source-preserving. All share the local worker lifecycle so project-owned hardware can take work off the shared Midom server.
+
+#### Experimental Video Matte Tools
+
+These are separate typed operations, not a complete background-replacement service. Availability is reported from the installed local dependencies. Review outputs before using them in composition.
+
+`sam_seed_mask_processor`
+
+- Operation `generate_video_matte_seed_mask`, contract `video_matte_click_seed_v1`, profile `sam_vit_h_click_seed_v1`.
+- Explicit legacy SAM ViT-H, independent of WanGP's global Mask Generator selection; requires `mask/sam_vit_h_4b8939_fp16.safetensors`.
+- Accepts one authoritative RGB PNG frame zero at `1280x720` or `720x1280`, with delivery-pixel positive/negative clicks. Supports 1-32 positive and 0-32 negative clicks.
+- Stateless: no stored click session, UI state, SAM3 substitution, or temporal propagation.
+- Returns one binary grayscale PNG with typed role `target_seed_mask`: black background, white target, both values required, no alpha semantics.
+- Midom owns frame preparation, click editing, preview, refinement, and approval. Selection clicks are hints; the returned silhouette still requires review.
+
+`matanyone_v2_processor`
+
+- Operation `extract_video_alpha_matte`, contract `matanyone_v2_alpha_matte_v1`, profile `matanyone_v2_seeded_v1`.
+- Explicit MatAnyone v2, independent of the global Mask Generator version; requires WanGP's `mask/config.json`, `mask/matanyone2.safetensors`, FFmpeg, and FFprobe.
+- Accepts one physically oriented H.264 MP4 at 24 fps, `1280x720` or `720x1280`, up to 30 seconds, plus one reviewed opaque binary PNG seed mask at matching dimensions.
+- Seed frame must be zero. White selects the target; black is background. Empty/full-frame seeds and nonzero rotation metadata are rejected.
+- Forward propagation only; no bidirectional tracking or cross-segment chaining contract.
+- Returns one silent grayscale H.264 review MP4 with typed role `alpha_matte_video`, retaining soft matte values. It is not an alpha-bearing video container.
+
+`ltx25_alpha_matte_processor`
+
+- Experimental operation `extract_video_alpha_matte`, contract `ltx25_alpha_matte_v1`, profile `ltx25_alpha_gen_windowed_v1`.
+- Requires the LTX 2.5 Distilled runtime and `ltx-2.5-22b-ic-lora-alpha-gen-0.9.safetensors` in WanGP's `loras/ltx2` directory.
+- Uses raw source-video conditioning, a neutral prompt, 145-frame windows, and 25-frame overlap for clips up to 30 seconds at 24 fps.
+- Uses the established LTX overscan adapter: `1280x720` renders internally at `1280x768`; `720x1280` at `768x1280`. Source preparation and final centered cropping use the same geometry; output is not stretched to fit.
+- Returns one silent grayscale H.264 MP4 with typed role `alpha_matte_video`, requested delivery dimensions, and geometry/crop provenance.
+- Stage/progress logging covers preparation, submission, inference callbacks, finalization, and upload. Bridge-private `_midom_*` metadata stays local and is not submitted as WanGP model settings.
+- This is generative matte estimation, not guaranteed frame-perfect extraction. Fast-motion testing exposed temporal alignment and detail failures; it remains experimental research rather than a production quality reference.
 
 `event_video_ffmpeg_processor`
 
