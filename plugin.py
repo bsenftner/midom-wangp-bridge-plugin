@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -5319,6 +5320,73 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"denoising_strength={settings.get('denoising_strength')} "
             f"attention_mode={settings.get('override_attention')!r}."
         )
+
+    @contextmanager
+    def _sensenova_high_resolution_budget(self, api_session, settings: dict[str, Any]):
+        if str(settings.get("model_type") or "") != SENSENOVA_MODEL_ID:
+            yield
+            return
+        requested = settings.get("_midom_requested_resolution")
+        internal = SENSENOVA_INTERNAL_RENDER_RESOLUTIONS.get(requested)
+        if not internal or settings.get("resolution") != internal:
+            raise ValueError("SenseNova high-resolution submission must use the declared Midom render adapter.")
+        budget = max(math.prod(self._parse_resolution_size(value)) for value in SENSENOVA_INTERNAL_RENDER_RESOLUTIONS.values())
+        with self._temporary_image_resolution_budget(api_session, SENSENOVA_MODEL_ID, "SenseNova", budget, requested, internal):
+            yield
+
+    @contextmanager
+    def _qwen21_production_resolution_budget(self, api_session, settings: dict[str, Any]):
+        if (
+            str(settings.get("model_type") or "") != QWEN21_MODEL_ID
+            or settings.get("_midom_image_task") != "scene_integration"
+            or not settings.get("_midom_scene_integration_production")
+        ):
+            yield
+            return
+        contract_profile = (
+            settings.get("_midom_scene_integration_contract_version"),
+            settings.get("_midom_scene_integration_profile_id"),
+        )
+        supported_contract_profiles = {
+            (QWEN21_SCENE_INTEGRATION_CONTRACT_VERSION, QWEN21_SCENE_INTEGRATION_PRODUCTION_PROFILE_ID),
+            (QWEN21_SCENE_INTEGRATION_V2_CONTRACT_VERSION, QWEN21_SCENE_INTEGRATION_FLATTENED_PRODUCTION_PROFILE_ID),
+        }
+        requested = settings.get("_midom_requested_resolution")
+        internal = QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS.get(requested)
+        if contract_profile not in supported_contract_profiles or not internal or settings.get("resolution") != internal:
+            raise ValueError("Qwen Production Integration submission must use its declared contract and render adapter.")
+        budget = max(math.prod(self._parse_resolution_size(value)) for value in QWEN21_SCENE_INTEGRATION_PRODUCTION_RENDER_RESOLUTIONS.values())
+        with self._temporary_image_resolution_budget(api_session, QWEN21_MODEL_ID, "Qwen Production Integration", budget, requested, internal):
+            yield
+
+    @contextmanager
+    def _temporary_image_resolution_budget(
+        self, api_session, model_id: str, label: str, budget: int, requested: str, internal: str,
+    ):
+        runtime = api_session._ensure_runtime()
+        model_def = runtime.module.get_model_def(model_id)
+        if not isinstance(model_def, dict):
+            raise ValueError(f"WanGP {label} model definition is unavailable.")
+        if model_def.get("resolution_budget") is not None:
+            yield
+            return
+        had_previous = "resolution_budget" in model_def
+        previous = model_def.get("resolution_budget")
+        # v18 applies a generic 1080p API ceiling when the image model omits its budget.
+        model_def["resolution_budget"] = budget
+        try:
+            self._log(
+                f"Temporarily declared {label} high-resolution API budget; "
+                f"requested_resolution={requested} internal_render_resolution={internal} "
+                f"resolution_budget_pixels={budget}."
+            )
+            yield
+        finally:
+            if had_previous:
+                model_def["resolution_budget"] = previous
+            else:
+                model_def.pop("resolution_budget", None)
+            self._log(f"Restored WanGP {label} resolution budget after generation.")
 
     def _begin_qwen_multi_angle_lossless_output(self, api_session, settings: dict[str, Any]):
         if str(settings.get("_midom_curated_tool_id") or "") != QWEN_MULTI_ANGLE_TOOL_ID:
@@ -11407,23 +11475,24 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     settings,
                 )
                 try:
-                    job_handle = self._submit_wangp_job(api_session, settings, output_count, callbacks)
-                    self._active_job = job_handle
-                    try:
-                        result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
-                    finally:
-                        if self._active_job is job_handle:
-                            self._active_job = None
-                    self._capture_qwen_multi_angle_runtime_diagnostics(
-                        api_session,
-                        settings,
-                        phase="post_generation",
-                    )
-                    self._capture_qwen21_native_rgba_runtime_diagnostics(
-                        api_session,
-                        settings,
-                        phase="post_generation",
-                    )
+                    with self._sensenova_high_resolution_budget(api_session, settings), self._qwen21_production_resolution_budget(api_session, settings):
+                        job_handle = self._submit_wangp_job(api_session, settings, output_count, callbacks)
+                        self._active_job = job_handle
+                        try:
+                            result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
+                        finally:
+                            if self._active_job is job_handle:
+                                self._active_job = None
+                        self._capture_qwen_multi_angle_runtime_diagnostics(
+                            api_session,
+                            settings,
+                            phase="post_generation",
+                        )
+                        self._capture_qwen21_native_rgba_runtime_diagnostics(
+                            api_session,
+                            settings,
+                            phase="post_generation",
+                        )
                 finally:
                     self._restore_ace_step15_int8_backend(ace_step_int8_backend_override)
                     self._restore_qwen_multi_angle_output_codec(output_codec_override)

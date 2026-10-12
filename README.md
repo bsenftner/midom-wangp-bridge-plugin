@@ -14,6 +14,13 @@ Although it may be technically possible to inspect its behavior or construct req
 
 Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
 
+## Release 0.8.9
+
+- Fixes WanGP v18 API resolution rejection for SenseNova's established high-resolution render adapters and Qwen Image 2.1 Production Scene Integration's `1536x1536` render for `1024x1024` delivery, including both Production contracts.
+- Supplies only missing model resolution budgets for the duration of the job and restores the original definitions afterward, including failure and cancellation paths. Explicit WanGP budgets remain authoritative.
+- Keeps existing recipes, output dimensions, artifact validation, and protected-pixel restoration unchanged. No Midom contract changes are required.
+- Source compatibility was checked against WanGP v18.02 (`57d57dc7`); GPU output quality still depends on the workstation's installed runtime and models. Restart WanGP after installing the updated plugin.
+
 ## Production Scope
 
 Midom is built for authored, storyboard-assembled media and controlled visual variations. A spoken audio spine can provide the timing and narrative framework for short shots and carefully curated cuts. Personalized Media is a future extension of that authored framework, not a blanket guarantee of automatic production.
@@ -180,6 +187,7 @@ Important image behavior:
 - Production Integration accepts one RGB `location_plate`, one positioned RGBA `placed_asset`, and one opaque binary `integration_matte`. The Bridge composites the inputs deterministically, renders at a larger internal canvas, then restores every black/protected matte pixel from the original composite after Qwen returns. This protects faces and other excluded details from model reinterpretation while allowing shadows and edge integration inside the white matte.
 - Production Integration currently renders `1280x720` delivery through `1920x1088` and `720x1280` through `1088x1920`, then center-crops/downscales to delivery size. It is Standard-only, returns one RGB PNG, and records composition placement, input hashes, matte statistics, internal canvas geometry, and protected-pixel verification in completion provenance.
 - The backward-compatible `qwen21_scene_integration_v2` flattened Production profile accepts one delivery-sized RGB PNG `scene_composite` plus one opaque binary PNG `integration_matte`. Midom owns the multi-layer rasterization, overlap/occlusion-aware matte union, and layer manifest. The Bridge validates the flattened inputs, limits the editable matte to 60% of the delivery canvas, uses the same larger internal production render, and restores all protected black-matte pixels exactly from the composite before upload.
+- Both Production contracts render `1024x1024` delivery internally at `1536x1536`. For WanGP v18 definitions missing an explicit resolution budget, the Bridge temporarily declares the established Production render budget during submission and generation, then restores the original definition. Other Qwen workflows and explicit WanGP budgets remain unchanged.
 - The experimental `qwen21_atmosphere_overlay_v1` operation creates a separate, full-frame RGBA atmosphere layer from one `scene_image` reference. It is intended for haze, light diffusion, tint, bloom, fog, and particles, not for source-preserving relighting or final scene compositing. The Standard-only 50-step, guidance-8 route returns one lossless PNG and rejects outputs without enough semi-transparent alpha or with too much opaque coverage.
 - Qwen Image 2.1 reports versioned Image Visual Variations contracts. `qwen21_visual_variation_v1` uses an isolated 50-step, guidance-8 Standard recipe for Character Asset RGBA and Location Plate RGB modes, with 1-10 candidate outputs.
 - `qwen21_visual_variation_v2` adds Prop Asset RGBA: one authoritative source image plus up to two ordered supporting references, one output per durable Midom child job, and Standard only. It accepts only the `keep_all` reference-background policy: no masks, controls, or background-removal preprocessing. Its prompt wrapper requests a complete isolated prop with no stage, floor, cast shadow, or unrelated person, then requires meaningful native alpha in the PNG result.
@@ -195,6 +203,7 @@ Important image behavior:
 - Z-Image control variants are better suited for structure/layout control from pose, depth, edge, or raw control inputs.
 - SenseNova U1.5 is optimized for high-resolution text-heavy layouts and infographics; the bridge renders Midom delivery sizes through a larger internal render and center-crop/downscale adapter for text quality.
 - SenseNova landscape and portrait delivery currently render internally at `5440x3072` and `3072x5440` respectively, then return the requested Midom-visible size.
+- WanGP v18 API resolution validation uses a generic 1080p ceiling when a model omits its resolution budget. For SenseNova only, the Bridge temporarily declares the existing internal-render budget for the whole job, then restores the original model definition. Explicit WanGP model budgets are respected; no global configuration or output dimensions are changed.
 - SenseNova Midom jobs force WanGP KV Cache to `Disabled` for the current high-resolution quality/stability baseline.
 - The curated SenseNova accelerator profile uses the official 8-step accelerator LoRA with a tested 12-step Midom fast setting.
 
@@ -660,8 +669,11 @@ Useful local checks:
 
 ```bash
 python -m py_compile plugin.py
+python -m pytest -q tests
 git diff --check
 ```
+
+The v18 resolution-validator tests use the actual WanGP source. A plugin installed under `Wan2GP/plugins/` finds it automatically. For a standalone repository checkout, set `WAN2GP_ROOT` to the WanGP installation directory before running tests. These validator integration tests are skipped when no compatible WanGP source is available; ordinary plugin tests still run.
 
 Do not commit local `worker_config.json`, generated media, pairing codes, bearer tokens, or OS sidecar files.
 
