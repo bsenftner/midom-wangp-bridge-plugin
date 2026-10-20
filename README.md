@@ -14,6 +14,50 @@ Although it may be technically possible to inspect its behavior or construct req
 
 Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
 
+## Release 0.8.10
+
+- Adds Fish Audio Drama 3 Default/FP8 Experts and INT4 Experts: new voices, one-reference cloning, and dialogue with up to three cloned references and 16 scripted speaker labels. Exact reference transcripts are required; the Bridge does not transcribe references or rewrite approved scripts.
+- Adds versioned reviewable-audio acceptance alongside unchanged historical v1 behavior. V2 permits 1-120-second generation ceilings with independent 180-second artifact safety; v3 permits 1-180-second generation ceilings with independent 240-second artifact safety. The default generation ceiling remains 60 seconds, and all versions retain the 50 MiB artifact limit.
+- Valid v2/v3 takes can complete with review warnings for silence, length, uncertain termination, or over-budget duration. Duration ceilings are not targets. No silent trimming, stretching, replacement, regeneration, or editorial approval occurs. Cancellation, execution failures, unusable media, and safety/integrity failures remain errors.
+- Coalesces progress callbacks, status changes, processing stages, and keepalives into at most one progress POST every two seconds per worker. Progress-only HTTP 429 responses honor bounded `Retry-After` backoff without restarting inference. Authorization, leases, artifact uploads, and terminal reports remain enforced separately.
+- Fixes duplicate audio-output collection when WanGP reports relative/absolute aliases of the same recording. Paths resolve against the session root with native case rules and filesystem identity checks; genuinely distinct outputs and extra Fish artifact records still fail.
+- Keeps completion diagnostics shallow and bounded, validates delivered Fish WAV/MP3 bytes independently, preserves lossless WAV bytes, and reports exact hashes and measurements. Windows audio probing uses explicit UTF-8 decoding.
+- Updates historical Qwen Alternate View attention diagnostics for WanGP's current overrides format without changing that retired workflow's recipe.
+
+Restart WanGP after updating, click **Update Capabilities**, and reload Midom's
+Project page. Keep Midom and WanGP current; this plugin remains a paired Midom
+worker, not a supported standalone API. Current Fish integration was developed
+against WanGP v18.17; release source-level tests use WanGP v18.19 (`fdc63bdf`).
+It was also exercised through Midom on the GPU workstation. Listening tests produced usable three-speaker dialogue with
+both FP8 and INT4, but do not establish reliable voice cloning for every input.
+
+### Fish Audio Review And Limitations
+
+Fish can terminate speech early or reuse a voice across speaker labels even when
+all distinct references are correctly routed and encoded. In local tests,
+changing the first two reference assignments together with their transcripts
+produced successful INT4 and FP8 takes after voice duplication in earlier runs.
+That is an observed working arrangement for those inputs, not a proven general
+fix; seeds also varied. The Bridge does not automatically reorder voices.
+
+Audition every take for completeness, speaker identity, names, numbers, and
+performance. Native EOS and verified conditioning do not prove that all words
+were spoken or that voices were reproduced faithfully. Midom owns Keep/Reject
+review. A new take is a deliberate new generation, not an automatic retry.
+
+Select contracts explicitly within the chosen checkpoint. V3 uses
+`fish_drama3_tts_v3`, `standard_v1`, `reviewable_audio_v1`, and
+`fish_audio_240s_50mib_v1`; its independent artifact limit is 240 seconds,
+52,428,800 bytes, and 10,584,000 decoded mono samples at 44.1 kHz. V2 retains
+`fish_audio_180s_50mib_v1` and 7,938,000 samples. Reviewable claims omit
+`output.max_duration_seconds`. There is no contract, checkpoint, profile, or
+format fallback. Historical v1 jobs keep their existing strict acceptance.
+
+The automated suite passed 1,164 tests before release preparation, with four
+native-Windows integration cases skipped on Linux. Coverage includes real
+182-second WAV/MP3 artifact delivery through simulated generation sessions,
+not GPU inference or an exhaustive voice-quality benchmark.
+
 ## Release 0.8.9
 
 - Fixes WanGP v18 API resolution rejection for SenseNova's established high-resolution render adapters and Qwen Image 2.1 Production Scene Integration's `1536x1536` render for `1024x1024` delivery, including both Production contracts.
@@ -248,6 +292,20 @@ Curated image resolutions include:
 - Accepts `Speaker N:` script blocks.
 - Supports N scripted speakers with a first-pass practical cap of 8 speaker labels.
 - Outputs one concatenated dialogue audio artifact.
+
+`fish_drama3` / `fish_drama3_int4`
+
+- In WanGP, select **TTS Fish Audio Drama 3** or **TTS Fish Audio Drama 3 INT4 Experts**. Both variants share ordinary model components; INT4 reduces routed-expert memory requirements, not the dialogue feature set.
+- Generate a new voice without a recording, clone one voice, or perform dialogue with zero through three cloned voice references.
+- Script labels support Speakers 1-16; only Speakers 1-3 can receive cloned references. Other voices are model-selected.
+- Use short performance directions such as `[warm and welcoming]` at line starts. Exact wording remains Midom-owned.
+- Each reference must contain 3-30 seconds of audio and its exact transcript. Reference sample rate must be at least 16 kHz.
+- One WAV or explicitly requested MP3 per job; native speech is 44.1 kHz mono. Generation ceilings are 1-120 seconds for v1/v2 or 1-180 seconds for explicit v3, not an exact-length promise.
+- With explicit v2/v3 reviewable-audio contracts, valid takes can exceed the generation ceiling within their independent 180/240-second safety bounds. Silence/length termination and overruns beyond the 0.25-second warning deadband are reported for review, not silently discarded or repaired. V1 jobs keep their original strict behavior.
+- The initial Bridge profile generates the complete script in one pass. Native line-chunking is not yet exposed.
+- A normal model ending does not prove every name, number, or disclaimer was spoken correctly; review generated speech.
+- Model downloads can be substantial. Runtime depends on system RAM, CPU memory bandwidth, GPU, and configured engine. No global BF16 setting is required by this integration.
+- Midom owns licensing and consent controls. The Bridge does not make a commercial-eligibility determination.
 
 ### Voice Conversion
 

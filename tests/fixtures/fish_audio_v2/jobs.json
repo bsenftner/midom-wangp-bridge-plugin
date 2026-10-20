@@ -1,0 +1,168 @@
+{
+  "fixture_set_id": "fish_audio_reviewable_v2_fixtures_v1",
+  "synthetic": true,
+  "checkpoint_matrix": ["fish_drama3", "fish_drama3_int4"],
+  "format_matrix": [{"format": "wav", "mime_type": "audio/wav"}, {"format": "mp3", "mime_type": "audio/mpeg"}],
+  "candidate": {
+    "job_id": 2401, "worker_id": 85, "org_id": 2, "project_id": 51,
+    "requested_by_user_id": 1, "family": "media_generation", "media_type": "audio", "model_id": "fish_drama3",
+    "summary": {
+      "audio_task": "speech_tts", "speech_contract_version": "fish_drama3_tts_v2",
+      "speech_profile_id": "standard_v1", "acceptance_policy_id": "reviewable_audio_v1",
+      "artifact_safety_profile_id": "fish_audio_180s_50mib_v1",
+      "voice_mode": "multi_speaker_dialogue", "dialogue_mode": "speaker_lines",
+      "duration_mode": "maximum_seconds", "duration_seconds": 120,
+      "speaker_ids": [1, 2, 3], "speaker_count": 3,
+      "referenced_speaker_ids": [1, 2, 3], "speaker_reference_audio_count": 3,
+      "reference_transcript_count": 3, "input_audio_count": 3,
+      "reference_audio_count": 0, "emotion_reference_audio_count": 0, "source_audio_count": 0,
+      "input_image_count": 0, "input_video_count": 0, "output_count": 1, "output_format": "mp3"
+    }
+  },
+  "claim": {
+    "job_id": 2401, "family": "media_generation", "media_type": "audio", "model_id": "fish_drama3",
+    "prompt": "Speaker 1: Hello.\nSpeaker 2: Welcome.\nSpeaker 3: Goodbye.",
+    "generation": {
+      "audio_task": "speech_tts", "speech_contract_version": "fish_drama3_tts_v2",
+      "speech_profile_id": "standard_v1", "acceptance_policy_id": "reviewable_audio_v1",
+      "artifact_safety_profile_id": "fish_audio_180s_50mib_v1",
+      "voice_mode": "multi_speaker_dialogue", "dialogue_mode": "speaker_lines",
+      "duration_mode": "maximum_seconds", "duration_seconds": 120, "seed": 123,
+      "prompt_enhancement_by_worker": false, "options": {"multi_prompts_gen_type": "FG"}
+    },
+    "inputs": [
+      {
+        "kind": "speaker1_reference_audio", "role": "speaker_reference_audio", "speaker_id": 1,
+        "sequence": 0, "input_id": 101, "mime_type": "audio/wav", "bytes": 200000,
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "transcript": "A recording for the first speaker."
+      },
+      {
+        "kind": "speaker2_reference_audio", "role": "speaker_reference_audio", "speaker_id": 2,
+        "sequence": 1, "input_id": 102, "mime_type": "audio/wav", "bytes": 210000,
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "transcript": "A recording for the second speaker."
+      },
+      {
+        "kind": "speaker3_reference_audio", "role": "speaker_reference_audio", "speaker_id": 3,
+        "sequence": 2, "input_id": 103, "mime_type": "audio/wav", "bytes": 220000,
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "transcript": "A recording for the third speaker."
+      }
+    ],
+    "limits": {"max_artifact_bytes": 52428800},
+    "output": {"count": 1, "format": "mp3", "mime_type": "audio/mpeg"}
+  },
+  "accepted_artifact": {
+    "artifact_id": 12001, "file_id": 13001, "artifact_index": 0,
+    "job_id": 2401, "worker_id": 85, "project_id": 51,
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "mime_type": "audio/mpeg", "bytes": 2928123,
+    "duration_seconds": 122, "sample_rate_hz": 44100, "channels": 1
+  },
+  "completion": {
+    "artifacts": [{"artifact_id": 12001, "file_id": 13001, "artifact_index": 0}],
+    "backend": "wangp", "model_id": "fish_drama3",
+    "generation_metadata": {
+      "requested_seed": 123, "resolved_seed": 123, "seed_source": "midom_request",
+      "artifact_seeds": [{"artifact_index": 0, "seed": 123, "seed_source": "midom_request"}],
+      "fish_audio": {
+        "speech_contract_version": "fish_drama3_tts_v2", "recipe_version": "fish_drama3_standard_recipe_v1",
+        "speech_profile_id": "standard_v1", "model_id": "fish_drama3",
+        "acceptance_policy_id": "reviewable_audio_v1", "artifact_safety_profile_id": "fish_audio_180s_50mib_v1",
+        "voice_mode": "multi_speaker_dialogue", "speaker_ids": [1, 2, 3], "model_selected_speaker_ids": [],
+        "script_sha256": "c264dfae5caa16e900cacf87883bb06b99d23e8b0083e68c2b25c8abd3bbd9f0",
+        "native_prompt_sha256": "c264dfae5caa16e900cacf87883bb06b99d23e8b0083e68c2b25c8abd3bbd9f0",
+        "script_normalization": "line_endings_and_line_boundary_whitespace_v1",
+        "duration_mode": "maximum_seconds", "maximum_duration_seconds": 120,
+        "script_coverage": "not_verified", "prompt_enhancement_by_worker": false,
+        "reference_transcription_by_worker": false, "finish_reason": "eos", "observed_calls": 1,
+        "execution_evidence": {
+          "job_id": 2401, "client_id": "midom_fish_2401_fixture_only",
+          "session_succeeded": true, "cancelled": false,
+          "native_call_returned_output": true, "observed_calls": 1
+        },
+        "parts": [{"part_index": 0, "finish_reason": "eos", "generated_frames": 2627}],
+        "sampling": {"temperature": 0.8, "top_k": 30, "top_p": 0.95},
+        "runtime": {"engine": "fixture_only_not_observed", "expert_precision": "fp8"},
+        "reference_inputs": [
+          {
+            "input_id": 101, "kind": "speaker1_reference_audio", "role": "speaker_reference_audio",
+            "speaker_id": 1, "sequence": 0,
+            "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+            "prepared_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+            "transcript_sha256": "d3a9663621ce4dca5f5cb2a6f40b3fc81a90507dec3ac4c0217b36770e2a0a32",
+            "preparation": "mono_44100hz_float32_wav_v1"
+          },
+          {
+            "input_id": 102, "kind": "speaker2_reference_audio", "role": "speaker_reference_audio",
+            "speaker_id": 2, "sequence": 1,
+            "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+            "prepared_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+            "transcript_sha256": "63934d7a4849a005819a171852d33923137d4ae9bd67adf1dd1432127403231a",
+            "preparation": "mono_44100hz_float32_wav_v1"
+          },
+          {
+            "input_id": 103, "kind": "speaker3_reference_audio", "role": "speaker_reference_audio",
+            "speaker_id": 3, "sequence": 2,
+            "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+            "prepared_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+            "transcript_sha256": "5054d0dee70aca46ad05b2aeaba2abe3a7d01142a21204f3bdbb4ac92dd68428",
+            "preparation": "mono_44100hz_float32_wav_v1"
+          }
+        ],
+        "native_conditioning": {
+          "audio_prompt_type": "ABD", "reference_count": 3,
+          "verification_result": "prompt_assembly_verified", "voice_identity_verification": "not_performed",
+          "encoded_references": [
+            {"speaker_id": 1, "shape": [10, 100], "sha256_int64": "7777777777777777777777777777777777777777777777777777777777777777"},
+            {"speaker_id": 2, "shape": [10, 110], "sha256_int64": "8888888888888888888888888888888888888888888888888888888888888888"},
+            {"speaker_id": 3, "shape": [10, 120], "sha256_int64": "9999999999999999999999999999999999999999999999999999999999999999"}
+          ],
+          "prompt_assemblies": [
+            {
+              "part_index": 0, "native_speaker_token_order": [0, 1, 2, 0, 1, 2],
+              "reference_audio_rows": 330, "distinct_encoded_reference_count": 3,
+              "reference_code_sha256s": [
+                "7777777777777777777777777777777777777777777777777777777777777777",
+                "8888888888888888888888888888888888888888888888888888888888888888",
+                "9999999999999999999999999999999999999999999999999999999999999999"
+              ],
+              "reference_codebook_counts": [10, 10, 10], "reference_frame_counts": [100, 110, 120]
+            }
+          ]
+        },
+        "artifacts": [
+          {
+            "artifact_index": 0, "format": "mp3", "mime_type": "audio/mpeg",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bytes": 2928123, "sample_rate_hz": 44100, "channels": 1,
+            "duration_seconds": 122, "probe_duration_seconds": 122,
+            "decoded_duration_seconds": 122, "decoded_mono_sample_count": 5380200,
+            "peak_amplitude": 0.5
+          }
+        ],
+        "warnings": [{"code": "generated_duration_over_budget", "severity": "warning", "artifact_index": 0}]
+      }
+    }
+  },
+  "expected_midom_state": {
+    "job_status": "succeeded", "editorial_review_status": "pending_review",
+    "display_state": "Completed - Review Needed", "script_coverage": "not_verified"
+  },
+  "route_matrix": [
+    {"voice_mode": "new_voice", "speaker_count": 1, "reference_count": 0},
+    {"voice_mode": "single_reference", "speaker_count": 1, "reference_count": 1},
+    {"voice_mode": "multi_speaker_dialogue", "speaker_count": 2, "reference_count": 0},
+    {"voice_mode": "multi_speaker_dialogue", "speaker_count": 2, "reference_count": 1},
+    {"voice_mode": "multi_speaker_dialogue", "speaker_count": 2, "reference_count": 2},
+    {"voice_mode": "multi_speaker_dialogue", "speaker_count": 3, "reference_count": 3},
+    {"voice_mode": "multi_speaker_dialogue", "speaker_count": 16, "reference_count": 3}
+  ],
+  "termination_matrix": [
+    {"finish_reason": "eos", "parts": [{"part_index": 0, "finish_reason": "eos", "generated_frames": 100}], "warnings": []},
+    {"finish_reason": "silence", "parts": [{"part_index": 0, "finish_reason": "silence", "generated_frames": 100}], "warnings": ["speech_stopped_on_silence"]},
+    {"finish_reason": "length", "parts": [{"part_index": 0, "finish_reason": "length", "generated_frames": 100}], "warnings": ["generation_duration_limit_reached"]},
+    {"finish_reason": "unknown", "parts": [], "warnings": ["termination_unverified"]}
+  ]
+}

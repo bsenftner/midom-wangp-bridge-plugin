@@ -1,8 +1,12 @@
 import hashlib
+import array
+import inspect
+import io
 import ipaddress
 import json
 import math
 import mimetypes
+import os
 import queue
 import re
 import socket
@@ -10,9 +14,12 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from collections import deque
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -149,6 +156,9 @@ EVENT_KEEP_AWAKE_DURATION_SECONDS = {
 }
 JOB_KEEPALIVE_SECONDS = 60
 JOB_KEEPALIVE_RETRY_SECONDS = 15
+JOB_PROGRESS_INTERVAL_SECONDS = 2.0
+JOB_PROGRESS_RETRY_SECONDS = 15
+JOB_PROGRESS_MAX_RETRY_SECONDS = 120
 JOB_WAIT_LOG_SECONDS = 10
 SIBLING_BUSY_MESSAGE = "Shared local WanGP engine is busy with another paired project."
 REQUEST_TIMEOUT_SECONDS = 30
@@ -590,6 +600,21 @@ PROMPT_PROCESSING_MODES = set(PROMPT_PROCESSING_MODE_CHOICES)
 DEFAULT_PROMPT_PROCESSING_MODE = "FG"
 CHATTERBOX_MODEL_ID = "chatterbox"
 DRAMABOX_MODEL_ID = "dramabox_audio"
+FISH_AUDIO_MODEL_IDS = {"fish_drama3", "fish_drama3_int4"}
+FISH_AUDIO_CONTRACT = "fish_drama3_tts_v1"
+FISH_AUDIO_REVIEWABLE_CONTRACT = "fish_drama3_tts_v2"
+FISH_AUDIO_EXTENDED_CONTRACT = "fish_drama3_tts_v3"
+FISH_AUDIO_REVIEWABLE_CONTRACTS = {FISH_AUDIO_REVIEWABLE_CONTRACT, FISH_AUDIO_EXTENDED_CONTRACT}
+FISH_AUDIO_ACCEPTANCE_POLICY = "reviewable_audio_v1"
+FISH_AUDIO_SAFETY_PROFILE = "fish_audio_180s_50mib_v1"
+FISH_AUDIO_ARTIFACT_MAX_SECONDS = 180
+FISH_AUDIO_ARTIFACT_MAX_SAMPLES = 7_938_000
+FISH_AUDIO_EXTENDED_SAFETY_PROFILE = "fish_audio_240s_50mib_v1"
+FISH_AUDIO_RECIPE = "fish_drama3_standard_recipe_v1"
+FISH_AUDIO_MAX_DURATION = 120
+FISH_AUDIO_SAMPLE_RATE = 44100
+FISH_AUDIO_REFERENCE_MIN_SECONDS = 3
+FISH_AUDIO_REFERENCE_MAX_SECONDS = 30
 STABLE_AUDIO3_MUSIC_MODEL_ID = "stable_audio3_small_music"
 STABLE_AUDIO3_SFX_MODEL_ID = "stable_audio3_small_sfx"
 STABLE_AUDIO3_MODEL_IDS = {STABLE_AUDIO3_MUSIC_MODEL_ID, STABLE_AUDIO3_SFX_MODEL_ID}
@@ -751,6 +776,7 @@ ALLOWED_AUDIO_MODEL_TYPES = {
     "index_tts2",
     CHATTERBOX_MODEL_ID,
     DRAMABOX_MODEL_ID,
+    *FISH_AUDIO_MODEL_IDS,
     SEEDVC_MODEL_ID,
     *STABLE_AUDIO3_MODEL_IDS,
     ACE_STEP15_MUSIC_MODEL_ID,
@@ -980,6 +1006,105 @@ class LocalProcessJob:
             self.done = True
 
 
+class JobProgressCoalescer:
+    """One job's latest telemetry, sharing a worker's monotonic rate budget."""
+
+    def __init__(self, send, on_error, log, budget, *, clock=time.monotonic):
+        self._send, self._on_error, self._log = send, on_error, log
+        self._budget, self._clock = budget, clock
+        self._condition = threading.Condition()
+        self._latest = {}
+        self._pending = False
+        self._closed = False
+        self._sending = False
+        self._last_success = clock()
+        self.error = None
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="midom-job-progress", daemon=True)
+        self._thread.start()
+
+    def submit(self, payload):
+        with self._condition:
+            self.raise_if_failed()
+            if self._closed:
+                return
+            self._latest.update(payload)
+            self._pending = True
+            self._condition.notify_all()
+
+    def raise_if_failed(self):
+        if self.error is not None:
+            raise self.error
+
+    def close(self):
+        with self._condition:
+            self._closed = True
+            self._pending = False
+            self._condition.notify_all()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            # Finish any in-flight HTTP call before terminal reporting or worker reuse.
+            self._thread.join()
+
+    def _delay(self):
+        due = max(self._budget["last_attempt"] + JOB_PROGRESS_INTERVAL_SECONDS, self._budget["retry_at"])
+        if not self._pending:
+            due = max(due, self._last_success + JOB_KEEPALIVE_SECONDS)
+        return max(0.0, due - self._clock())
+
+    @staticmethod
+    def _retry_seconds(response):
+        value = str(response.headers.get("Retry-After", "")).strip()
+        seconds = int(value) if re.fullmatch(r"[0-9]{1,9}", value) else JOB_PROGRESS_RETRY_SECONDS
+        return max(JOB_PROGRESS_INTERVAL_SECONDS, min(seconds, JOB_PROGRESS_MAX_RETRY_SECONDS))
+
+    def flush_due(self):
+        with self._condition:
+            if self._closed or self.error is not None or self._sending or not self._latest or self._delay() > 0:
+                return
+            payload = dict(self._latest)
+            self._pending = False
+            self._sending = True
+            self._budget["last_attempt"] = self._clock()
+        try:
+            response = self._send(payload)
+            with self._condition:
+                if response.status_code == 429:
+                    seconds = self._retry_seconds(response)
+                    self._budget["retry_at"] = self._clock() + seconds
+                    self._pending = True
+                    if not self._budget["throttled"]:
+                        self._log(
+                            f"Progress throttled by Midom (HTTP 429); retrying in {seconds:g}s. "
+                            "Inference continues; cancellation delivery may be delayed until progress is accepted.",
+                            force=True,
+                        )
+                    self._budget["throttled"] = True
+                else:
+                    self._last_success = self._clock()
+                    self._budget["retry_at"] = 0.0
+                    if self._budget["throttled"]:
+                        self._log("Midom progress reporting recovered after throttling.", force=True)
+                    self._budget["throttled"] = False
+        except Exception as exc:
+            with self._condition:
+                self.error = exc
+            self._on_error(exc)
+        finally:
+            with self._condition:
+                self._sending = False
+                self._condition.notify_all()
+
+    def _run(self):
+        while True:
+            self.flush_due()
+            with self._condition:
+                if self._closed or self.error is not None:
+                    return
+                self._condition.wait(timeout=self._delay() if self._latest else None)
+
+
 def _add_prompt_type_letter(value: str, letter: str) -> str:
     value = str(value or "")
     letter = str(letter or "")
@@ -1017,6 +1142,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._ffmpeg_probe_cache_at = 0.0
         self._ffmpeg_probe_log_signature = None
         self._lora_hash_cache = {}
+        self._progress_lock = threading.Lock()
+        self._progress_budgets = {}
+        self._job_progress = None
+        self._closed_progress_job = None
 
     def _log(self, message: str, *, force: bool = False) -> None:
         if not VERBOSE_LOGGING and not force:
@@ -1171,6 +1300,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             except FileNotFoundError:
                 pass
             config = {}
+        if hasattr(self, "_progress_lock"):
+            connection_ids = {str(record.get("connection_id")) for record in connections}
+            with self._progress_lock:
+                self._progress_budgets = {
+                    key: value for key, value in self._progress_budgets.items() if key[0] in connection_ids
+                }
         return config
 
     def _forget_connection_locally(self, connection_id: str) -> dict[str, Any]:
@@ -1340,8 +1475,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             detail = payload.get("detail")
             if isinstance(detail, list) and detail:
                 return str(detail[0])
-        text = str(response.text or "").strip()
-        return text[:300] if text else response.reason
+        text = str(getattr(response, "text", "") or "").strip()
+        return text[:300] if text else str(getattr(response, "reason", "") or "")
 
     def _raise_pairing_error(self, response: requests.Response) -> None:
         server_message = self._midom_error_message(response)
@@ -1811,6 +1946,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "accelerator_profiles": self._accelerator_profiles_for_model(model_id),
                 **({"curated_tools": curated_tools} if curated_tools else {}),
             })
+        models.extend(self._fish_audio_capabilities())
         audio_output_mime_types = self._audio_output_mime_types()
         models.append({
             "model_id": "index_tts2",
@@ -3354,6 +3490,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "Audio capability prepared; "
                 f"model_id={model.get('model_id')} output_mime_types={limits.get('output_mime_types') or []}."
             )
+            if model.get("model_id") in FISH_AUDIO_MODEL_IDS:
+                self._log(f"Fish Audio contract prepared; model_id={model['model_id']} contract={json.dumps(limits['fish_audio'], sort_keys=True)}.")
         video_models = [model for model in capabilities.get("models", []) if isinstance(model, dict) and model.get("media_type") == "video"]
         for model in video_models:
             limits = model.get("limits") or {}
@@ -7197,10 +7335,340 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             },
         }
 
+    def _fish_audio_capabilities(self) -> list[dict[str, Any]]:
+        models = [{
+            "model_id": model_id,
+            "family": "tts",
+            "media_type": "audio",
+            "display_name": "Fish Audio Drama 3" + (" INT4 Experts" if model_id.endswith("_int4") else ""),
+            "supported": True,
+            "detected": True,
+            "capabilities": {
+                "text_to_speech": True, "voice_clone": True, "voice_design": False,
+                "new_voice_generation": True, "multi_speaker": True,
+                "dialogue_generation": True, "speaker_tag_dialogue": True,
+                "speech_performance_directions": True, "multi_output": False,
+                "emotion_reference": False, "prompt_processing_modes": ["FG"],
+            },
+            "limits": {
+                "max_outputs": 1, "required_reference_audio_files": 0,
+                "max_reference_audio_files": 3, "max_emotion_reference_audio_files": 0,
+                "max_dialogue_speakers": 16,
+                "min_reference_audio_seconds": FISH_AUDIO_REFERENCE_MIN_SECONDS,
+                "max_reference_audio_seconds": FISH_AUDIO_REFERENCE_MAX_SECONDS,
+                "min_reference_audio_sample_rate_hz": MIN_REFERENCE_AUDIO_SAMPLE_RATE_HZ,
+                "max_prompt_chars": MAX_PROMPT_CHARS,
+                "max_duration_seconds": FISH_AUDIO_MAX_DURATION,
+                "max_artifact_bytes": MAX_AUDIO_BYTES,
+                "input_mime_types": sorted(ALLOWED_AUDIO_INPUT_MIME_TYPES),
+                "output_mime_types": self._audio_output_mime_types(),
+                "fish_audio": {
+                    "contract_version": FISH_AUDIO_CONTRACT,
+                    "recipe_version": FISH_AUDIO_RECIPE,
+                    "audio_tasks": ["speech_tts"], "speech_profile_ids": ["standard_v1"],
+                    "voice_modes": ["new_voice", "single_reference", "multi_speaker_dialogue"],
+                    "dialogue_modes": ["speaker_lines"], "max_cloned_speakers": 3,
+                    "reference_mapping": "contiguous_speaker_prefix_v1",
+                    "reference_transcripts": "required_per_input",
+                    "reference_transcription_by_worker": False,
+                    "duration_modes": ["maximum_seconds"],
+                    "default_maximum_duration_seconds": 60,
+                    "native_sample_rate_hz": FISH_AUDIO_SAMPLE_RATE, "native_channels": 1,
+                    "completion_policy": "require_observed_eos_v1",
+                    "script_coverage_verification": False,
+                    "separate_speaker_stems": False, "word_timestamps": False,
+                    "expert_precision": "int4" if model_id.endswith("_int4") else "fp8",
+                },
+            },
+        } for model_id in sorted(FISH_AUDIO_MODEL_IDS)]
+        for model in models:
+            limits = model["limits"]
+            common = {key: limits[key] for key in (
+                "max_outputs", "max_prompt_chars", "max_dialogue_speakers", "required_reference_audio_files",
+                "max_reference_audio_files", "max_emotion_reference_audio_files", "min_reference_audio_seconds",
+                "max_reference_audio_seconds", "min_reference_audio_sample_rate_hz", "input_mime_types", "output_mime_types",
+            )}
+            common.update(min_generation_duration_seconds=1, max_generation_duration_seconds=FISH_AUDIO_MAX_DURATION)
+            v1 = {**limits["fish_audio"], **common,
+                  "artifact_duration_policy": "v1_requested_ceiling_with_existing_codec_tolerance",
+                  "max_artifact_bytes": MAX_AUDIO_BYTES}
+            v2 = {**limits["fish_audio"], **common,
+                  "contract_version": FISH_AUDIO_REVIEWABLE_CONTRACT,
+                  "completion_policy": FISH_AUDIO_ACCEPTANCE_POLICY,
+                  **self._fish_audio_reviewable_bounds(FISH_AUDIO_REVIEWABLE_CONTRACT)}
+            v3 = {**v2, "contract_version": FISH_AUDIO_EXTENDED_CONTRACT,
+                  **self._fish_audio_reviewable_bounds(FISH_AUDIO_EXTENDED_CONTRACT)}
+            limits["fish_audio_contracts"] = {
+                FISH_AUDIO_CONTRACT: v1, FISH_AUDIO_REVIEWABLE_CONTRACT: v2, FISH_AUDIO_EXTENDED_CONTRACT: v3,
+            }
+        return models
+
+    @staticmethod
+    def _fish_audio_reviewable_bounds(version: str) -> dict[str, Any]:
+        if version == FISH_AUDIO_REVIEWABLE_CONTRACT:
+            profile, generation, artifact, samples = FISH_AUDIO_SAFETY_PROFILE, FISH_AUDIO_MAX_DURATION, FISH_AUDIO_ARTIFACT_MAX_SECONDS, FISH_AUDIO_ARTIFACT_MAX_SAMPLES
+        elif version == FISH_AUDIO_EXTENDED_CONTRACT:
+            profile, generation, artifact, samples = FISH_AUDIO_EXTENDED_SAFETY_PROFILE, 180, 240, 10_584_000
+        else:
+            raise ValueError("Fish Audio unsupported reviewable contract version.")
+        return {
+            "acceptance_policy_id": FISH_AUDIO_ACCEPTANCE_POLICY, "artifact_safety_profile_id": profile,
+            "min_generation_duration_seconds": 1, "max_generation_duration_seconds": generation,
+            "artifact_safety": {"max_duration_seconds": artifact, "max_bytes": MAX_AUDIO_BYTES,
+                                "max_decoded_mono_samples": samples, "duration_basis": "probe_and_decoded_duration_v1"},
+            "over_budget_warning_tolerance_seconds": 0.25,
+        }
+
+    def _fish_audio_contract(self, model_id: str, fields: dict[str, Any], fmt: Any) -> dict[str, Any]:
+        model = next((item for item in self._fish_audio_capabilities() if item["model_id"] == model_id), None)
+        version = fields.get("speech_contract_version")
+        record = model["limits"]["fish_audio_contracts"].get(version) if model and isinstance(version, str) else None
+        if record is None:
+            raise ValueError("Fish Audio requires an advertised exact checkpoint and speech contract version.")
+        if record.get("contract_version") != version:
+            raise ValueError("Fish Audio advertised contract version is inconsistent.")
+        if version in FISH_AUDIO_REVIEWABLE_CONTRACTS:
+            expected = self._fish_audio_reviewable_bounds(version)
+            if any(record.get(key) != value for key, value in expected.items()):
+                raise ValueError("Fish Audio selected contract bounds or artifact safety profile are incompatible.")
+        for key in ("acceptance_policy_id", "artifact_safety_profile_id"):
+            if fields.get(key) != record.get(key) or (key in fields and key not in record):
+                raise ValueError(f"Fish Audio unsupported {key} for the selected contract.")
+        mime = {"wav": "audio/wav", "mp3": "audio/mpeg"}.get(fmt) if isinstance(fmt, str) else None
+        if not mime or mime not in record["output_mime_types"] or mime not in model["limits"]["output_mime_types"]:
+            raise ValueError("Fish Audio requested output format is unsupported or unavailable.")
+        return record
+
+    @staticmethod
+    def _fish_audio_int(value: Any, label: str, minimum: int, maximum: int) -> int:
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError(f"Fish Audio {label} must be an integer from {minimum} to {maximum}.")
+        return value
+
+    @staticmethod
+    def _fish_audio_text(text: Any, label: str) -> str:
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_PROMPT_CHARS:
+            raise ValueError(f"Fish Audio {label} must contain 1-{MAX_PROMPT_CHARS} characters.")
+        if "<|" in text or any(ord(char) < 32 and char not in "\n\r\t" for char in text):
+            raise ValueError(f"Fish Audio {label} contains unsupported structural tokens or control characters.")
+        if (any(line.lstrip().startswith(("#", "!")) for line in text.splitlines())
+                or "{" in text or "}" in text or "[/" in text):
+            raise ValueError(f"Fish Audio {label} must not contain WanGP macros, comments, or window commands.")
+        return text
+
+    @staticmethod
+    def _fish_audio_normalize_script(text: str) -> str:
+        return "\n".join(line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip()
+
+    def _fish_audio_script_speakers(self, prompt: Any) -> list[int]:
+        text = self._fish_audio_normalize_script(self._fish_audio_text(prompt, "script"))
+        stack = []
+        for match in re.finditer(r"</?[A-Za-z][^<>]*(?:>|$)", text):
+            tag = match.group()
+            if tag in {"<whisper>", "<stress>", "<slow>"}:
+                if stack:
+                    raise ValueError("Fish Audio paired performance tags must not be nested.")
+                stack.append(tag[1:-1])
+            elif tag in {"</whisper>", "</stress>", "</slow>"} and stack == [tag[2:-1]]:
+                stack.pop()
+            else:
+                raise ValueError("Fish Audio performance tags must be balanced whisper, stress, or slow tags.")
+        if stack:
+            raise ValueError("Fish Audio performance tag is not closed.")
+        brackets = 0
+        for char in text:
+            if char == "[":
+                brackets += 1
+            elif char == "]":
+                brackets -= 1
+            if brackets not in (0, 1):
+                raise ValueError("Fish Audio performance directions must be balanced and not nested.")
+        if brackets:
+            raise ValueError("Fish Audio performance directions must have balanced brackets.")
+        speakers = set()
+        current = 1
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            match = re.match(r"^Speaker ([1-9][0-9]*):[ \t]*(.*)$", line)
+            if match:
+                current = self._fish_audio_int(int(match[1]), "speaker ID", 1, 16)
+                if not match[2].strip():
+                    raise ValueError("Fish Audio speaker lines must include speech after the label.")
+            elif re.match(r"\s*speaker\b", line, re.IGNORECASE):
+                raise ValueError("Fish Audio speaker labels must use canonical 'Speaker N:' syntax.")
+            speakers.add(current)
+        result = sorted(speakers)
+        if result != list(range(1, len(result) + 1)):
+            raise ValueError("Fish Audio script speakers must be contiguous from Speaker 1.")
+        return result
+
+    def _fish_audio_mode(self, fields: dict[str, Any], speakers: list[int], reference_ids: list[int]) -> None:
+        for key, expected in {
+            "audio_task": "speech_tts",
+            "speech_profile_id": "standard_v1", "duration_mode": "maximum_seconds",
+        }.items():
+            if fields.get(key) != expected:
+                raise ValueError(f"Fish Audio requires {key}={expected!r}; received {fields.get(key)!r}.")
+        if reference_ids != list(range(1, len(reference_ids) + 1)) or len(reference_ids) > 3:
+            raise ValueError("Fish Audio references must be a contiguous Speaker 1-3 prefix.")
+        if not set(reference_ids).issubset(speakers):
+            raise ValueError("Fish Audio referenced speakers must occur in the script.")
+        mode = fields.get("voice_mode")
+        if mode == "new_voice":
+            valid = speakers == [1] and not reference_ids and not fields.get("dialogue_mode")
+        elif mode == "single_reference":
+            valid = speakers == [1] and reference_ids == [1] and not fields.get("dialogue_mode")
+        elif mode == "multi_speaker_dialogue":
+            valid = 2 <= len(speakers) <= 16 and fields.get("dialogue_mode") == "speaker_lines"
+        else:
+            valid = False
+        if not valid:
+            raise ValueError(f"Fish Audio voice_mode={mode!r} conflicts with speakers, references, or dialogue_mode.")
+
+    def _fish_audio_candidate_incompatibility_reason(self, summary: dict[str, Any], model_id: str) -> Optional[str]:
+        try:
+            contract = self._fish_audio_contract(model_id, summary, summary.get("output_format"))
+            speakers = summary.get("speaker_ids")
+            references = summary.get("referenced_speaker_ids")
+            if not isinstance(speakers, list) or not isinstance(references, list):
+                raise ValueError("Fish Audio candidate requires speaker_ids and referenced_speaker_ids lists.")
+            for value in speakers + references:
+                self._fish_audio_int(value, "candidate speaker ID", 1, 16)
+            if not speakers or speakers != list(range(1, len(speakers) + 1)) or len(speakers) > 16:
+                raise ValueError("Fish Audio candidate script speakers must be contiguous from 1, at most 16.")
+            self._fish_audio_mode(summary, speakers, references)
+            counts = {"speaker_count": len(speakers), "speaker_reference_audio_count": len(references),
+                      "reference_transcript_count": len(references), "input_audio_count": len(references),
+                      "output_count": 1}
+            for key, expected in counts.items():
+                if self._fish_audio_int(summary.get(key), key, 0, 16) != expected:
+                    raise ValueError(f"Fish Audio candidate {key} disagrees with its speaker/reference lists.")
+            for key in ("reference_audio_count", "emotion_reference_audio_count", "source_audio_count",
+                        "input_image_count", "input_video_count"):
+                if self._fish_audio_int(summary.get(key, 0), key, 0, 16) != 0:
+                    raise ValueError(f"Fish Audio candidate does not support {key}.")
+            self._fish_audio_int(summary.get("duration_seconds"), "duration_seconds",
+                                 contract["min_generation_duration_seconds"], contract["max_generation_duration_seconds"])
+            if summary.get("output_format") not in ("wav", "mp3"):
+                raise ValueError("Fish Audio candidate output_format must be wav or mp3.")
+            if summary["output_format"] == "mp3" and "audio/mpeg" not in self._audio_output_mime_types():
+                raise ValueError("Fish Audio MP3 encoder is unavailable.")
+        except ValueError as exc:
+            return str(exc)
+        return None
+
+    def _validate_fish_audio_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
+        if job.get("model_id") not in FISH_AUDIO_MODEL_IDS or job.get("media_type") != "audio" or job.get("family", "media_generation") != "media_generation":
+            raise ValueError("Fish Audio requires an exact Fish model_id and a media_generation/audio job.")
+        generation, output, inputs = job.get("generation"), job.get("output"), job.get("inputs", [])
+        if not isinstance(generation, dict) or not isinstance(output, dict) or not isinstance(inputs, list):
+            raise ValueError("Fish Audio requires generation/output objects and an inputs list.")
+        contract = self._fish_audio_contract(job["model_id"], generation, output.get("format"))
+        reviewable = contract["contract_version"] in FISH_AUDIO_REVIEWABLE_CONTRACTS
+        allowed = {"audio_task", "speech_contract_version", "speech_profile_id", "voice_mode", "dialogue_mode",
+                   "duration_mode", "duration_seconds", "seed", "prompt_enhancement_by_worker", "options"}
+        if reviewable:
+            allowed.update({"acceptance_policy_id", "artifact_safety_profile_id"})
+        if set(generation) - allowed:
+            raise ValueError(f"Unsupported Fish Audio generation fields: {sorted(set(generation) - allowed)}")
+        if job.get("negative_prompt") or job.get("processing") or job.get("custom_settings"):
+            raise ValueError("Fish Audio does not accept negative prompts, processing, or raw custom settings.")
+        if generation.get("prompt_enhancement_by_worker") is not False or generation.get("options") != {"multi_prompts_gen_type": "FG"}:
+            raise ValueError("Fish Audio requires prompt_enhancement_by_worker=false and options.multi_prompts_gen_type=FG only.")
+        speakers = self._fish_audio_script_speakers(job.get("prompt"))
+        if len(inputs) > 3:
+            raise ValueError("Fish Audio supports at most three reference recordings.")
+        ids, references = set(), []
+        for index, item in enumerate(inputs):
+            if not isinstance(item, dict):
+                raise ValueError("Fish Audio reference descriptor must be an object.")
+            speaker = index + 1
+            if (item.get("kind") != f"speaker{speaker}_reference_audio"
+                    or item.get("role") != "speaker_reference_audio"
+                    or self._fish_audio_int(item.get("sequence"), "reference sequence", 0, 2) != index
+                    or self._fish_audio_int(item.get("speaker_id"), "reference speaker ID", 1, 3) != speaker):
+                raise ValueError("Fish Audio reference kind/role/speaker/sequence must match the ordered Speaker 1-3 prefix.")
+            input_id = self._fish_audio_int(item.get("input_id"), "input_id", 1, 2_147_483_647)
+            if input_id in ids:
+                raise ValueError("Fish Audio reference input IDs must be unique.")
+            ids.add(input_id)
+            transcript = self._fish_audio_text(item.get("transcript"), "reference transcript")
+            if re.search(r"^\s*Speaker\s*\d+\s*:", transcript, re.IGNORECASE | re.MULTILINE):
+                raise ValueError("Fish Audio reference transcripts must not contain Speaker N: headers.")
+            if item.get("mime_type") not in ALLOWED_AUDIO_INPUT_MIME_TYPES:
+                raise ValueError("Unsupported Fish Audio reference MIME type.")
+            references.append(speaker)
+        self._fish_audio_mode(generation, speakers, references)
+        self._fish_audio_int(output.get("count"), "output count", 1, 1)
+        if set(output) - {"count", "format", "max_duration_seconds", "mime_type"}:
+            raise ValueError("Unsupported Fish Audio output declarations.")
+        if reviewable and "max_duration_seconds" in output:
+            raise ValueError("Fish Audio reviewable contracts forbid output.max_duration_seconds; select the artifact safety profile.")
+        fmt = output.get("format")
+        mime = {"wav": "audio/wav", "mp3": "audio/mpeg"}.get(fmt) if isinstance(fmt, str) else None
+        if not mime or mime not in self._audio_output_mime_types() or output.get("mime_type", mime) != mime:
+            raise ValueError("Fish Audio requested output format/MIME is unsupported or unavailable.")
+        duration = self._fish_audio_int(generation.get("duration_seconds"), "duration_seconds",
+                                        contract["min_generation_duration_seconds"], contract["max_generation_duration_seconds"])
+        if "max_duration_seconds" in output and self._fish_audio_int(output["max_duration_seconds"], "max_duration_seconds", 1, contract["max_generation_duration_seconds"]) != duration:
+            raise ValueError("Fish Audio generation and output duration limits must agree.")
+        seed = generation.get("seed", -1)
+        self._fish_audio_int(seed, "seed", -1, 2_147_483_647)
+        limits = job.get("limits", {})
+        if not isinstance(limits, dict):
+            raise ValueError("Fish Audio limits must be an object.")
+        if reviewable and set(limits) - {"max_artifact_bytes"}:
+            raise ValueError("Fish Audio reviewable contracts do not accept raw artifact safety overrides.")
+        artifact_bytes = contract["artifact_safety"]["max_bytes"] if reviewable else contract["max_artifact_bytes"]
+        max_bytes = self._fish_audio_int(limits.get("max_artifact_bytes", artifact_bytes), "max_artifact_bytes", 1, artifact_bytes)
+        metadata = {
+            "speech_contract_version": contract["contract_version"], "recipe_version": FISH_AUDIO_RECIPE,
+            "speech_profile_id": "standard_v1", "model_id": job["model_id"],
+            "voice_mode": generation["voice_mode"], "speaker_ids": speakers,
+            "model_selected_speaker_ids": [speaker for speaker in speakers if speaker not in references],
+            "script_sha256": hashlib.sha256(job["prompt"].encode("utf-8")).hexdigest(),
+            "script_normalization": "line_endings_and_line_boundary_whitespace_v1",
+            "reference_inputs": [], "sampling": {"temperature": 0.8, "top_k": 30, "top_p": 0.95},
+            "duration_mode": "maximum_seconds", "maximum_duration_seconds": duration,
+            "script_coverage": "not_verified", "prompt_enhancement_by_worker": False,
+            "reference_transcription_by_worker": False, "artifacts": [],
+        }
+        if reviewable:
+            metadata.update(acceptance_policy_id=contract["acceptance_policy_id"],
+                            artifact_safety_profile_id=contract["artifact_safety_profile_id"], warnings=[])
+        return {
+            "model_type": job["model_id"], "prompt": self._fish_audio_normalize_script(job["prompt"]), "seed": seed,
+            "client_id": f"midom_fish_{job_id}_{uuid.uuid4().hex}",
+            "audio_prompt_type": ("", "A", "AB", "ABD")[len(inputs)],
+            "audio_guide": None, "audio_guide2": None, "audio_guide3": None, "alt_prompt": "",
+            "negative_prompt": "", "prompt_enhancer": "", "multi_prompts_gen_type": "FG",
+            "repeat_generation": 1, "batch_size": 1, "video_length": 0, "duration_seconds": duration,
+            "temperature": 0.8, "top_k": 30, "top_p": 0.95,
+            "num_inference_steps": 1, "guidance_scale": 1.0, "pause_seconds": 0,
+            "custom_settings": {"dialogue_cut_lines": 0, "dialogue_history_seconds": 20},
+            "image_prompt_type": "", "video_prompt_type": "", "postprocess_audio": "",
+            "spatial_upsampling": "", "temporal_upsampling": "",
+            "activated_loras": [], "loras_multipliers": "", "output_filename": "",
+            "image_start": None, "image_end": None, "image_refs": [], "image_guide": None,
+            "video_source": None, "video_guide": None, "audio_source": None,
+            "replace_voice_method": "", "replace_voice_sample": None, "replace_voice_sample2": None,
+            "film_grain_intensity": 0,
+            "_api": {"return_side_files": False, **({"return_audio": True} if reviewable else {})},
+            "_midom_media_type": "audio", "_midom_audio_task": "speech_tts",
+            "_midom_job_id": job_id, "_midom_output_count": 1,
+            "_midom_requested_seed": seed if seed >= 0 else None,
+            "_midom_voice_mode": generation["voice_mode"], "_midom_prompt_processing_mode": "FG",
+            "_midom_output_format": fmt, "_midom_output_mime_type": mime,
+            "_midom_max_artifact_bytes": max_bytes, "_midom_fish_audio": metadata,
+        }
+
     def _validate_audio_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
         model_type = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
         if model_type not in ALLOWED_AUDIO_MODEL_TYPES:
             raise ValueError(f"Unsupported audio model_type: {model_type}")
+        if model_type in FISH_AUDIO_MODEL_IDS:
+            return self._validate_fish_audio_job(job, job_id)
         if self._is_stable_audio3_model(model_type):
             return self._validate_stable_audio3_job(job, job_id, model_type)
         if self._is_ace_step15_music_model(model_type):
@@ -8632,6 +9100,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "resolved_seed": resolved_seed,
             "seed_source": seed_source if resolved_seed is not None else "unknown",
         }
+        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+            metadata["fish_audio"] = settings["_midom_fish_audio"]
         if artifact_seeds:
             metadata["artifact_seeds"] = artifact_seeds
         if str(settings.get("model_type") or "") == "qwen_image_layered_20B":
@@ -10475,6 +10945,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     return f"Qwen Image 2.1 supports at most {QWEN21_MAX_REFERENCE_IMAGES} reference images; got {reference_count}"
         if media_type == "audio" and model_id not in ALLOWED_AUDIO_MODEL_TYPES:
             return f"unsupported audio model_id: {candidate.get('model_id')}"
+        if media_type == "audio" and model_id in FISH_AUDIO_MODEL_IDS:
+            return self._fish_audio_candidate_incompatibility_reason(summary, model_id)
         if media_type == "video" and model_id not in ALLOWED_VIDEO_MODEL_TYPES:
             return f"unsupported video model_id: {candidate.get('model_id')}"
         if isinstance(summary, dict):
@@ -11270,6 +11742,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     emotion_reference_audio_count = sum(1 for item in downloaded_inputs if item.get("kind") == "emotion_reference_audio")
                     speaker1_reference_audio_count = sum(1 for item in downloaded_inputs if item.get("kind") == "speaker1_reference_audio")
                     speaker2_reference_audio_count = sum(1 for item in downloaded_inputs if item.get("kind") == "speaker2_reference_audio")
+                    speaker3_reference_audio_count = sum(1 for item in downloaded_inputs if item.get("kind") == "speaker3_reference_audio")
                     self._log(
                         "Prepared WanGP audio settings; "
                         f"job_id={job_id} model_type={settings.get('model_type')} "
@@ -11285,7 +11758,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"reference_audio_count={reference_audio_count} "
                         f"emotion_reference_audio_count={emotion_reference_audio_count} "
                         f"speaker1_reference_audio_count={speaker1_reference_audio_count} "
-                        f"speaker2_reference_audio_count={speaker2_reference_audio_count}."
+                        f"speaker2_reference_audio_count={speaker2_reference_audio_count} "
+                        f"speaker3_reference_audio_count={speaker3_reference_audio_count}."
                     )
                 elif media_type == "video":
                     reference_image_count = sum(1 for item in downloaded_inputs if item.get("kind") == "reference_image")
@@ -11475,7 +11949,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     settings,
                 )
                 try:
-                    with self._sensenova_high_resolution_budget(api_session, settings), self._qwen21_production_resolution_budget(api_session, settings):
+                    with self._sensenova_high_resolution_budget(api_session, settings), self._qwen21_production_resolution_budget(api_session, settings), self._fish_audio_execution(api_session, settings):
                         job_handle = self._submit_wangp_job(api_session, settings, output_count, callbacks)
                         self._active_job = job_handle
                         try:
@@ -11525,8 +11999,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     self._post_job_update(connection, job_id, "fail", {"reason": "generation_failed", "message": message})
                     return
                 if media_type == "audio":
-                    generated_files = self._result_audio_files(result)
-                    if len(generated_files) > 1 and output_count == 1:
+                    generated_files = self._result_audio_files(result, base_path=self._wangp_output_base(api_session))
+                    if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+                        self._validate_fish_audio_completion(settings, generated_files, result)
+                    elif len(generated_files) > 1 and output_count == 1:
                         segment_count = len(generated_files)
                         combined_audio_path = self._combine_audio_segments(generated_files, temp_dir)
                         settings["_midom_combined_audio_segment_count"] = segment_count
@@ -11567,6 +12043,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 elif settings.get("_midom_qwen21_native_rgba_contract_version"):
                     settings["_midom_qwen21_native_rgba_output_validation"] = variation_output_validation
                 for artifact_index, file_path in enumerate(generated_files[:output_count]):
+                    self._raise_job_progress_error(connection, job_id)
                     if media_type == "audio":
                         artifacts.append(self._upload_audio_artifact(connection, job_id, file_path, artifact_index, settings, temp_dir))
                     elif media_type == "video":
@@ -11605,6 +12082,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             )
                         )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
+                if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+                    self._validate_fish_audio_metadata_envelope(generation_metadata)
+                    self._fish_audio_progress(connection, job_id, "completing", "Finalizing Fish Audio speech in Midom.")
                 self._log(f"All artifacts uploaded; calling complete; job_id={job_id} artifacts={len(artifacts)}.")
                 complete_payload = {
                     "artifacts": artifacts,
@@ -11629,11 +12109,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         except Exception as exc:
             self._log(f"Job failed locally; attempting fail report; job_id={job_id} error={exc}", force=True)
             try:
-                self._post_job_update(connection, job_id, "fail", {"reason": "validation_or_runtime_error", "message": str(exc)})
+                reason = "validation_or_runtime_error"
+                if job.get("model_id") in FISH_AUDIO_MODEL_IDS:
+                    for code in ("speech_duration_limit_reached", "speech_stopped_prematurely", "speech_completion_diagnostics_unavailable", "cancel_requested"):
+                        if code in str(exc):
+                            reason = code
+                            break
+                self._post_job_update(connection, job_id, "fail", {"reason": reason, "message": str(exc)})
                 self._log(f"Fail report accepted by Midom; job_id={job_id}.")
             except Exception as fail_exc:
                 self._log(f"Failed to report job {job_id} failure: {fail_exc}", force=True)
         finally:
+            self._close_job_progress(connection, job_id)
+            if hasattr(self, "_progress_lock"):
+                with self._progress_lock:
+                    self._job_progress = None
             self._active_job = None
             self._active_job_id = None
             self._active_job_context = None
@@ -16824,6 +17314,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "prompt_enhancer": str(merged.get("prompt_enhancer") or "disabled"),
             "spatial_upsampling": str(merged.get("spatial_upsampling") or "disabled"),
         }
+        if merged.get("overrides"):
+            try:
+                from shared.utils.generation_overrides import get_override
+
+                diagnostics["attention_mode"] = str(
+                    get_override(merged["overrides"], "attention_mode")
+                    or diagnostics["attention_mode"]
+                )
+            except Exception as exc:
+                diagnostics["attention_mode"] = "unknown"
+                diagnostics["attention_override_parse_error"] = str(exc)
         try:
             runtime = api_session._ensure_runtime()
             module = runtime.module
@@ -16931,7 +17432,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"model_mode={settings.get('model_mode')!r} "
                 f"custom_settings={settings.get('custom_settings') if settings.get('model_type') in (CHATTERBOX_MODEL_ID, DRAMABOX_MODEL_ID, ACE_STEP15_WANGP_MODEL_TYPE) else None!r} "
                 f"output_format={settings.get('_midom_output_format')} "
-                f"{self._audio_prompt_summary(settings.get('prompt'))}."
+                f"{('script_sha256=' + settings['_midom_fish_audio']['script_sha256']) if settings.get('model_type') in FISH_AUDIO_MODEL_IDS else self._audio_prompt_summary(settings.get('prompt'))}."
             )
         elif str(settings.get("_midom_media_type") or "") == "video":
             self._log(
@@ -17110,6 +17611,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         cancel_requested_locally = False
         self._log(f"Waiting for WanGP result; keepalive_interval={JOB_KEEPALIVE_SECONDS}s; job_id={job_id}.")
         while not getattr(job_handle, "done", True):
+            try:
+                self._raise_job_progress_error(connection, job_id)
+            except Exception:
+                job_handle.cancel()
+                self._stop_event.wait(2.0)
+                continue
             if self._stop_event.is_set():
                 try:
                     job_handle.cancel()
@@ -17186,6 +17693,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 except Exception:
                     pass
             self._stop_event.wait(2.0)
+        self._raise_job_progress_error(connection, job_id)
         return job_handle.result()
 
     @staticmethod
@@ -17261,29 +17769,54 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._log(f"Resolved generated image files from WanGP result; count={len(files)}.")
         return files
 
-    def _result_audio_files(self, result) -> list[str]:
+    def _wangp_output_base(self, api_session=None) -> Path:
+        session = api_session if api_session is not None else getattr(self, "_generation_session", None)
+        root = getattr(session, "_root", None)
+        # WanGP interprets relative gallery/artifact paths from its session root,
+        # not from the output directory or the Bridge thread's current directory.
+        return Path(root).resolve() if root is not None else Path(__file__).resolve().parents[2]
+
+    def _canonical_wangp_output_path(self, file_path, base_path=None) -> Path:
+        path = Path(str(file_path))
+        base = Path(base_path) if base_path is not None else self._wangp_output_base()
+        return (path if path.is_absolute() else base / path).resolve()
+
+    @staticmethod
+    def _same_wangp_output_file(first: Path, second: Path) -> bool:
+        if os.path.normcase(str(first)) == os.path.normcase(str(second)):
+            return True
+        try:
+            return first.samefile(second)
+        except (OSError, ValueError):
+            return False
+
+    def _result_audio_files(self, result, *, base_path=None) -> list[str]:
         files = []
-        for file_path in list(getattr(result, "generated_files", []) or []):
-            path = Path(str(file_path))
-            if path.suffix.lower() in ALLOWED_AUDIO_OUTPUT_SUFFIXES:
-                files.append(str(path))
-                self._log(
-                    f"Accepted generated audio output file; filename={path.name!r} "
-                    f"suffix={path.suffix.lower()!r} bytes={path.stat().st_size if path.is_file() else 'missing'}."
-                )
-            else:
+        base = Path(base_path) if base_path is not None else self._wangp_output_base()
+
+        def collect(file_path, source):
+            path = self._canonical_wangp_output_path(file_path, base)
+            self._log(f"WanGP audio output path; source={source} raw_path={str(file_path)!r} canonical_path={str(path)!r} base={str(base)!r}.")
+            if path.suffix.lower() not in ALLOWED_AUDIO_OUTPUT_SUFFIXES:
                 self._log(f"Ignoring non-audio WanGP output file; path={path}.")
+                return
+            for existing in files:
+                if self._same_wangp_output_file(path, Path(existing)):
+                    self._log(f"Deduplicated WanGP audio output alias; source={source} canonical_path={str(path)!r} retained_path={existing!r}.")
+                    return
+            files.append(str(path))
+            self._log(
+                f"Accepted generated audio output; source={source} filename={path.name!r} "
+                f"suffix={path.suffix.lower()!r} bytes={path.stat().st_size if path.is_file() else 'missing'}."
+            )
+
+        for file_path in list(getattr(result, "generated_files", []) or []):
+            collect(file_path, "generated_files")
         for artifact in tuple(getattr(result, "artifacts", ()) or ()):
             file_path = getattr(artifact, "path", None)
             media_type = str(getattr(artifact, "media_type", "") or "")
             if file_path and media_type.startswith("audio"):
-                path = Path(str(file_path))
-                if str(path) not in files and path.suffix.lower() in ALLOWED_AUDIO_OUTPUT_SUFFIXES:
-                    files.append(str(path))
-                    self._log(
-                        f"Accepted generated audio artifact; media_type={media_type!r} filename={path.name!r} "
-                        f"suffix={path.suffix.lower()!r} bytes={path.stat().st_size if path.is_file() else 'missing'}."
-                    )
+                collect(file_path, "audio_artifact")
             elif file_path:
                 self._log(f"Ignoring non-audio WanGP artifact; media_type={media_type!r} path={file_path}.")
         self._log(f"Resolved generated audio files from WanGP result; count={len(files)}.")
@@ -17728,7 +18261,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "json",
             str(path),
         ]
-        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=20)
+        completed = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         if completed.returncode != 0:
             stderr = str(completed.stderr or completed.stdout or "").strip()
             raise ValueError(f"Could not inspect audio metadata: {stderr}")
@@ -18270,6 +18803,689 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "decoded_color_mode": decoded_mode,
         }]
 
+    def _fish_audio_progress(self, connection: ConnectionContext, job_id: int, phase: str, status: str) -> None:
+        self._set_active_job_status(phase=phase, status=status)
+        self._log(f"Fish Audio stage; job_id={job_id} phase={phase} status={status!r}.")
+        self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        if self._cancel_requested_by_midom or self._stop_event.is_set():
+            raise ValueError("Fish Audio cancel_requested.")
+
+    def _fish_audio_process(self, command: list[str]) -> subprocess.CompletedProcess:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline, last_keepalive = time.monotonic() + 90, time.monotonic()
+        try:
+            while True:
+                connection = getattr(self, "_active_job_context", None)
+                if connection is not None:
+                    self._raise_job_progress_error(connection, self._active_job_id)
+                if self._cancel_requested_by_midom or self._stop_event.is_set():
+                    raise ValueError("Fish Audio cancel_requested during audio preparation.")
+                try:
+                    stdout, stderr = process.communicate(timeout=1)
+                    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise TimeoutError("Fish Audio audio preparation exceeded 90 seconds.")
+                    connection = getattr(self, "_active_job_context", None)
+                    if connection is not None and now - last_keepalive >= 15:
+                        self._post_job_update(connection, self._active_job_id, "progress", dict(self._active_job_status))
+                        last_keepalive = now
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+
+    def _fish_audio_decoded_measure(self, path: Path, maximum_seconds: float) -> dict[str, Any]:
+        from shared.utils.audio_video import _ffmpeg_binary
+
+        command = [_ffmpeg_binary(), "-v", "error", "-nostdin", "-i", str(path),
+                   "-map", "0:a:0", "-t", str(maximum_seconds + 0.2),
+                   "-ac", "1", "-ar", str(FISH_AUDIO_SAMPLE_RATE), "-f", "f32le", "pipe:1"]
+        result = self._fish_audio_process(command)
+        if result.returncode != 0 or not result.stdout or len(result.stdout) % 4:
+            raise ValueError("Fish Audio could not decode a nonempty audio stream.")
+        samples = array.array("f")
+        samples.frombytes(result.stdout)
+        import sys
+        if sys.byteorder != "little":
+            samples.byteswap()
+        if any(not math.isfinite(value) for value in samples):
+            raise ValueError("Fish Audio decoded nonfinite audio samples.")
+        peak = max(abs(value) for value in samples)
+        if peak == 0:
+            raise ValueError("Fish Audio decoded an entirely silent audio stream.")
+        duration = len(samples) / FISH_AUDIO_SAMPLE_RATE
+        if duration > maximum_seconds + 1 / FISH_AUDIO_SAMPLE_RATE:
+            raise ValueError("Fish Audio decoded duration exceeds its allowed maximum.")
+        return {"decoded_duration_seconds": duration, "decoded_mono_sample_count": len(samples), "peak_amplitude": peak}
+
+    def _fish_audio_bounded_process(self, command: list[str], *, max_stdout_bytes: int, timeout_seconds: int) -> subprocess.CompletedProcess:
+        # Drain both pipes concurrently, but never retain unbounded decoder or probe output.
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = bytearray(), bytearray()
+        overflow, read_errors = threading.Event(), []
+
+        def read_pipe(pipe, target, limit):
+            try:
+                while True:
+                    chunk = pipe.read(65536)
+                    if not chunk:
+                        return
+                    if len(target) + len(chunk) > limit:
+                        overflow.set()
+                        return
+                    target.extend(chunk)
+            except Exception as exc:
+                read_errors.append(exc)
+
+        readers = [threading.Thread(target=read_pipe, args=args, daemon=True) for args in (
+            (process.stdout, stdout, max_stdout_bytes), (process.stderr, stderr, 65536),
+        )]
+        for reader in readers:
+            reader.start()
+        deadline, last_keepalive = time.monotonic() + timeout_seconds, time.monotonic()
+        try:
+            while process.poll() is None or any(reader.is_alive() for reader in readers):
+                if overflow.is_set():
+                    raise ValueError("Fish Audio artifact_decode_failed: bounded process output exceeded its safety limit.")
+                if read_errors:
+                    raise ValueError("Fish Audio artifact_decode_failed: could not read decoder output.") from read_errors[0]
+                connection = getattr(self, "_active_job_context", None)
+                if connection is not None:
+                    self._raise_job_progress_error(connection, self._active_job_id)
+                if self._cancel_requested_by_midom or self._stop_event.is_set():
+                    raise ValueError("Fish Audio cancel_requested during artifact validation.")
+                now = time.monotonic()
+                if now >= deadline:
+                    raise ValueError("Fish Audio artifact_decode_failed: bounded process timed out.")
+                if connection is not None and now - last_keepalive >= 15:
+                    self._post_job_update(connection, self._active_job_id, "progress", dict(self._active_job_status))
+                    last_keepalive = now
+                time.sleep(0.02)
+            if overflow.is_set() or read_errors:
+                raise ValueError("Fish Audio artifact_decode_failed: invalid or excessive process output.")
+            return subprocess.CompletedProcess(command, process.returncode, bytes(stdout), bytes(stderr))
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            for reader in readers:
+                reader.join()
+            process.stdout.close()
+            process.stderr.close()
+
+    @staticmethod
+    def _fish_audio_probe_duration(stream: dict[str, Any], container: dict[str, Any]) -> Decimal:
+        durations = []
+        for value in (stream.get("duration"), container.get("duration")):
+            if value is None or value == "N/A":
+                continue
+            try:
+                duration = Decimal(str(value))
+            except InvalidOperation as exc:
+                raise ValueError("Fish Audio artifact_probe_invalid: malformed duration.") from exc
+            if not duration.is_finite() or duration <= 0:
+                raise ValueError("Fish Audio artifact_probe_invalid: nonpositive or nonfinite duration.")
+            durations.append(duration)
+        if not durations:
+            raise ValueError("Fish Audio artifact_probe_invalid: no measured duration.")
+        return max(durations)
+
+    def _fish_audio_reviewable_decoded_measure(self, path: Path, *, maximum_samples: int) -> dict[str, Any]:
+        from shared.utils.audio_video import _ffmpeg_binary
+
+        command = [_ffmpeg_binary(), "-hide_banner", "-v", "info", "-nostats", "-nostdin", "-xerror",
+                   "-i", str(path), "-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]
+        result = self._fish_audio_bounded_process(
+            command, max_stdout_bytes=maximum_samples * 4, timeout_seconds=90)
+        if result.returncode != 0 or not result.stdout or len(result.stdout) % 4:
+            raise ValueError("Fish Audio artifact_decode_failed: incomplete or malformed decoded stream.")
+        output_description = result.stderr.decode("utf-8", errors="replace").split("Output #0,", 1)
+        geometry = re.search(r"Audio: pcm_f32le[^\n]*?, (\d+) Hz, ([^,\n]+),", output_description[-1]) if len(output_description) == 2 else None
+        if not geometry or int(geometry[1]) != FISH_AUDIO_SAMPLE_RATE or geometry[2].strip() != "mono":
+            raise ValueError("Fish Audio artifact_geometry_invalid: decoded output is not 44100 Hz mono.")
+        samples = array.array("f")
+        samples.frombytes(result.stdout)
+        import sys
+        if sys.byteorder != "little":
+            samples.byteswap()
+        if any(not math.isfinite(value) for value in samples):
+            raise ValueError("Fish Audio artifact_unusable: nonfinite decoded samples.")
+        peak = max(abs(value) for value in samples)
+        if peak <= 0:
+            raise ValueError("Fish Audio artifact_unusable: all-zero decoded samples.")
+        return {"decoded_duration_seconds": len(samples) / FISH_AUDIO_SAMPLE_RATE,
+                "decoded_mono_sample_count": len(samples), "peak_amplitude": peak}
+
+    def _validate_fish_audio_reviewable_file(self, path: Path, settings: dict[str, Any], *, native: bool) -> dict[str, Any]:
+        fish = settings["_midom_fish_audio"]
+        contract = self._fish_audio_contract(settings["model_type"], fish, settings["_midom_output_format"])
+        safety = contract["artifact_safety"]
+        size = path.stat().st_size if path.is_file() else 0
+        if type(size) is not int:
+            raise ValueError("Fish Audio artifact_measurements_invalid: byte count must be an integer.")
+        if not 0 < size <= min(settings["_midom_max_artifact_bytes"], safety["max_bytes"]):
+            raise ValueError("Fish Audio artifact_byte_safety_exceeded: missing, empty, or oversized artifact.")
+        sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        if native and settings.get("_midom_fish_native_output") != {"path": str(path.resolve()), "sha256": sha256}:
+            raise ValueError("Fish Audio artifact_association_invalid: native output changed or belongs to another job.")
+        if sha256 in {item.get(key) for item in fish.get("reference_inputs", []) for key in ("sha256", "prepared_sha256")}:
+            raise ValueError("Fish Audio artifact_association_invalid: generated audio echoes a source recording.")
+        result = self._fish_audio_bounded_process(
+            [self._ffprobe_binary(), "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+            max_stdout_bytes=1024 * 1024, timeout_seconds=20)
+        if result.returncode != 0:
+            raise ValueError("Fish Audio artifact_probe_invalid: probe failed.")
+        try:
+            probe = json.loads(result.stdout)
+            streams, container = probe["streams"], probe["format"]
+            audio = [item for item in streams if item.get("codec_type") == "audio"]
+            if len(audio) != 1 or any(item.get("codec_type") == "video" for item in streams):
+                raise ValueError("Fish Audio artifact_geometry_invalid: require one audio stream and no video.")
+            stream = audio[0]
+            if str(stream["sample_rate"]) != str(FISH_AUDIO_SAMPLE_RATE) or type(stream["channels"]) is not int or stream["channels"] != 1:
+                raise ValueError("Fish Audio artifact_geometry_invalid: require 44100 Hz mono without repair.")
+            duration = self._fish_audio_probe_duration(stream, container)
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Fish Audio artifact_probe_invalid: malformed probe response.") from exc
+        if duration > safety["max_duration_seconds"]:
+            raise ValueError("Fish Audio artifact_duration_safety_exceeded.")
+        fmt = "wav" if native else settings["_midom_output_format"]
+        codec = stream.get("codec_name", "")
+        with path.open("rb") as reader:
+            header = reader.read(12)
+        if ((fmt == "wav" and (header[:4] not in (b"RIFF", b"RF64") or header[8:12] != b"WAVE"
+                              or container.get("format_name") != "wav" or not codec.startswith("pcm_")))
+                or (fmt == "mp3" and (codec != "mp3" or container.get("format_name") != "mp3"))):
+            raise ValueError("Fish Audio artifact_format_invalid: require genuine requested WAV/MP3 bytes.")
+        decoded = self._fish_audio_reviewable_decoded_measure(path, maximum_samples=safety["max_decoded_mono_samples"])
+        count = decoded["decoded_mono_sample_count"]
+        if type(count) is not int or not 0 < count <= safety["max_decoded_mono_samples"]:
+            raise ValueError("Fish Audio artifact_sample_safety_exceeded.")
+        decoded_duration = Decimal(count) / FISH_AUDIO_SAMPLE_RATE
+        measured = max(duration, decoded_duration)
+        metadata = {"duration_seconds": float(measured), "probe_duration_seconds": float(duration),
+                    "sample_rate_hz": FISH_AUDIO_SAMPLE_RATE, "channels": 1, "codec_name": codec,
+                    "bytes": size, "sha256": sha256, **decoded}
+        if path.stat().st_size != size or hashlib.sha256(path.read_bytes()).hexdigest() != sha256:
+            raise ValueError("Fish Audio artifact_association_invalid: artifact changed during validation.")
+        if native:
+            fish["native_audio"] = metadata
+        else:
+            warnings = [item for item in fish["warnings"] if item["code"] != "generated_duration_over_budget"]
+            if measured > Decimal(settings["duration_seconds"]) + Decimal(str(contract["over_budget_warning_tolerance_seconds"])):
+                warnings.append({"code": "generated_duration_over_budget", "severity": "warning", "artifact_index": 0})
+            fish["warnings"] = warnings
+            self._log(
+                f"Fish Audio reviewable artifact verified; job_id={settings['_midom_job_id']} "
+                f"contract={fish['speech_contract_version']} policy={fish['acceptance_policy_id']} "
+                f"finish_reason={fish['finish_reason']!r} duration_seconds={float(measured):.6f} "
+                f"generation_ceiling_seconds={settings['duration_seconds']} "
+                f"warnings={[item['code'] for item in warnings]} sha256={sha256[:12]}..."
+            )
+        return metadata
+
+    @staticmethod
+    def _validate_fish_audio_metadata_envelope(metadata: dict[str, Any]) -> None:
+        def validate(value, depth=1):
+            if depth > 8:
+                raise ValueError("Fish Audio metadata_too_deep: generation_metadata exceeds depth 8.")
+            if isinstance(value, str) and len(value) > 8192:
+                raise ValueError("Fish Audio metadata_overlong_string.")
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if not isinstance(key, str) or len(key) > 8192:
+                        raise ValueError("Fish Audio metadata_overlong_string or invalid key.")
+                    validate(item, depth + 1)
+            elif isinstance(value, list):
+                for item in value:
+                    validate(item, depth + 1)
+
+        validate(metadata)
+        encoded = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if len(encoded) > 32768:
+            raise ValueError("Fish Audio metadata_too_large: generation_metadata exceeds 32 KiB.")
+
+    def _download_fish_audio_inputs(self, connection: ConnectionContext, job: dict[str, Any], temp_dir: str) -> list[dict[str, Any]]:
+        from shared.utils.audio_video import _ffmpeg_binary
+
+        job_id = self._coerce_job_id(job)
+        self._validate_fish_audio_job(job, job_id)
+        downloaded = []
+        for item in job.get("inputs", []):
+            speaker = item["speaker_id"]
+            self._fish_audio_progress(connection, job_id, "downloading_references", f"Downloading Speaker {speaker} reference.")
+            input_id = item["input_id"]
+            response = requests.get(
+                f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
+                headers=self._headers(connection), timeout=REQUEST_TIMEOUT_SECONDS, stream=True,
+            )
+            try:
+                response.raise_for_status()
+                mime = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                if mime != item["mime_type"] or mime not in ALLOWED_AUDIO_INPUT_MIME_TYPES:
+                    raise ValueError("Fish Audio reference MIME disagrees with its descriptor or is unsupported.")
+                data = self._read_limited_response_content(response, input_id, self._max_input_bytes_for_mime(mime))
+                if "bytes" in item and self._fish_audio_int(item["bytes"], "reference bytes", 1, MAX_AUDIO_BYTES) != len(data):
+                    raise ValueError("Fish Audio reference byte count mismatch.")
+                digest = hashlib.sha256(data).hexdigest()
+                for expected in (item.get("sha256"), response.headers.get("X-Midom-SHA256")):
+                    if expected and (not isinstance(expected, str) or expected.lower() != digest):
+                        raise ValueError("Fish Audio reference SHA-256 mismatch.")
+            finally:
+                response.close()
+            path = Path(temp_dir) / f"fish-input-{input_id}{MIME_EXTENSION.get(mime, '.audio')}"
+            path.write_bytes(data)
+            self._fish_audio_progress(connection, job_id, "validating_references", f"Validating Speaker {speaker} reference audio.")
+            metadata = self._probe_audio_metadata(path)
+            duration = metadata["duration_seconds"]
+            if (not math.isfinite(duration) or not FISH_AUDIO_REFERENCE_MIN_SECONDS <= duration <= FISH_AUDIO_REFERENCE_MAX_SECONDS
+                    or metadata["sample_rate_hz"] < MIN_REFERENCE_AUDIO_SAMPLE_RATE_HZ or metadata["channels"] < 1):
+                raise ValueError("Fish Audio reference must be 3-30 seconds with sample rate at least 16000 Hz.")
+            prepared = Path(temp_dir) / f"fish-speaker-{speaker}.wav"
+            command = [_ffmpeg_binary(), "-v", "error", "-nostdin", "-y", "-i", str(path),
+                       "-map", "0:a:0", "-t", str(FISH_AUDIO_REFERENCE_MAX_SECONDS + 0.2), "-vn",
+                       "-ac", "1", "-ar", str(FISH_AUDIO_SAMPLE_RATE), "-c:a", "pcm_f32le", str(prepared)]
+            result = self._fish_audio_process(command)
+            if result.returncode != 0 or not prepared.is_file():
+                raise ValueError("Fish Audio reference preparation could not produce a lossless WAV.")
+            decoded = self._fish_audio_decoded_measure(prepared, FISH_AUDIO_REFERENCE_MAX_SECONDS)
+            if decoded["decoded_duration_seconds"] < FISH_AUDIO_REFERENCE_MIN_SECONDS:
+                raise ValueError("Fish Audio decoded reference is shorter than 3 seconds.")
+            downloaded.append({
+                "input_id": input_id, "kind": item["kind"], "role": item["role"],
+                "speaker_id": speaker, "sequence": item["sequence"], "sha256": digest,
+                "mime_type": mime, "transcript": item["transcript"], "path": str(prepared),
+                "prepared_sha256": hashlib.sha256(prepared.read_bytes()).hexdigest(),
+                "preparation": "mono_44100hz_float32_wav_v1", "metadata": {**metadata, **decoded},
+            })
+        return downloaded
+
+    def _apply_fish_audio_inputs(self, settings: dict[str, Any], downloaded: list[dict[str, Any]]) -> None:
+        expected_count = len(settings["audio_prompt_type"])
+        if len(downloaded) != expected_count:
+            raise ValueError("Fish Audio downloaded reference count does not match the validated claim.")
+        for key in ("audio_guide", "audio_guide2", "audio_guide3"):
+            settings[key] = None
+        transcripts, provenance = [], []
+        for index, item in enumerate(downloaded):
+            speaker = index + 1
+            if (item.get("speaker_id") != speaker or item.get("sequence") != index
+                    or item.get("kind") != f"speaker{speaker}_reference_audio"):
+                raise ValueError("Fish Audio downloaded reference ordering changed.")
+            settings[("audio_guide", "audio_guide2", "audio_guide3")[index]] = item["path"]
+            transcripts.append(f"Speaker {speaker}: {item['transcript']}")
+            provenance.append({
+                key: item[key] for key in ("input_id", "kind", "role", "speaker_id", "sequence", "sha256", "prepared_sha256", "preparation")
+            })
+            provenance[-1].update(item["metadata"])
+            provenance[-1]["transcript_sha256"] = hashlib.sha256(item["transcript"].encode("utf-8")).hexdigest()
+            native_transcript = "\n".join(line.rstrip() for line in item["transcript"].replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip()
+            provenance[-1]["native_transcript_sha256"] = hashlib.sha256(native_transcript.encode("utf-8")).hexdigest()
+        settings["alt_prompt"] = "\n".join(line.rstrip() for line in "\n".join(transcripts).replace("\r\n", "\n").replace("\r", "\n").split("\n")).strip()
+        settings["_midom_fish_audio"]["reference_inputs"] = provenance
+
+    @staticmethod
+    def _fish_audio_code_fingerprint(codes) -> dict[str, Any]:
+        canonical = codes.detach().cpu().long().contiguous()
+        return {"shape": list(canonical.shape), "sha256_int64": hashlib.sha256(canonical.numpy().tobytes()).hexdigest()}
+
+    @contextmanager
+    def _fish_audio_conditioning(self, pipeline, fn, settings: dict[str, Any], native: dict[str, Any]):
+        metadata = settings["_midom_fish_audio"]
+        references = metadata["reference_inputs"]
+        mode = settings["audio_prompt_type"]
+        if native.get("audio_prompt_type", "") != mode or len(references) != len(mode):
+            raise ValueError("Fish Audio native reference mode/count changed before execution.")
+        trace = {"model_id": settings["model_type"], "job_id": settings["_midom_job_id"],
+                 "bridge_sha256": self._sha256_file(Path(__file__)),
+                 "audio_prompt_type": mode, "reference_count": len(references), "references": [],
+                 "encoded_references": [], "prompt_assemblies": [], "verification_result": "native_inputs_verified",
+                 "voice_identity_verification": "not_performed"}
+        metadata["native_conditioning"] = trace
+        paths = []
+        for index, slot in enumerate(("audio_guide", "audio_guide2", "audio_guide3")):
+            expected, actual = settings.get(slot), native.get(slot)
+            if index >= len(references):
+                if actual is not None:
+                    raise ValueError(f"Fish Audio unexpected native reference in {slot}.")
+                continue
+            if not expected or not actual or Path(actual).resolve() != Path(expected).resolve():
+                raise ValueError(f"Fish Audio native reference path changed for Speaker {index + 1} ({slot}).")
+            path = Path(actual)
+            digest = self._sha256_file(path)
+            if digest != references[index]["prepared_sha256"]:
+                raise ValueError(f"Fish Audio native reference bytes changed for Speaker {index + 1} ({slot}).")
+            paths.append(path.resolve())
+            trace["references"].append({"speaker_id": index + 1, "native_speaker_id": index, "slot": slot,
+                                        "input_id": references[index]["input_id"], "prepared_sha256": digest,
+                                        "transcript_sha256": references[index]["transcript_sha256"]})
+        self._log("Fish Audio native reference routing; " + json.dumps(trace, sort_keys=True), force=True)
+        native_fn = inspect.unwrap(fn)
+        namespace = getattr(native_fn, "__globals__", {})
+        build = namespace.get("build_drama3_prompt")
+        convert = namespace.get("speaker_lines_to_tags")
+        parse = namespace.get("reference_transcripts")
+        tag = getattr(inspect.unwrap(build), "__globals__", {}).get("with_speaker_tag")
+        encode = getattr(pipeline, "_reference_codes", None)
+        # Do not fabricate prompt-level evidence on older/unsupported native implementations.
+        if not all(callable(item) for item in (build, convert, parse, tag, encode)):
+            trace["prompt_observation"] = "unavailable"
+            yield
+            return
+        expected_text = convert(settings["prompt"])
+        parsed_transcripts = parse(settings["alt_prompt"], len(references))
+        if (len(parsed_transcripts) != len(references) or any(
+            hashlib.sha256(text.encode("utf-8")).hexdigest() != reference["native_transcript_sha256"]
+            for text, reference in zip(parsed_transcripts, references)
+        )):
+            raise ValueError("Fish Audio native transcript parsing changed the speaker reference mapping.")
+        expected_transcripts = [f"<|speaker:{index}|> {text}" for index, text in enumerate(parsed_transcripts)]
+        thread_id = threading.get_ident()
+        build_signature = inspect.signature(build)
+
+        @wraps(encode)
+        def observe_reference(path, *args, **kwargs):
+            index = len(trace["encoded_references"])
+            if index >= len(paths) or Path(path).resolve() != paths[index]:
+                raise ValueError("Fish Audio native reference encoding order/path changed.")
+            codes = encode(path, *args, **kwargs)
+            trace["encoded_references"].append({"speaker_id": index + 1, **self._fish_audio_code_fingerprint(codes)})
+            return codes
+
+        @wraps(build)
+        def observe_prompt(*args, **kwargs):
+            if threading.get_ident() != thread_id:
+                return build(*args, **kwargs)
+            bound = build_signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            values = bound.arguments
+            texts, codes = list(values["prompt_texts"]), list(values["prompt_tokens"])
+            fingerprints = [self._fish_audio_code_fingerprint(item) for item in codes]
+            encoded = [{key: item[key] for key in ("shape", "sha256_int64")} for item in trace["encoded_references"]]
+            if (values["text"] != expected_text or texts != expected_transcripts
+                    or len(encoded) != len(references) or fingerprints != encoded or values["history"]):
+                raise ValueError("Fish Audio native prompt lost/reordered reference conditioning or speaker labels.")
+            prompt = build(*args, **kwargs)
+            config, tokenizer = values["config"], values["tokenizer"]
+            rows = prompt[(prompt[:, 0] >= config.semantic_start_token_id) & (prompt[:, 0] <= config.semantic_end_token_id)]
+            if len(rows) != sum(item["shape"][-1] for item in fingerprints):
+                raise ValueError("Fish Audio assembled prompt is missing reference audio rows.")
+            offset = 0
+            for item in fingerprints:
+                frames = item["shape"][-1]
+                if self._fish_audio_code_fingerprint(rows[offset:offset + frames, 1:].T) != item:
+                    raise ValueError("Fish Audio assembled prompt changed reference audio codes/order.")
+                offset += frames
+            tagged_text = tag(expected_text)
+            expected_speakers = list(range(len(references))) + [int(value) for value in re.findall(r"<\|speaker:([0-9]+)\|>", tagged_text)]
+            # Contract speaker IDs are one-based; native tokenizer IDs are zero-based.
+            ids = {tokenizer.token_to_id(f"<|speaker:{index}|>"): index for index in range(16)}
+            observed_speakers = [ids[token] for token in prompt[:, 0].tolist() if token in ids]
+            if None in ids or observed_speakers != expected_speakers:
+                raise ValueError("Fish Audio assembled prompt speaker tokens do not match the reference/script mapping.")
+            evidence = {"part_index": len(trace["prompt_assemblies"]), "native_speaker_token_order": observed_speakers,
+                        "reference_audio_rows": len(rows), "prompt_rows": len(prompt),
+                        "reference_code_sha256s": [item["sha256_int64"] for item in fingerprints],
+                        "reference_codebook_counts": [item["shape"][0] for item in fingerprints],
+                        "reference_frame_counts": [item["shape"][-1] for item in fingerprints],
+                        "distinct_encoded_reference_count": len({item["sha256_int64"] for item in fingerprints}),
+                        "tagged_script_sha256": hashlib.sha256(expected_text.encode("utf-8")).hexdigest(),
+                        "tagged_transcript_sha256s": [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts],
+                        "prompt_sha256_int64": self._fish_audio_code_fingerprint(prompt)["sha256_int64"]}
+            trace["prompt_assemblies"].append(evidence)
+            trace["verification_result"] = "prompt_assembly_verified"
+            self._log("Fish Audio native conditioning verified; " + json.dumps(trace, sort_keys=True), force=True)
+            return prompt
+
+        trace["native_sources"] = []
+        for function in (native_fn, build):
+            path = Path(function.__code__.co_filename)
+            if path.is_file():
+                trace["native_sources"].append({"filename": path.name, "sha256": self._sha256_file(path)})
+        with ExitStack() as stack:
+            had_override = "_reference_codes" in vars(pipeline)
+            previous = vars(pipeline).get("_reference_codes")
+            stack.callback(lambda: setattr(pipeline, "_reference_codes", previous) if had_override else delattr(pipeline, "_reference_codes"))
+            pipeline._reference_codes = observe_reference
+            stack.callback(namespace.__setitem__, "build_drama3_prompt", build)
+            namespace["build_drama3_prompt"] = observe_prompt
+            yield
+
+    @contextmanager
+    def _fish_audio_execution(self, api_session, settings: dict[str, Any]):
+        if settings.get("model_type") not in FISH_AUDIO_MODEL_IDS:
+            yield
+            return
+        module = api_session._ensure_runtime().module
+        settings["_midom_wangp_output_base"] = str(self._wangp_output_base(api_session))
+        original_generate = module.generate_media
+        original_call = module.call_with_default_device
+        signature = inspect.signature(original_generate)
+        local = threading.local()
+        metadata = settings["_midom_fish_audio"]
+        metadata.pop("finish_reason", None)
+        metadata["observed_calls"] = 0
+        reviewable = metadata["speech_contract_version"] in FISH_AUDIO_REVIEWABLE_CONTRACTS
+        if reviewable:
+            metadata["execution_evidence"] = {
+                "job_id": settings["_midom_job_id"], "client_id": settings["client_id"],
+                "session_succeeded": False, "cancelled": False,
+                "native_call_returned_output": False, "observed_calls": 0,
+            }
+        job_id = settings["_midom_job_id"]
+
+        @wraps(original_call)
+        def observe_call(model_def, label, fn, *args, **kwargs):
+            if not getattr(local, "active", False) or label != settings["model_type"]:
+                return original_call(model_def, label, fn, *args, **kwargs)
+            pipeline = getattr(fn, "__self__", None)
+            if pipeline is None or not callable(getattr(pipeline, "_generate_codes", None)):
+                raise ValueError("Fish Audio speech_completion_diagnostics_unavailable: unsupported pipeline interface.")
+            if kwargs.get("input_prompt") != settings["prompt"] or kwargs.get("alt_prompt", "") != settings["alt_prompt"]:
+                raise ValueError("Fish Audio native script or reference transcripts changed before execution.")
+            metadata["observed_calls"] += 1
+            parts = []
+            had_codes_override = "_generate_codes" in vars(pipeline)
+            old_override = vars(pipeline).get("_generate_codes")
+            generate_codes = pipeline._generate_codes
+
+            @wraps(generate_codes)
+            def observe_codes(*code_args, **code_kwargs):
+                codes, reason = generate_codes(*code_args, **code_kwargs)
+                parts.append({"part_index": len(parts), "finish_reason": str(reason), "generated_frames": int(codes.shape[-1])})
+                return codes, reason
+
+            pipeline._generate_codes = observe_codes
+            started = time.monotonic()
+            try:
+                with self._fish_audio_conditioning(pipeline, fn, settings, kwargs):
+                    output = original_call(model_def, label, fn, *args, **kwargs)
+                metadata["finish_reason"] = getattr(pipeline, "last_finish_reason", None)
+                metadata["parts"] = parts
+                if reviewable:
+                    audio = output.get("x") if isinstance(output, dict) else None
+                    returned_audio = audio is not None and callable(getattr(audio, "numel", None)) and audio.numel() > 0
+                    metadata["execution_evidence"].update(
+                        native_call_returned_output=bool(returned_audio), observed_calls=metadata["observed_calls"])
+                    # Only absent native termination evidence can become explicit uncertainty.
+                    if returned_audio and metadata["finish_reason"] is None and not parts:
+                        metadata["finish_reason"] = "unknown"
+                metadata["generation_elapsed_seconds"] = time.monotonic() - started
+                metadata["native_prompt_sha256"] = hashlib.sha256(settings["prompt"].encode("utf-8")).hexdigest()
+                metadata["runtime"] = {
+                    "engine": str(getattr(pipeline, "engine", "unknown")),
+                    "expert_precision": "int4" if label.endswith("_int4") else "fp8",
+                    "memory_profile": str(getattr(module, "loaded_profile", getattr(module, "profile", "unknown"))),
+                    "configured_engine": str(getattr(module, "lm_decoder_engine", "unknown")),
+                    "transformer_quantization": str(getattr(module, "transformer_quantization", "unknown")),
+                    "transformer_dtype": str(getattr(getattr(pipeline, "transformer", None), "_model_dtype", "unknown")),
+                    "codec_dtype": str(getattr(getattr(pipeline, "vae", None), "_model_dtype", "unknown")),
+                    "components": {key: model_def.get(key) for key in ("URLs", "URLs2", "preload_URLs")},
+                }
+                self._fish_audio_runtime_details(module, label, pipeline, model_def, metadata["runtime"])
+                self._log(f"Fish Audio native execution finished; job_id={job_id} finish_reason={metadata['finish_reason']!r} parts={len(parts)} elapsed_seconds={metadata['generation_elapsed_seconds']:.2f}.")
+                return output
+            finally:
+                if had_codes_override:
+                    pipeline._generate_codes = old_override
+                else:
+                    del pipeline._generate_codes
+
+        @wraps(original_generate)
+        def observe_generate(*args, **kwargs):
+            bound = signature.bind_partial(*args, **kwargs)
+            if bound.arguments.get("client_id") != settings["client_id"]:
+                return original_generate(*args, **kwargs)
+            config = module.server_config
+            had_codec = "audio_stand_alone_output_codec" in config
+            old_codec = config.get("audio_stand_alone_output_codec")
+            config["audio_stand_alone_output_codec"] = "wav"
+            local.active = True
+            try:
+                return original_generate(*args, **kwargs)
+            finally:
+                local.active = False
+                if had_codec:
+                    config["audio_stand_alone_output_codec"] = old_codec
+                else:
+                    config.pop("audio_stand_alone_output_codec", None)
+
+        module.generate_media = observe_generate
+        module.call_with_default_device = observe_call
+        try:
+            yield
+        finally:
+            module.generate_media = original_generate
+            module.call_with_default_device = original_call
+
+    @staticmethod
+    def _fish_audio_runtime_details(module, model_id: str, pipeline, model_def: dict[str, Any], diagnostics: dict[str, Any]) -> None:
+        torch_module = getattr(module, "torch", None)
+        diagnostics.update({
+            "torch_version": str(getattr(torch_module, "__version__", "unknown")),
+            "cuda_version": str(getattr(getattr(torch_module, "version", None), "cuda", "unknown")),
+            "transformer_dtype_policy": str(getattr(module, "transformer_dtype_policy", "unknown")),
+            "checkpoint_components": [],
+        })
+        for name in ("transformer", "transformer2", "vae"):
+            try:
+                diagnostics[f"{name}_parameter_dtype"] = str(next(getattr(pipeline, name).parameters()).dtype)
+            except (AttributeError, StopIteration, TypeError):
+                diagnostics[f"{name}_parameter_dtype"] = "unknown"
+        try:
+            cuda = getattr(torch_module, "cuda", None)
+            if cuda is not None and cuda.is_available():
+                diagnostics["gpu"] = cuda.get_device_name()
+                diagnostics["gpu_peak_allocated_bytes"] = int(cuda.max_memory_allocated())
+            filenames = {
+                role: module.get_model_filename(model_id, getattr(module, "transformer_quantization", ""),
+                                                getattr(module, "transformer_dtype_policy", ""), submodel_no=index)
+                for role, index in (("backbone", 1), ("codebooks", 2))
+            }
+            filenames["experts"] = model_def["preload_URLs"][0]
+            for role, filename in filenames.items():
+                component = {"role": role, "filename": str(filename).rsplit("/", 1)[-1]}
+                diagnostics["checkpoint_components"].append(component)
+                path = module.fl.get_local_model_filename(filename)
+                if path and Path(path).is_file():
+                    component["bytes"] = Path(path).stat().st_size
+            codec_path = module.fl.locate_file("fish_audio/Fish_Drama3_codec_bf16.safetensors", error_if_none=False)
+            codec = {"role": "codec", "filename": "Fish_Drama3_codec_bf16.safetensors"}
+            if codec_path and Path(codec_path).is_file():
+                codec["bytes"] = Path(codec_path).stat().st_size
+            diagnostics["checkpoint_components"].append(codec)
+        except Exception:
+            diagnostics["component_resolution"] = "partially_unavailable"
+
+    def _validate_fish_audio_completion(self, settings: dict[str, Any], files: list[str], result=None) -> None:
+        metadata = settings["_midom_fish_audio"]
+        reason = metadata.get("finish_reason")
+        if metadata["speech_contract_version"] in FISH_AUDIO_REVIEWABLE_CONTRACTS:
+            self._fish_audio_contract(settings["model_type"], metadata, settings["_midom_output_format"])
+            evidence = metadata.get("execution_evidence", {})
+            if self._cancel_requested_by_midom or self._stop_event.is_set() or getattr(result, "cancelled", False) or reason == "early_stop":
+                raise ValueError("Fish Audio cancel_requested; cancelled partial delivery is not supported.")
+            if (result is None or getattr(result, "success", None) is not True or getattr(result, "errors", None)
+                    or getattr(result, "cancelled", None) is not False
+                    or evidence.get("job_id") != settings["_midom_job_id"]
+                    or evidence.get("client_id") != settings["client_id"]
+                    or evidence.get("native_call_returned_output") is not True
+                    or type(metadata.get("observed_calls")) is not int or metadata["observed_calls"] != 1
+                    or type(evidence.get("observed_calls")) is not int or evidence["observed_calls"] != 1):
+                raise ValueError("Fish Audio execution_evidence_invalid; no fresh successful job-scoped native output.")
+            parts = metadata.get("parts")
+            if (reason not in ("eos", "silence", "length", "unknown") or not isinstance(parts, list)
+                    or len(parts) != (0 if reason == "unknown" else 1)
+                    or any(not isinstance(part, dict) or part.get("finish_reason") != reason
+                           or type(part.get("part_index")) is not int or part["part_index"] != 0
+                           or type(part.get("generated_frames")) is not int or part["generated_frames"] <= 0 for part in parts)):
+                raise ValueError("Fish Audio termination_diagnostics_invalid.")
+            if len(files) != 1:
+                raise ValueError("Fish Audio requires exactly one generated audio file.")
+            base = settings.get("_midom_wangp_output_base")
+            path = self._canonical_wangp_output_path(files[0], base)
+            returned = [self._canonical_wangp_output_path(name, base) for name in (getattr(result, "generated_files", None) or [])]
+            artifacts = getattr(result, "artifacts", ())
+            # The API consumes this artifact by the unique submitted client ID.
+            # Filesystem mtimes are not authoritative and may have coarse granularity.
+            if (not path.is_file() or not any(self._same_wangp_output_file(path, candidate) for candidate in returned) or len(artifacts) != 1
+                    or getattr(artifacts[0], "client_id", None) != settings["client_id"]
+                    or getattr(artifacts[0], "media_type", None) != "audio"
+                    or not getattr(artifacts[0], "path", None)
+                    or not self._same_wangp_output_file(self._canonical_wangp_output_path(artifacts[0].path, base), path)):
+                raise ValueError("Fish Audio artifact_association_invalid; output is stale or not returned by this job.")
+            if not 0 < path.stat().st_size <= settings["_midom_max_artifact_bytes"]:
+                raise ValueError("Fish Audio artifact_byte_safety_exceeded.")
+            settings["_midom_fish_native_output"] = {
+                "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            evidence.update(session_succeeded=True, cancelled=False)
+            code = {"silence": "speech_stopped_on_silence", "length": "generation_duration_limit_reached",
+                    "unknown": "termination_unverified"}.get(reason)
+            metadata["warnings"] = [{"code": code, "severity": "warning", "artifact_index": 0}] if code else []
+            return
+        failure = {"length": "speech_duration_limit_reached", "silence": "speech_stopped_prematurely", "early_stop": "cancel_requested"}.get(reason)
+        if failure:
+            raise ValueError(f"Fish Audio {failure}; partial speech was not uploaded.")
+        parts = metadata.get("parts", [])
+        if (metadata.get("observed_calls") != 1 or reason != "eos" or len(parts) != 1
+                or parts[0].get("finish_reason") != "eos"):
+            raise ValueError("Fish Audio speech_completion_diagnostics_unavailable: a fresh successful single pass was not observed.")
+        if len(files) != 1:
+            raise ValueError("Fish Audio requires exactly one generated audio file; extra files are not concatenated.")
+
+    def _validate_fish_audio_file(self, path: Path, settings: dict[str, Any], *, native: bool) -> dict[str, Any]:
+        if settings["_midom_fish_audio"]["speech_contract_version"] in FISH_AUDIO_REVIEWABLE_CONTRACTS:
+            return self._validate_fish_audio_reviewable_file(path, settings, native=native)
+        if not path.is_file() or not 0 < path.stat().st_size <= settings["_midom_max_artifact_bytes"]:
+            raise ValueError("Fish Audio generated file is missing, empty, or exceeds the artifact byte limit.")
+        fmt = "wav" if native else settings["_midom_output_format"]
+        metadata = self._probe_audio_metadata(path)
+        if metadata["sample_rate_hz"] != FISH_AUDIO_SAMPLE_RATE or metadata["channels"] != 1:
+            raise ValueError("Fish Audio output must be 44100 Hz mono.")
+        with path.open("rb") as reader:
+            header = reader.read(12)
+        if fmt == "wav":
+            if header[:4] not in {b"RIFF", b"RF64"} or header[8:12] != b"WAVE" or not metadata["codec_name"].startswith("pcm_"):
+                raise ValueError("Fish Audio requires genuine lossless PCM WAV, not relabeled compressed audio.")
+        elif metadata["codec_name"] != "mp3":
+            raise ValueError("Fish Audio requested MP3 but received another audio codec.")
+        maximum = settings["duration_seconds"] + (0.1 if fmt == "mp3" else 0)
+        if not math.isfinite(metadata["duration_seconds"]) or not 0 < metadata["duration_seconds"] <= maximum + 1 / FISH_AUDIO_SAMPLE_RATE:
+            raise ValueError("Fish Audio output duration exceeds the requested maximum.")
+        metadata.update(self._fish_audio_decoded_measure(path, maximum))
+        metadata["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        if metadata["sha256"] in {
+            item.get(key) for item in settings["_midom_fish_audio"].get("reference_inputs", [])
+            for key in ("sha256", "prepared_sha256")
+        }:
+            raise ValueError("Fish Audio returned a reference recording instead of generated speech.")
+        if native:
+            settings["_midom_fish_audio"]["native_audio"] = metadata
+        return metadata
+
     def _download_audio_job_inputs(
         self,
         connection: ConnectionContext,
@@ -18277,6 +19493,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         temp_dir: str,
         inputs: list[Any],
     ) -> list[dict[str, Any]]:
+        if job.get("model_id") in FISH_AUDIO_MODEL_IDS:
+            return self._download_fish_audio_inputs(connection, job, temp_dir)
         downloaded = []
         job_id = self._coerce_job_id(job)
         limits = job.get("limits") or {}
@@ -19306,6 +20524,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return str(target_path)
 
     def _apply_inputs_to_settings(self, settings: dict[str, Any], downloaded_inputs: list[dict[str, Any]], job: dict[str, Any]) -> None:
+        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+            self._apply_fish_audio_inputs(settings, downloaded_inputs)
+            return
         if not downloaded_inputs:
             return
         media_type = str(job.get("media_type") or settings.get("_midom_media_type") or "image").strip().lower()
@@ -20871,6 +22092,39 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError(f"Unsupported control mode for {model_id}: {mode_id}")
         return CONTROL_MODE_WANGP_CODES[mode_id]
 
+    @staticmethod
+    def _progress_key(connection: ConnectionContext, job_id: Any) -> tuple:
+        return (str(connection.connection_id), str(connection.api_base_url), int(connection.worker_id), int(job_id))
+
+    def _raise_job_progress_error(self, connection: ConnectionContext, job_id: Any) -> None:
+        record = getattr(self, "_job_progress", None)
+        if record is not None and record[0] == self._progress_key(connection, job_id):
+            record[1].raise_if_failed()
+
+    def _close_job_progress(self, connection: ConnectionContext, job_id: Any):
+        if not hasattr(self, "_progress_lock"):
+            return None
+        key = self._progress_key(connection, job_id)
+        with self._progress_lock:
+            self._closed_progress_job = key
+            record = self._job_progress
+        if record is not None and record[0] == key:
+            record[1].close()
+            return record[1]
+        return None
+
+    def _progress_reporting_failed(self, connection: ConnectionContext, job_id: int, exc: Exception) -> None:
+        self._log(f"Progress reporting failed; job_id={job_id} error={exc}. Stopping the affected local job.", force=True)
+        if self._is_auth_error(exc):
+            self._handle_authorization_failure("Progress was rejected by Midom authorization.")
+        elif self._active_job_id == job_id and self._active_job_context == connection:
+            job = self._active_job
+            if job is not None and not getattr(job, "done", True):
+                try:
+                    job.cancel()
+                except Exception as cancel_exc:
+                    self._log(f"Could not stop local job after progress failure: {cancel_exc}", force=True)
+
     def _post_job_update(self, connection: ConnectionContext, job_id: str, status: str, payload: dict[str, Any]) -> None:
         self._ensure_job_flow_enabled()
         job_id_int = int(job_id)
@@ -20878,6 +22132,44 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError("Job id is required.")
         if status not in {"progress", "complete", "fail"}:
             raise ValueError(f"Unsupported job update status: {status}")
+        if status == "progress":
+            key = self._progress_key(connection, job_id_int)
+            with self._progress_lock:
+                if (self._closed_progress_job == key or self._active_job_id != job_id_int
+                        or self._active_job_context != connection):
+                    return
+                self._set_active_job_status(**{name: value for name, value in payload.items()
+                                              if name in {"phase", "status", "progress", "current_step", "total_steps"}})
+                if self._job_progress is None or self._job_progress[0] != key:
+                    budget = self._progress_budgets.setdefault(
+                        key[:-1], {"last_attempt": -math.inf, "retry_at": 0.0, "throttled": False},
+                    )
+                    reporter = JobProgressCoalescer(
+                        lambda update: self._send_job_update(connection, job_id_int, "progress", update),
+                        lambda exc: self._progress_reporting_failed(connection, job_id_int, exc),
+                        lambda message, **kwargs: self._log(
+                            f"{message} connection_id={connection.connection_id} job_id={job_id_int}.", **kwargs,
+                        ), budget,
+                    )
+                    self._job_progress = (key, reporter)
+                    self._log(
+                        f"Centralized progress coalescing enabled; connection_id={connection.connection_id} "
+                        f"job_id={job_id_int} minimum_interval={JOB_PROGRESS_INTERVAL_SECONDS:g}s "
+                        "progress_429_policy=retry_after_without_restarting_inference."
+                    )
+                    reporter.start()
+                self._job_progress[1].submit(payload)
+            return
+        reporter = self._close_job_progress(connection, job_id_int)
+        if status == "complete":
+            if reporter is not None:
+                reporter.raise_if_failed()
+            if self._cancel_requested_by_midom:
+                raise RuntimeError("cancel_requested")
+        self._send_job_update(connection, job_id_int, status, payload)
+
+    def _send_job_update(self, connection: ConnectionContext, job_id_int: int, status: str, payload: dict[str, Any]):
+        self._ensure_job_flow_enabled()
         route_status = "complete" if status == "complete" else status
         self._log(f"Posting job update; job_id={job_id_int} status={status} payload_keys={sorted(payload.keys())}.")
         response = requests.post(
@@ -20888,7 +22180,17 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         if response.status_code in {401, 403}:
             self._handle_authorization_failure(f"Job {status} update was rejected by Midom authorization.")
-        response.raise_for_status()
+        if status == "progress" and response.status_code == 429:
+            return response
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = self._midom_error_message(response)[:500]
+            message = f"Midom rejected job {status} update with HTTP {response.status_code}"
+            if detail:
+                message += f": {detail}"
+            self._log(f"Job update rejected; job_id={job_id_int} status={status} error={message}", force=True)
+            raise requests.HTTPError(message, response=response, request=getattr(response, "request", None)) from exc
         self._log(f"Job update accepted; job_id={job_id_int} status={status} http_status={response.status_code}.")
         if status == "progress":
             response_payload = response.json() if response.content else {}
@@ -20906,6 +22208,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         job.cancel()
                     except Exception as exc:
                         self._log(f"Could not cancel WanGP job after Midom cancellation request: {exc}", force=True)
+        return response
 
     def _upload_artifact(
         self,
@@ -21172,7 +22475,28 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if int(artifact_index) != 0:
             raise ValueError("Audio v1 supports only artifact_index 0.")
         requested_format = str(settings.get("_midom_output_format") or "mp3").strip().lower()
-        upload_path, mime_type = self._prepare_audio_artifact_for_upload(file_path, requested_format, temp_dir)
+        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+            self._fish_audio_progress(connection, job_id, "validating_output", "Validating completed Fish Audio speech.")
+            self._validate_fish_audio_file(Path(file_path), settings, native=True)
+            upload_path, mime_type = file_path, "audio/wav"
+            if requested_format == "mp3":
+                self._fish_audio_progress(connection, job_id, "preparing_artifact", "Encoding requested Fish Audio MP3 derivative.")
+                upload_path = str(Path(temp_dir) / "fish-speech.mp3")
+                completed = self._fish_audio_process([
+                    self._ffmpeg_binary(), "-y", "-v", "error", "-nostdin", "-i", file_path,
+                    "-vn", "-c:a", "libmp3lame", "-b:a", "192k", upload_path,
+                ])
+                if completed.returncode != 0:
+                    raise ValueError("Fish Audio requested MP3 encoding failed; no format fallback was used.")
+                mime_type = "audio/mpeg"
+        else:
+            upload_path, mime_type = self._prepare_audio_artifact_for_upload(file_path, requested_format, temp_dir)
+        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+            final_audio = self._validate_fish_audio_file(Path(upload_path), settings, native=False)
+            settings["_midom_fish_audio"]["artifacts"] = [{
+                "artifact_index": 0, "format": requested_format, "mime_type": mime_type, **final_audio,
+            }]
+            self._fish_audio_progress(connection, job_id, "uploading", "Uploading verified Fish Audio speech.")
         path = Path(upload_path)
         file_size = path.stat().st_size
         max_bytes = self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_AUDIO_BYTES, 1, MAX_AUDIO_BYTES)
@@ -21181,6 +22505,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         with path.open("rb") as reader:
             data = reader.read()
         sha256 = hashlib.sha256(data).hexdigest()
+        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS and sha256 != final_audio["sha256"]:
+            raise ValueError("Fish Audio artifact_association_invalid: uploaded bytes differ from the verified artifact.")
         self._log(
             f"Uploading audio artifact; job_id={job_id} artifact_index={artifact_index} "
             f"filename={path.name!r} requested_format={requested_format} mime_type={mime_type} "
@@ -21196,7 +22522,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "mime_type": mime_type,
                     "filename": path.name,
                 },
-                files={"file": (path.name, reader, mime_type)},
+                files={"file": (path.name, io.BytesIO(data) if settings.get("model_type") in FISH_AUDIO_MODEL_IDS else reader, mime_type)},
                 timeout=UPLOAD_TIMEOUT_SECONDS,
             )
         if response.status_code >= 400:
@@ -21210,6 +22536,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Audio artifact upload response was not a JSON object.")
+        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+            if payload.get("artifact_index", artifact_index) != artifact_index or type(payload.get("artifact_index", artifact_index)) is not int:
+                raise ValueError("Fish Audio artifact_association_invalid: unexpected accepted artifact index.")
+            for key in ("artifact_id", "file_id"):
+                self._fish_audio_int(payload.get(key), key, 1, 2_147_483_647)
         self._log(
             f"Audio artifact upload accepted; job_id={job_id} artifact_index={payload.get('artifact_index', artifact_index)} "
             f"artifact_id={payload.get('artifact_id')} file_id={payload.get('file_id')}."
@@ -21799,7 +23130,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 return self._last_progress
 
             def on_progress(self, update):
-                now = time.time()
+                now = time.monotonic()
                 progress = int(getattr(update, "progress", 0) or self._last_progress or 0)
                 phase = str(getattr(update, "phase", "") or "")
                 status = str(getattr(update, "status", "") or "")
@@ -21807,17 +23138,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 total_steps = getattr(update, "total_steps", None)
                 step_key = (current_step, total_steps) if current_step is not None and total_steps is not None else None
                 step_changed = step_key is not None and step_key != self._last_logged_step
-                if not step_changed and now - self._last_progress_at < 2.0:
-                    return
-                self._last_progress_at = now
                 self._last_progress = progress
-                plugin._set_active_job_status(
-                    phase=phase,
-                    status=status,
-                    progress=self._last_progress,
-                    current_step=current_step,
-                    total_steps=total_steps,
-                )
                 payload = {
                     "phase": phase,
                     "status": status,
@@ -21825,19 +23146,22 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "current_step": current_step,
                     "total_steps": total_steps,
                 }
-                if step_changed:
+                log_due = now - self._last_progress_at >= JOB_PROGRESS_INTERVAL_SECONDS
+                if step_changed and log_due:
                     self._last_logged_step = step_key
                     plugin._log(
                         f"WanGP step advanced; job_id={job_id} "
                         f"step={payload['current_step']}/{payload['total_steps']} "
                         f"progress={payload['progress']} phase={payload['phase']!r} status={payload['status']!r}."
                     )
-                else:
+                elif log_due:
                     plugin._log(
                         f"WanGP progress callback; job_id={job_id} "
                         f"phase={payload['phase']!r} progress={payload['progress']} "
                         f"step={payload['current_step']}/{payload['total_steps']} status={payload['status']!r}."
                     )
+                if log_due:
+                    self._last_progress_at = now
                 try:
                     plugin._post_job_update(connection, job_id, "progress", payload)
                 except Exception as exc:
@@ -21847,7 +23171,6 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 text = str(status or "").strip()
                 if not text:
                     return
-                plugin._set_active_job_status(status=text, progress=self._last_progress)
                 plugin._log(f"WanGP status callback; job_id={job_id} status={text!r} progress={self._last_progress}.")
                 try:
                     plugin._post_job_update(connection, job_id, "progress", {"status": text, "progress": self._last_progress})

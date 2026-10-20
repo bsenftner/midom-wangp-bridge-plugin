@@ -1,7 +1,10 @@
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
+
+import pytest
 
 
 PLUGIN_PATH = Path(__file__).resolve().parents[1] / "plugin.py"
@@ -169,3 +172,92 @@ def test_multi_angle_rejects_non_png_output_contract():
         assert "output.format must be 'png'" in str(exc)
     else:
         raise AssertionError("Expected curated multi-angle JPEG output to be rejected")
+
+
+@pytest.mark.parametrize("overrides,legacy,parsed,expected", [
+    ("attention_mode='sdpa', memory_profile=4", None, "sdpa", "sdpa"),
+    ("attention_mode='sage2'", "sdpa", "sage2", "sage2"),
+    ("memory_profile=4", None, "", "auto"),
+    ("", "sdpa", None, "sdpa"),
+    (None, "sdpa", None, "sdpa"),
+    (None, None, None, "auto"),
+])
+def test_multi_angle_diagnostics_read_modern_and_legacy_attention_overrides(
+    monkeypatch, overrides, legacy, parsed, expected,
+):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    settings = plugin._validate_image_job(multi_angle_job(), 2516)
+    original_settings = dict(settings)
+    merged = {"model_type": settings["model_type"]}
+    if overrides is not None:
+        merged["overrides"] = overrides
+    if legacy is not None:
+        merged["override_attention"] = legacy
+    calls = []
+    parser = types.ModuleType("shared.utils.generation_overrides")
+
+    def get_override(text, name):
+        calls.append((text, name))
+        return parsed
+
+    parser.get_override = get_override
+    monkeypatch.setitem(sys.modules, "shared.utils.generation_overrides", parser)
+    session = types.SimpleNamespace(
+        merge_settings_with_defaults=lambda public: dict(merged),
+        _ensure_runtime=lambda: types.SimpleNamespace(module=types.SimpleNamespace()),
+    )
+    plugin._capture_qwen_multi_angle_runtime_diagnostics(session, settings, phase="post_generation")
+    diagnostics = settings.pop("_midom_curated_tool_runtime_diagnostics")
+    assert diagnostics["attention_mode"] == expected
+    assert calls == ([(overrides, "attention_mode")] if overrides else [])
+    assert "attention_override_parse_error" not in diagnostics
+    assert settings == original_settings
+    settings["_midom_curated_tool_runtime_diagnostics"] = diagnostics
+    metadata = plugin._build_generation_metadata(settings, types.SimpleNamespace(), [])
+    assert metadata["curated_tool"]["runtime_diagnostics"]["attention_mode"] == expected
+
+
+def test_multi_angle_diagnostics_do_not_misreport_invalid_overrides_as_auto(monkeypatch):
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    settings = plugin._validate_image_job(multi_angle_job(), 2517)
+    parser = types.ModuleType("shared.utils.generation_overrides")
+
+    def get_override(text, name):
+        raise ValueError("Malformed overrides")
+
+    parser.get_override = get_override
+    monkeypatch.setitem(sys.modules, "shared.utils.generation_overrides", parser)
+    session = types.SimpleNamespace(
+        merge_settings_with_defaults=lambda public: {"overrides": "malformed"},
+        _ensure_runtime=lambda: types.SimpleNamespace(module=types.SimpleNamespace()),
+    )
+    plugin._capture_qwen_multi_angle_runtime_diagnostics(session, settings, phase="pre_submit")
+    diagnostics = settings["_midom_curated_tool_runtime_diagnostics"]
+    assert diagnostics["attention_mode"] == "unknown"
+    assert diagnostics["attention_override_parse_error"] == "Malformed overrides"
+    assert settings["override_attention"] == "sdpa"
+
+
+def test_multi_angle_diagnostics_use_current_wangp_override_parser(monkeypatch):
+    root = Path(os.environ.get("WAN2GP_ROOT") or PLUGIN_PATH.parents[2])
+    native_path = root / "shared" / "utils" / "generation_overrides.py"
+    if not native_path.is_file():
+        pytest.skip("Native parser integration check requires the WanGP checkout")
+    spec = importlib.util.spec_from_file_location("shared.utils.generation_overrides", native_path)
+    parser = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(parser)
+    monkeypatch.setitem(sys.modules, "shared.utils.generation_overrides", parser)
+    module = load_plugin_module()
+    plugin = plugin_instance(module)
+    settings = plugin._validate_image_job(multi_angle_job(), 2518)
+    session = types.SimpleNamespace(
+        merge_settings_with_defaults=lambda public: {
+            "model_type": public["model_type"],
+            "overrides": "memory_profile=4, attention_mode='sdpa'",
+        },
+        _ensure_runtime=lambda: types.SimpleNamespace(module=types.SimpleNamespace()),
+    )
+    plugin._capture_qwen_multi_angle_runtime_diagnostics(session, settings, phase="post_generation")
+    assert settings["_midom_curated_tool_runtime_diagnostics"]["attention_mode"] == "sdpa"

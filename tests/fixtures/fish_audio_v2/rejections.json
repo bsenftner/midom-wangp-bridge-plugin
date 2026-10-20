@@ -1,0 +1,78 @@
+{
+  "fixture_set_id": "fish_audio_reviewable_v2_fixtures_v1",
+  "reason_values_are_fixture_classifications_not_new_http_statuses": true,
+  "selection_and_claim_cases": [
+    {"id": "wrong_checkpoint", "target": "candidate", "path": ["model_id"], "value": "other_model", "reason": "checkpoint_unavailable"},
+    {"id": "v2_record_missing", "target": "capability", "path": ["limits", "fish_audio_contracts", "fish_drama3_tts_v2"], "delete": true, "reason": "contract_unavailable"},
+    {"id": "v2_version_key_mismatch", "target": "capability", "path": ["limits", "fish_audio_contracts", "fish_drama3_tts_v2", "contract_version"], "value": "fish_drama3_tts_v1", "reason": "contract_unavailable"},
+    {"id": "v2_safety_missing", "target": "capability", "path": ["limits", "fish_audio_contracts", "fish_drama3_tts_v2", "artifact_safety"], "delete": true, "reason": "safety_profile_unavailable"},
+    {"id": "mp3_not_advertised_in_v2", "target": "capability", "path": ["limits", "fish_audio_contracts", "fish_drama3_tts_v2", "output_mime_types"], "value": ["audio/wav"], "reason": "format_unavailable"},
+    {"id": "mp3_not_advertised_by_checkpoint", "target": "capability", "path": ["limits", "output_mime_types"], "value": ["audio/wav"], "reason": "format_unavailable"},
+    {"id": "flac_request_no_format_fallback", "target": "claim", "path": ["output", "format"], "value": "flac", "reason": "format_unavailable"},
+    {"id": "candidate_contract_missing", "target": "candidate", "path": ["summary", "speech_contract_version"], "delete": true, "reason": "contract_unavailable"},
+    {"id": "candidate_policy_missing", "target": "candidate", "path": ["summary", "acceptance_policy_id"], "delete": true, "reason": "acceptance_policy_unavailable"},
+    {"id": "candidate_wrong_safety_profile", "target": "candidate", "path": ["summary", "artifact_safety_profile_id"], "value": "other_profile", "reason": "safety_profile_unavailable"},
+    {"id": "candidate_transcript_count_mismatch", "target": "candidate", "path": ["summary", "reference_transcript_count"], "value": 2, "reason": "reference_mapping_invalid"},
+    {"id": "claim_missing_policy", "target": "claim", "path": ["generation", "acceptance_policy_id"], "delete": true, "reason": "acceptance_policy_unavailable"},
+    {"id": "claim_wrong_policy", "target": "claim", "path": ["generation", "acceptance_policy_id"], "value": "other_policy", "reason": "acceptance_policy_unavailable"},
+    {"id": "claim_missing_safety_profile", "target": "claim", "path": ["generation", "artifact_safety_profile_id"], "delete": true, "reason": "safety_profile_unavailable"},
+    {"id": "v2_claim_cannot_be_rewritten_to_v1", "target": "claim", "path": ["generation", "speech_contract_version"], "value": "fish_drama3_tts_v1", "reason": "candidate_claim_mismatch"},
+    {"id": "claim_legacy_output_duration_forbidden", "target": "claim", "path": ["output", "max_duration_seconds"], "value": 120, "reason": "ambiguous_v1_output_limit"},
+    {"id": "raw_safety_override_forbidden", "target": "claim", "path": ["limits", "max_artifact_duration_seconds"], "value": 300, "reason": "safety_override_forbidden"},
+    {"id": "byte_override_cannot_relax_profile", "target": "claim", "path": ["limits", "max_artifact_bytes"], "value": 52428801, "reason": "safety_override_forbidden"},
+    {"id": "claim_second_reference_wrong_speaker", "target": "claim", "path": ["inputs", 1, "speaker_id"], "value": 1, "reason": "reference_mapping_invalid"},
+    {"id": "claim_reference_transcript_missing", "target": "claim", "path": ["inputs", 2, "transcript"], "delete": true, "reason": "reference_mapping_invalid"},
+    {"id": "claim_accelerator_injected", "target": "claim", "path": ["generation", "accelerator_profile_id"], "value": "pruna", "reason": "unsupported_generation_field"},
+    {"id": "claim_worker_enhancer_enabled", "target": "claim", "path": ["generation", "prompt_enhancement_by_worker"], "value": true, "reason": "unsupported_prompt_handling"}
+  ],
+  "completion_cases": [
+    {"id": "completion_policy_missing", "path": ["generation_metadata", "fish_audio", "acceptance_policy_id"], "delete": true, "reason": "completion_contract_mismatch"},
+    {"id": "completion_wrong_contract", "path": ["generation_metadata", "fish_audio", "speech_contract_version"], "value": "fish_drama3_tts_v1", "reason": "completion_contract_mismatch"},
+    {"id": "completion_wrong_script_hash", "path": ["generation_metadata", "fish_audio", "script_sha256"], "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "reason": "completion_contract_mismatch"},
+    {"id": "completion_wrong_checkpoint", "path": ["model_id"], "value": "fish_drama3_int4", "reason": "completion_contract_mismatch"},
+    {"id": "completion_no_artifact_reference", "path": ["artifacts"], "value": [], "reason": "artifact_association_invalid"},
+    {"id": "completion_wrong_artifact_id", "path": ["artifacts", 0, "artifact_id"], "value": 12002, "reason": "artifact_association_invalid"},
+    {"id": "completion_wrong_file_id", "path": ["artifacts", 0, "file_id"], "value": 13002, "reason": "artifact_association_invalid"},
+    {"id": "completion_wrong_artifact_index", "path": ["artifacts", 0, "artifact_index"], "value": 1, "reason": "artifact_association_invalid"},
+    {"id": "completion_wrong_hash", "path": ["generation_metadata", "fish_audio", "artifacts", 0, "sha256"], "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "reason": "artifact_association_invalid"},
+    {"id": "completion_wrong_execution_job", "path": ["generation_metadata", "fish_audio", "execution_evidence", "job_id"], "value": 2402, "reason": "execution_evidence_invalid"},
+    {"id": "completion_execution_evidence_missing", "path": ["generation_metadata", "fish_audio", "execution_evidence"], "delete": true, "reason": "execution_evidence_invalid"},
+    {"id": "completion_boolean_call_count", "path": ["generation_metadata", "fish_audio", "execution_evidence", "observed_calls"], "value": true, "reason": "execution_evidence_invalid"},
+    {"id": "completion_top_level_call_count_mismatch", "path": ["generation_metadata", "fish_audio", "observed_calls"], "value": 2, "reason": "execution_evidence_invalid"},
+    {"id": "completion_missing_reason", "path": ["generation_metadata", "fish_audio", "finish_reason"], "delete": true, "reason": "termination_diagnostics_invalid"},
+    {"id": "completion_missing_parts", "path": ["generation_metadata", "fish_audio", "parts"], "delete": true, "reason": "termination_diagnostics_invalid"},
+    {"id": "completion_part_reason_contradicts_top_level", "path": ["generation_metadata", "fish_audio", "parts", 0, "finish_reason"], "value": "silence", "reason": "termination_diagnostics_invalid"},
+    {"id": "unknown_cannot_hide_inconsistent_part", "path": ["generation_metadata", "fish_audio", "finish_reason"], "value": "unknown", "reason": "termination_diagnostics_invalid"},
+    {"id": "cancelled_completion_is_not_reviewable", "path": ["generation_metadata", "fish_audio", "execution_evidence", "cancelled"], "value": true, "reason": "cancel_requested"},
+    {"id": "early_stop_completion_is_not_reviewable", "path": ["generation_metadata", "fish_audio", "finish_reason"], "value": "early_stop", "reason": "cancel_requested"},
+    {"id": "completion_warning_omitted", "path": ["generation_metadata", "fish_audio", "warnings"], "value": [], "reason": "warning_mismatch"},
+    {"id": "completion_warning_wrong_artifact", "path": ["generation_metadata", "fish_audio", "warnings", 0, "artifact_index"], "value": 1, "reason": "warning_mismatch"},
+    {"id": "completion_warning_wrong_severity", "path": ["generation_metadata", "fish_audio", "warnings", 0, "severity"], "value": "error", "reason": "warning_mismatch"},
+    {"id": "completion_cannot_assert_script_coverage", "path": ["generation_metadata", "fish_audio", "script_coverage"], "value": "verified", "reason": "unsupported_content_claim"},
+    {"id": "completion_cannot_approve_editorially", "path": ["generation_metadata", "fish_audio", "editorial_review_status"], "value": "kept", "reason": "unsupported_content_claim"}
+  ],
+  "metadata_cases": [
+    {"id": "whole_metadata_depth_8", "construction": "non_fish_depth", "value": 8, "accept": true},
+    {"id": "whole_metadata_depth_9", "construction": "non_fish_depth", "value": 9, "accept": false, "reason": "metadata_too_deep"},
+    {"id": "old_conditioning_shape_depth_9", "construction": "old_conditioning_shape", "accept": false, "reason": "metadata_too_deep"},
+    {"id": "whole_metadata_exact_32kib", "construction": "whole_utf8_bytes", "value": 32768, "accept": true},
+    {"id": "whole_metadata_32kib_plus_one", "construction": "whole_utf8_bytes", "value": 32769, "accept": false, "reason": "metadata_too_large"},
+    {"id": "individual_string_exact_8192", "construction": "non_fish_string_chars", "value": 8192, "accept": true},
+    {"id": "individual_string_8193", "construction": "non_fish_string_chars", "value": 8193, "accept": false, "reason": "metadata_overlong_string"},
+    {"id": "utf8_bytes_not_character_count", "construction": "non_fish_multibyte_strings", "value": 8192, "accept": false, "reason": "metadata_too_large"}
+  ],
+  "recovery_expectations": {
+    "uploaded_artifact": {
+      "requires_authenticated_project_permission": true, "requires_audit": true,
+      "revalidate_ownership": true, "revalidate_artifact_association": true, "revalidate_hash": true,
+      "source_job_unchanged": true, "source_contract_unchanged": true,
+      "missing_historical_execution_evidence": "unknown", "new_inference": false, "new_inference_charge": false,
+      "review_status": "pending_review"
+    },
+    "worker_assisted": {
+      "payload_status": "deferred_separate_freeze_required", "fresh_authorization_required": true,
+      "fresh_lease_required": true, "approved_hash_required": true, "original_job_output_only": true,
+      "arbitrary_paths": false, "expired_lease_reuse": false, "new_inference": false, "new_inference_charge": false
+    }
+  }
+}

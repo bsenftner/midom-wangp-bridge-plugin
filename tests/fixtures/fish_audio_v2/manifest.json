@@ -1,0 +1,13 @@
+{
+  "fixture_set_id": "fish_audio_reviewable_v2_fixtures_v1",
+  "status": "contract_only_ready_to_mirror_not_implemented",
+  "files": {
+    "capabilities.json": "6961d4fb7a0dcd569ac309c29ce3c8c68d9bb361900190865541cd17a0a2fb57",
+    "jobs.json": "a32c631d8a65d439208b5dce5118be4bac6f6c3300a8e2359d17ef8ba53e2bc8",
+    "measurements.json": "6505f16323a02323f9d2e26fca7b7c5fa80bd787d607b65f776472ce10eae9d3",
+    "rejections.json": "d09bd5ca5569fe1760ad70e8b1522daa2449037b6556ce155ebdf4d82a0c30b4"
+  },
+  "runtime_implementation": false,
+  "runtime_advertisement": false,
+  "worker_assisted_recovery_payload": "separate_freeze_required"
+}

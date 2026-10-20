@@ -1,0 +1,548 @@
+{
+  "fixture_set_id": "fish_audio_extended_v3_proposal_v1",
+  "status": "contract_only_not_runtime_advertisement",
+  "models": [
+    {
+      "model_id": "fish_drama3",
+      "family": "tts",
+      "media_type": "audio",
+      "display_name": "Fish Audio Drama 3",
+      "supported": true,
+      "detected": true,
+      "capabilities": {
+        "text_to_speech": true,
+        "voice_clone": true,
+        "voice_design": false,
+        "new_voice_generation": true,
+        "multi_speaker": true,
+        "dialogue_generation": true,
+        "speaker_tag_dialogue": true,
+        "speech_performance_directions": true,
+        "multi_output": false,
+        "emotion_reference": false,
+        "prompt_processing_modes": [
+          "FG"
+        ]
+      },
+      "limits": {
+        "max_outputs": 1,
+        "required_reference_audio_files": 0,
+        "max_reference_audio_files": 3,
+        "max_emotion_reference_audio_files": 0,
+        "max_dialogue_speakers": 16,
+        "min_reference_audio_seconds": 3,
+        "max_reference_audio_seconds": 30,
+        "min_reference_audio_sample_rate_hz": 16000,
+        "max_prompt_chars": 4000,
+        "max_duration_seconds": 120,
+        "max_artifact_bytes": 52428800,
+        "input_mime_types": [
+          "audio/mp4",
+          "audio/mpeg",
+          "audio/ogg",
+          "audio/wav",
+          "audio/webm",
+          "audio/x-wav"
+        ],
+        "output_mime_types": [
+          "audio/wav",
+          "audio/mpeg"
+        ],
+        "fish_audio": {
+          "contract_version": "fish_drama3_tts_v1",
+          "recipe_version": "fish_drama3_standard_recipe_v1",
+          "audio_tasks": [
+            "speech_tts"
+          ],
+          "speech_profile_ids": [
+            "standard_v1"
+          ],
+          "voice_modes": [
+            "new_voice",
+            "single_reference",
+            "multi_speaker_dialogue"
+          ],
+          "dialogue_modes": [
+            "speaker_lines"
+          ],
+          "max_cloned_speakers": 3,
+          "reference_mapping": "contiguous_speaker_prefix_v1",
+          "reference_transcripts": "required_per_input",
+          "reference_transcription_by_worker": false,
+          "duration_modes": [
+            "maximum_seconds"
+          ],
+          "default_maximum_duration_seconds": 60,
+          "native_sample_rate_hz": 44100,
+          "native_channels": 1,
+          "completion_policy": "require_observed_eos_v1",
+          "script_coverage_verification": false,
+          "separate_speaker_stems": false,
+          "word_timestamps": false,
+          "expert_precision": "fp8"
+        },
+        "fish_audio_contracts": {
+          "fish_drama3_tts_v1": {
+            "contract_version": "fish_drama3_tts_v1",
+            "recipe_version": "fish_drama3_standard_recipe_v1",
+            "audio_tasks": [
+              "speech_tts"
+            ],
+            "speech_profile_ids": [
+              "standard_v1"
+            ],
+            "voice_modes": [
+              "new_voice",
+              "single_reference",
+              "multi_speaker_dialogue"
+            ],
+            "dialogue_modes": [
+              "speaker_lines"
+            ],
+            "max_cloned_speakers": 3,
+            "reference_mapping": "contiguous_speaker_prefix_v1",
+            "reference_transcripts": "required_per_input",
+            "reference_transcription_by_worker": false,
+            "duration_modes": [
+              "maximum_seconds"
+            ],
+            "default_maximum_duration_seconds": 60,
+            "native_sample_rate_hz": 44100,
+            "native_channels": 1,
+            "completion_policy": "require_observed_eos_v1",
+            "script_coverage_verification": false,
+            "separate_speaker_stems": false,
+            "word_timestamps": false,
+            "expert_precision": "fp8",
+            "min_generation_duration_seconds": 1,
+            "max_generation_duration_seconds": 120,
+            "artifact_duration_policy": "v1_requested_ceiling_with_existing_codec_tolerance",
+            "max_outputs": 1,
+            "max_prompt_chars": 4000,
+            "max_dialogue_speakers": 16,
+            "required_reference_audio_files": 0,
+            "max_reference_audio_files": 3,
+            "max_emotion_reference_audio_files": 0,
+            "min_reference_audio_seconds": 3,
+            "max_reference_audio_seconds": 30,
+            "min_reference_audio_sample_rate_hz": 16000,
+            "max_artifact_bytes": 52428800,
+            "input_mime_types": [
+              "audio/mp4",
+              "audio/mpeg",
+              "audio/ogg",
+              "audio/wav",
+              "audio/webm",
+              "audio/x-wav"
+            ],
+            "output_mime_types": [
+              "audio/wav",
+              "audio/mpeg"
+            ]
+          },
+          "fish_drama3_tts_v2": {
+            "contract_version": "fish_drama3_tts_v2",
+            "recipe_version": "fish_drama3_standard_recipe_v1",
+            "acceptance_policy_id": "reviewable_audio_v1",
+            "artifact_safety_profile_id": "fish_audio_180s_50mib_v1",
+            "audio_tasks": [
+              "speech_tts"
+            ],
+            "speech_profile_ids": [
+              "standard_v1"
+            ],
+            "voice_modes": [
+              "new_voice",
+              "single_reference",
+              "multi_speaker_dialogue"
+            ],
+            "dialogue_modes": [
+              "speaker_lines"
+            ],
+            "max_cloned_speakers": 3,
+            "reference_mapping": "contiguous_speaker_prefix_v1",
+            "reference_transcripts": "required_per_input",
+            "reference_transcription_by_worker": false,
+            "duration_modes": [
+              "maximum_seconds"
+            ],
+            "default_maximum_duration_seconds": 60,
+            "min_generation_duration_seconds": 1,
+            "max_generation_duration_seconds": 120,
+            "native_sample_rate_hz": 44100,
+            "native_channels": 1,
+            "completion_policy": "reviewable_audio_v1",
+            "script_coverage_verification": false,
+            "separate_speaker_stems": false,
+            "word_timestamps": false,
+            "expert_precision": "fp8",
+            "max_outputs": 1,
+            "max_prompt_chars": 4000,
+            "max_dialogue_speakers": 16,
+            "required_reference_audio_files": 0,
+            "max_reference_audio_files": 3,
+            "max_emotion_reference_audio_files": 0,
+            "min_reference_audio_seconds": 3,
+            "max_reference_audio_seconds": 30,
+            "min_reference_audio_sample_rate_hz": 16000,
+            "input_mime_types": [
+              "audio/mp4",
+              "audio/mpeg",
+              "audio/ogg",
+              "audio/wav",
+              "audio/webm",
+              "audio/x-wav"
+            ],
+            "output_mime_types": [
+              "audio/wav",
+              "audio/mpeg"
+            ],
+            "artifact_safety": {
+              "max_duration_seconds": 180,
+              "max_bytes": 52428800,
+              "max_decoded_mono_samples": 7938000,
+              "duration_basis": "probe_and_decoded_duration_v1"
+            },
+            "over_budget_warning_tolerance_seconds": 0.25
+          },
+          "fish_drama3_tts_v3": {
+            "contract_version": "fish_drama3_tts_v3",
+            "recipe_version": "fish_drama3_standard_recipe_v1",
+            "acceptance_policy_id": "reviewable_audio_v1",
+            "artifact_safety_profile_id": "fish_audio_240s_50mib_v1",
+            "audio_tasks": [
+              "speech_tts"
+            ],
+            "speech_profile_ids": [
+              "standard_v1"
+            ],
+            "voice_modes": [
+              "new_voice",
+              "single_reference",
+              "multi_speaker_dialogue"
+            ],
+            "dialogue_modes": [
+              "speaker_lines"
+            ],
+            "max_cloned_speakers": 3,
+            "reference_mapping": "contiguous_speaker_prefix_v1",
+            "reference_transcripts": "required_per_input",
+            "reference_transcription_by_worker": false,
+            "duration_modes": [
+              "maximum_seconds"
+            ],
+            "default_maximum_duration_seconds": 60,
+            "min_generation_duration_seconds": 1,
+            "max_generation_duration_seconds": 180,
+            "native_sample_rate_hz": 44100,
+            "native_channels": 1,
+            "completion_policy": "reviewable_audio_v1",
+            "script_coverage_verification": false,
+            "separate_speaker_stems": false,
+            "word_timestamps": false,
+            "expert_precision": "fp8",
+            "max_outputs": 1,
+            "max_prompt_chars": 4000,
+            "max_dialogue_speakers": 16,
+            "required_reference_audio_files": 0,
+            "max_reference_audio_files": 3,
+            "max_emotion_reference_audio_files": 0,
+            "min_reference_audio_seconds": 3,
+            "max_reference_audio_seconds": 30,
+            "min_reference_audio_sample_rate_hz": 16000,
+            "input_mime_types": [
+              "audio/mp4",
+              "audio/mpeg",
+              "audio/ogg",
+              "audio/wav",
+              "audio/webm",
+              "audio/x-wav"
+            ],
+            "output_mime_types": [
+              "audio/wav",
+              "audio/mpeg"
+            ],
+            "artifact_safety": {
+              "max_duration_seconds": 240,
+              "max_bytes": 52428800,
+              "max_decoded_mono_samples": 10584000,
+              "duration_basis": "probe_and_decoded_duration_v1"
+            },
+            "over_budget_warning_tolerance_seconds": 0.25
+          }
+        }
+      }
+    },
+    {
+      "model_id": "fish_drama3_int4",
+      "family": "tts",
+      "media_type": "audio",
+      "display_name": "Fish Audio Drama 3 INT4 Experts",
+      "supported": true,
+      "detected": true,
+      "capabilities": {
+        "text_to_speech": true,
+        "voice_clone": true,
+        "voice_design": false,
+        "new_voice_generation": true,
+        "multi_speaker": true,
+        "dialogue_generation": true,
+        "speaker_tag_dialogue": true,
+        "speech_performance_directions": true,
+        "multi_output": false,
+        "emotion_reference": false,
+        "prompt_processing_modes": [
+          "FG"
+        ]
+      },
+      "limits": {
+        "max_outputs": 1,
+        "required_reference_audio_files": 0,
+        "max_reference_audio_files": 3,
+        "max_emotion_reference_audio_files": 0,
+        "max_dialogue_speakers": 16,
+        "min_reference_audio_seconds": 3,
+        "max_reference_audio_seconds": 30,
+        "min_reference_audio_sample_rate_hz": 16000,
+        "max_prompt_chars": 4000,
+        "max_duration_seconds": 120,
+        "max_artifact_bytes": 52428800,
+        "input_mime_types": [
+          "audio/mp4",
+          "audio/mpeg",
+          "audio/ogg",
+          "audio/wav",
+          "audio/webm",
+          "audio/x-wav"
+        ],
+        "output_mime_types": [
+          "audio/wav",
+          "audio/mpeg"
+        ],
+        "fish_audio": {
+          "contract_version": "fish_drama3_tts_v1",
+          "recipe_version": "fish_drama3_standard_recipe_v1",
+          "audio_tasks": [
+            "speech_tts"
+          ],
+          "speech_profile_ids": [
+            "standard_v1"
+          ],
+          "voice_modes": [
+            "new_voice",
+            "single_reference",
+            "multi_speaker_dialogue"
+          ],
+          "dialogue_modes": [
+            "speaker_lines"
+          ],
+          "max_cloned_speakers": 3,
+          "reference_mapping": "contiguous_speaker_prefix_v1",
+          "reference_transcripts": "required_per_input",
+          "reference_transcription_by_worker": false,
+          "duration_modes": [
+            "maximum_seconds"
+          ],
+          "default_maximum_duration_seconds": 60,
+          "native_sample_rate_hz": 44100,
+          "native_channels": 1,
+          "completion_policy": "require_observed_eos_v1",
+          "script_coverage_verification": false,
+          "separate_speaker_stems": false,
+          "word_timestamps": false,
+          "expert_precision": "int4"
+        },
+        "fish_audio_contracts": {
+          "fish_drama3_tts_v1": {
+            "contract_version": "fish_drama3_tts_v1",
+            "recipe_version": "fish_drama3_standard_recipe_v1",
+            "audio_tasks": [
+              "speech_tts"
+            ],
+            "speech_profile_ids": [
+              "standard_v1"
+            ],
+            "voice_modes": [
+              "new_voice",
+              "single_reference",
+              "multi_speaker_dialogue"
+            ],
+            "dialogue_modes": [
+              "speaker_lines"
+            ],
+            "max_cloned_speakers": 3,
+            "reference_mapping": "contiguous_speaker_prefix_v1",
+            "reference_transcripts": "required_per_input",
+            "reference_transcription_by_worker": false,
+            "duration_modes": [
+              "maximum_seconds"
+            ],
+            "default_maximum_duration_seconds": 60,
+            "native_sample_rate_hz": 44100,
+            "native_channels": 1,
+            "completion_policy": "require_observed_eos_v1",
+            "script_coverage_verification": false,
+            "separate_speaker_stems": false,
+            "word_timestamps": false,
+            "expert_precision": "int4",
+            "min_generation_duration_seconds": 1,
+            "max_generation_duration_seconds": 120,
+            "artifact_duration_policy": "v1_requested_ceiling_with_existing_codec_tolerance",
+            "max_outputs": 1,
+            "max_prompt_chars": 4000,
+            "max_dialogue_speakers": 16,
+            "required_reference_audio_files": 0,
+            "max_reference_audio_files": 3,
+            "max_emotion_reference_audio_files": 0,
+            "min_reference_audio_seconds": 3,
+            "max_reference_audio_seconds": 30,
+            "min_reference_audio_sample_rate_hz": 16000,
+            "max_artifact_bytes": 52428800,
+            "input_mime_types": [
+              "audio/mp4",
+              "audio/mpeg",
+              "audio/ogg",
+              "audio/wav",
+              "audio/webm",
+              "audio/x-wav"
+            ],
+            "output_mime_types": [
+              "audio/wav",
+              "audio/mpeg"
+            ]
+          },
+          "fish_drama3_tts_v2": {
+            "contract_version": "fish_drama3_tts_v2",
+            "recipe_version": "fish_drama3_standard_recipe_v1",
+            "acceptance_policy_id": "reviewable_audio_v1",
+            "artifact_safety_profile_id": "fish_audio_180s_50mib_v1",
+            "audio_tasks": [
+              "speech_tts"
+            ],
+            "speech_profile_ids": [
+              "standard_v1"
+            ],
+            "voice_modes": [
+              "new_voice",
+              "single_reference",
+              "multi_speaker_dialogue"
+            ],
+            "dialogue_modes": [
+              "speaker_lines"
+            ],
+            "max_cloned_speakers": 3,
+            "reference_mapping": "contiguous_speaker_prefix_v1",
+            "reference_transcripts": "required_per_input",
+            "reference_transcription_by_worker": false,
+            "duration_modes": [
+              "maximum_seconds"
+            ],
+            "default_maximum_duration_seconds": 60,
+            "min_generation_duration_seconds": 1,
+            "max_generation_duration_seconds": 120,
+            "native_sample_rate_hz": 44100,
+            "native_channels": 1,
+            "completion_policy": "reviewable_audio_v1",
+            "script_coverage_verification": false,
+            "separate_speaker_stems": false,
+            "word_timestamps": false,
+            "expert_precision": "int4",
+            "max_outputs": 1,
+            "max_prompt_chars": 4000,
+            "max_dialogue_speakers": 16,
+            "required_reference_audio_files": 0,
+            "max_reference_audio_files": 3,
+            "max_emotion_reference_audio_files": 0,
+            "min_reference_audio_seconds": 3,
+            "max_reference_audio_seconds": 30,
+            "min_reference_audio_sample_rate_hz": 16000,
+            "input_mime_types": [
+              "audio/mp4",
+              "audio/mpeg",
+              "audio/ogg",
+              "audio/wav",
+              "audio/webm",
+              "audio/x-wav"
+            ],
+            "output_mime_types": [
+              "audio/wav",
+              "audio/mpeg"
+            ],
+            "artifact_safety": {
+              "max_duration_seconds": 180,
+              "max_bytes": 52428800,
+              "max_decoded_mono_samples": 7938000,
+              "duration_basis": "probe_and_decoded_duration_v1"
+            },
+            "over_budget_warning_tolerance_seconds": 0.25
+          },
+          "fish_drama3_tts_v3": {
+            "contract_version": "fish_drama3_tts_v3",
+            "recipe_version": "fish_drama3_standard_recipe_v1",
+            "acceptance_policy_id": "reviewable_audio_v1",
+            "artifact_safety_profile_id": "fish_audio_240s_50mib_v1",
+            "audio_tasks": [
+              "speech_tts"
+            ],
+            "speech_profile_ids": [
+              "standard_v1"
+            ],
+            "voice_modes": [
+              "new_voice",
+              "single_reference",
+              "multi_speaker_dialogue"
+            ],
+            "dialogue_modes": [
+              "speaker_lines"
+            ],
+            "max_cloned_speakers": 3,
+            "reference_mapping": "contiguous_speaker_prefix_v1",
+            "reference_transcripts": "required_per_input",
+            "reference_transcription_by_worker": false,
+            "duration_modes": [
+              "maximum_seconds"
+            ],
+            "default_maximum_duration_seconds": 60,
+            "min_generation_duration_seconds": 1,
+            "max_generation_duration_seconds": 180,
+            "native_sample_rate_hz": 44100,
+            "native_channels": 1,
+            "completion_policy": "reviewable_audio_v1",
+            "script_coverage_verification": false,
+            "separate_speaker_stems": false,
+            "word_timestamps": false,
+            "expert_precision": "int4",
+            "max_outputs": 1,
+            "max_prompt_chars": 4000,
+            "max_dialogue_speakers": 16,
+            "required_reference_audio_files": 0,
+            "max_reference_audio_files": 3,
+            "max_emotion_reference_audio_files": 0,
+            "min_reference_audio_seconds": 3,
+            "max_reference_audio_seconds": 30,
+            "min_reference_audio_sample_rate_hz": 16000,
+            "input_mime_types": [
+              "audio/mp4",
+              "audio/mpeg",
+              "audio/ogg",
+              "audio/wav",
+              "audio/webm",
+              "audio/x-wav"
+            ],
+            "output_mime_types": [
+              "audio/wav",
+              "audio/mpeg"
+            ],
+            "artifact_safety": {
+              "max_duration_seconds": 240,
+              "max_bytes": 52428800,
+              "max_decoded_mono_samples": 10584000,
+              "duration_basis": "probe_and_decoded_duration_v1"
+            },
+            "over_budget_warning_tolerance_seconds": 0.25
+          }
+        }
+      }
+    }
+  ]
+}
