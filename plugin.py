@@ -1,5 +1,6 @@
 import hashlib
 import array
+import copy
 import inspect
 import io
 import ipaddress
@@ -52,6 +53,23 @@ IMAGE_DETAIL_RESTORATION_PROCESSING_TASK = "image_detail_restoration"
 RESTORE_CROP_UPSCALE_DETAIL_OPERATION = "restore_crop_upscale_detail"
 RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION = "crop_upscale_detail_restoration_v1"
 FLASHVSR_X2_STANDARD_PROFILE_ID = "flashvsr_x2_standard_v1"
+FLASHVSR_PLUS_TURBO_X2_PROFILE_ID = "flashvsr_plus_turbo_x2_standard_v1"
+FLASHVSR_IMAGE_PROFILES = {
+    FLASHVSR_X2_STANDARD_PROFILE_ID: {
+        "profile_id": FLASHVSR_X2_STANDARD_PROFILE_ID,
+        "display_name": "FlashVSR v1.1",
+        "model_id": "v1_1",
+        "transformer_quantization": "bf16",
+        "decoder_policy": "configured",
+    },
+    FLASHVSR_PLUS_TURBO_X2_PROFILE_ID: {
+        "profile_id": FLASHVSR_PLUS_TURBO_X2_PROFILE_ID,
+        "display_name": "FlashVSR+ Turbo",
+        "model_id": "plus_turbo",
+        "transformer_quantization": "bf16",
+        "decoder_policy": "full",
+    },
+}
 FLASHVSR_X2_SPATIAL_UPSAMPLING = "flashvsr*2"
 FLASHVSR_CROP_UPSCALE_SUPPORTED_RESOLUTIONS = {
     (768, 768),
@@ -408,6 +426,11 @@ CONTROL_MODE_WANGP_CODES = {
 }
 ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 ALLOWED_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+IMAGE_ENCODING_METADATA = {
+    "PNG": ("image/png", ".png"),
+    "JPEG": ("image/jpeg", ".jpg"),
+    "WEBP": ("image/webp", ".webp"),
+}
 ALLOWED_AUDIO_INPUT_MIME_TYPES = {"audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4", "audio/webm", "audio/ogg"}
 ALLOWED_AUDIO_OUTPUT_MIME_TYPES = {"audio/mpeg", "audio/wav", "audio/x-wav"}
 ALLOWED_AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".mp4", ".webm", ".ogg"}
@@ -2665,38 +2688,112 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             },
         }
 
-    def _flashvsr_image_processing_runtime(self) -> Optional[dict[str, Any]]:
-        """Return the active WanGP FlashVSR configuration without loading its models."""
-        try:
-            from postprocessing import spatial_upsamplers as upsampler_api
+    def _flashvsr_profile_handler(self, profile_id: str):
+        """Make an isolated native handler; polling must not normalize the global config."""
+        from postprocessing import spatial_upsamplers as upsampler_api
 
-            handler = upsampler_api.find_postprocessing_upsampler(FLASHVSR_X2_SPATIAL_UPSAMPLING)
-            if handler is None:
-                return None
-            validation_error = upsampler_api.validate_postprocessing_spatial_upsampling(
-                FLASHVSR_X2_SPATIAL_UPSAMPLING,
-                1,
-            )
-            if validation_error:
-                return None
-            enabled, variant = handler.settings()
-            if not enabled or not variant:
-                return None
-            config = handler.config()
-            return {
-                "method": "flashvsr",
-                "spatial_upsampling": FLASHVSR_X2_SPATIAL_UPSAMPLING,
-                "model_variant": str(variant),
-                "sparse_backend": str(config.get("backend") or "auto"),
-                "topk_ratio": float(config.get("topk_ratio") or 0.0),
-            }
+        profile = FLASHVSR_IMAGE_PROFILES.get(profile_id)
+        if profile is None:
+            raise ValueError(f"Unsupported FlashVSR profile_id: {profile_id}")
+        registered = upsampler_api.find_postprocessing_upsampler(FLASHVSR_X2_SPATIAL_UPSAMPLING)
+        if registered is None:
+            raise ValueError("FlashVSR postprocessor is not registered.")
+        handler = copy.copy(registered)
+        handler.server_config = copy.deepcopy(registered.server_config)
+        config = dict(handler.config())
+        enabled, _ = handler.settings()
+        if not enabled:
+            raise ValueError("FlashVSR is disabled in Configuration > Extensions.")
+        models = getattr(handler, "_MODEL_FILE_STEMS", None)
+        if isinstance(models, dict):
+            if profile["model_id"] not in models:
+                raise ValueError(f"Native FlashVSR does not support {profile['model_id']}.")
+            config.update(model=profile["model_id"], quantization="bf16")
+        elif (profile_id != FLASHVSR_X2_STANDARD_PROFILE_ID
+              or getattr(handler, "TRANSFORMER_FILENAME", None) != "FlashVSR_v1.1_transformer_bf16.safetensors"):
+            raise ValueError("Unsupported native FlashVSR model-selection interface.")
+        if profile["decoder_policy"] == "full":
+            config.update(mode=handler.MODE_FULL, topk_ratio=0.0, cache_windows=3)
+        handler.server_config.setdefault("spatial_upsamplers", {})["flashvsr"] = config
+        spatial_upsampling = self._flashvsr_profile_upsampling(handler, profile_id)
+        error = handler.validate_upsampling(spatial_upsampling, 1)
+        if error:
+            raise ValueError(str(error))
+        effective = handler.config()
+        if isinstance(models, dict) and (
+            effective.get("model") != profile["model_id"] or effective.get("quantization") != "bf16"
+        ):
+            raise ValueError("Native FlashVSR normalized the requested model or precision to another value.")
+        enabled, variant = handler.settings()
+        if not enabled or not variant or (profile["decoder_policy"] == "full" and variant != "full"):
+            raise ValueError("Native FlashVSR did not retain the requested decoder.")
+        return handler
+
+    @staticmethod
+    def _flashvsr_profile_upsampling(handler, profile_id: str) -> str:
+        profile = FLASHVSR_IMAGE_PROFILES[profile_id]
+        methods = getattr(handler, "METHOD_MODELS", None)
+        if methods is None:
+            # WanGP 18.21 selects the model from the private handler configuration.
+            return FLASHVSR_X2_SPATIAL_UPSAMPLING
+        method = "flashvsrplus" if profile["model_id"] == "plus_turbo" else "flashvsr"
+        if not isinstance(methods, dict) or methods.get(method) != profile["model_id"]:
+            raise ValueError("Native FlashVSR does not declare the requested model-specific method.")
+        value = handler.build_value(method, 2.0)
+        if (not value or handler.model_for_upsampling(value) != profile["model_id"]
+                or handler.scale_for_upsampling(value) != 2.0):
+            raise ValueError("Native FlashVSR method does not select the requested model.")
+        return value
+
+    @staticmethod
+    def _flashvsr_handler_diagnostics(handler, profile_id: str) -> dict[str, Any]:
+        profile = FLASHVSR_IMAGE_PROFILES[profile_id]
+        config = handler.config()
+        _, variant = handler.settings()
+        spatial_upsampling = AwsWorkerBridgePlugin._flashvsr_profile_upsampling(handler, profile_id)
+        download = (handler.query_download_def(spatial_upsampling=spatial_upsampling)
+                    if getattr(handler, "METHOD_MODELS", None) is not None else handler.query_download_def()) or {}
+        components = []
+        folders = download.get("sourceFolderList", [])
+        for index, group in enumerate(download.get("fileList", [])):
+            folder = folders[index] if index < len(folders) else "FlashVSR"
+            for filename in group if isinstance(group, list) else [group]:
+                if not isinstance(filename, str):
+                    continue
+                component = {"filename": Path(filename).name}
+                try:
+                    relative = "/".join(part for part in (folder, filename) if part)
+                    path = handler.files_locator.locate_file(relative, error_if_none=False)
+                    if path and Path(path).is_file():
+                        component["bytes"] = Path(path).stat().st_size
+                except (OSError, TypeError, AttributeError):
+                    pass
+                components.append(component)
+        if variant == "full" and not any(item["filename"] == handler.VAE_FILENAME for item in components):
+            components.append({"filename": handler.VAE_FILENAME})
+        return {
+            "method": "flashvsr", "profile_id": profile_id,
+            "spatial_upsampling": spatial_upsampling,
+            "model_id": profile["model_id"], "transformer_quantization": "bf16",
+            "model_variant": str(variant), "sparse_backend": str(config.get("backend") or "auto"),
+            "topk_ratio": float(config.get("topk_ratio") or 0.0),
+            "cache_windows": int(config.get("cache_windows", 3)) if profile["model_id"] == "plus_turbo" else None,
+            "native_scale": 2, "passes": 1, "seed": 0,
+            "verification": "configuration_only", "checkpoint_components": components,
+        }
+
+    def _flashvsr_image_processing_runtime(self, profile_id: str = FLASHVSR_X2_STANDARD_PROFILE_ID) -> Optional[dict[str, Any]]:
+        """Resolve a profile without loading weights or changing operator settings."""
+        try:
+            return self._flashvsr_handler_diagnostics(self._flashvsr_profile_handler(profile_id), profile_id)
         except Exception as exc:
             self._log(f"FlashVSR image processing runtime probe failed: {type(exc).__name__}: {exc}", force=True)
             return None
 
     def _flashvsr_image_processing_capability(self) -> Optional[dict[str, Any]]:
-        runtime = self._flashvsr_image_processing_runtime()
-        if runtime is None:
+        runtimes = {profile_id: runtime for profile_id in FLASHVSR_IMAGE_PROFILES
+                    if (runtime := self._flashvsr_image_processing_runtime(profile_id)) is not None}
+        if not runtimes:
             self._log(
                 "FlashVSR Crop & Upscale detail restoration capability is unavailable; "
                 "enable FlashVSR and its required WanGP dependencies in Configuration > Extensions.",
@@ -2718,7 +2815,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "output_mime_types": ["image/png"],
             "operation_features": {
                 RESTORE_CROP_UPSCALE_DETAIL_OPERATION: [
-                    FLASHVSR_X2_STANDARD_PROFILE_ID,
+                    *runtimes,
                     "rgb_png_only",
                     "exact_final_dimensions",
                     "deterministic_lanczos_post_resize",
@@ -2736,7 +2833,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             },
             "limits": {
                 "crop_upscale_detail_restoration": {
-                    "profile_ids": [FLASHVSR_X2_STANDARD_PROFILE_ID],
+                    "profile_ids": list(runtimes),
+                    "profiles": [dict(FLASHVSR_IMAGE_PROFILES[key]) for key in runtimes],
                     "input_color_modes": ["rgb"],
                     "output_color_modes": ["rgb"],
                     "delivery_resolutions": delivery_resolutions,
@@ -2745,7 +2843,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "post_resize_method": "lanczos",
                 },
             },
-            "flashvsr_runtime": runtime,
+            "flashvsr_runtime": runtimes.get(FLASHVSR_X2_STANDARD_PROFILE_ID) or next(iter(runtimes.values())),
         }
 
     def _ltx25_alpha_matte_processing_capability(self) -> Optional[dict[str, Any]]:
@@ -6752,7 +6850,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"{processing_operation or 'missing'}"
             )
         profile_id = str(processing.get("profile_id") or "").strip()
-        if profile_id != FLASHVSR_X2_STANDARD_PROFILE_ID:
+        if profile_id not in FLASHVSR_IMAGE_PROFILES:
             raise ValueError(f"Unsupported restore_crop_upscale_detail profile_id: {profile_id or 'missing'}")
         if str(processing.get("method") or "").strip().lower() != "flashvsr":
             raise ValueError("restore_crop_upscale_detail requires method='flashvsr'.")
@@ -6845,6 +6943,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         capability = self._flashvsr_image_processing_capability()
         if capability is None:
             raise ValueError("FlashVSR Crop & Upscale detail restoration is unavailable on this worker.")
+        if profile_id not in capability["limits"]["crop_upscale_detail_restoration"]["profile_ids"]:
+            raise ValueError(f"FlashVSR profile is unavailable on this worker: {profile_id}")
         requested_resolution = f"{output_width}x{output_height}"
         self._log(
             "Validated claimed FlashVSR Crop & Upscale detail restoration job; "
@@ -6873,7 +6973,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_processing": {
                 "operation_type": RESTORE_CROP_UPSCALE_DETAIL_OPERATION,
                 "contract_version": RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION,
-                "profile_id": FLASHVSR_X2_STANDARD_PROFILE_ID,
+                "profile_id": profile_id,
                 "method": "flashvsr",
                 "intermediate_scale": 2,
                 "post_resize": {
@@ -11343,7 +11443,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return None
 
     def _flashvsr_image_candidate_incompatibility_reason(self, candidate: dict[str, Any]) -> Optional[str]:
-        if self._flashvsr_image_processing_capability() is None:
+        capability = self._flashvsr_image_processing_capability()
+        if capability is None:
             return "FlashVSR Crop & Upscale detail restoration is unavailable on this worker"
         summary = candidate.get("summary") or {}
         if not isinstance(summary, dict):
@@ -11364,7 +11465,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if operation_type != RESTORE_CROP_UPSCALE_DETAIL_OPERATION:
             return f"unsupported operation_type: {operation_type}"
         profile_id = str(summary.get("profile_id") or "").strip()
-        if profile_id != FLASHVSR_X2_STANDARD_PROFILE_ID:
+        if profile_id not in capability["limits"]["crop_upscale_detail_restoration"]["profile_ids"]:
             return f"unsupported profile_id: {profile_id or 'missing'}"
         source_image_count = self._coerce_int(summary.get("source_image_count"), 0, 0, 10)
         if source_image_count != 1:
@@ -11850,6 +11951,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                 )
                                 cancel_message = "Storyboard FFmpeg Processing was cancelled."
                             elif processor_id == FLASHVSR_IMAGE_PROCESSOR_ID:
+                                cancel_message = "FlashVSR Crop & Upscale detail restoration was cancelled."
                                 output_path, processing_metadata = self._run_flashvsr_image_processing_job(
                                     connection,
                                     job_id,
@@ -11858,7 +11960,6 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                                     temp_dir,
                                     process_handle,
                                 )
-                                cancel_message = "FlashVSR Crop & Upscale detail restoration was cancelled."
                             elif processor_id == SAM_SEED_MASK_PROCESSOR_ID:
                                 output_path, processing_metadata = self._run_sam_click_seed_mask_processing_job(
                                     connection,
@@ -13053,6 +13154,89 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "final_sha256": self._sha256_file(output_path),
         }
 
+    @contextmanager
+    def _flashvsr_image_execution(self, api_session, native_settings: dict[str, Any], diagnostics: dict[str, Any]):
+        """Route only this job/thread to a private handler, never override server_config."""
+        module = api_session._ensure_runtime().module
+        from postprocessing import spatial_upsamplers as upsampler_api
+
+        handler = self._flashvsr_profile_handler(diagnostics["profile_id"])
+        spatial_upsampling = self._flashvsr_profile_upsampling(handler, diagnostics["profile_id"])
+        if native_settings.get("spatial_upsampling") != spatial_upsampling:
+            raise ValueError("FlashVSR submission method does not match its selected profile.")
+        original_find = upsampler_api.find_postprocessing_upsampler
+        original_generate = module.generate_media
+        signature = inspect.signature(original_generate)
+        local = threading.local()
+        original_load = handler.load_upsampler
+
+        @wraps(original_load)
+        def load_and_verify(*args, **kwargs):
+            original_load(*args, **kwargs)
+            from postprocessing.flashvsr import runtime as native_runtime
+
+            state = native_runtime._RUNTIME
+            expected_variant = handler.settings()[1]
+            if getattr(state, "dit", None) is None or getattr(state, "variant", None) != expected_variant:
+                raise ValueError("FlashVSR loaded runtime does not match the requested decoder.")
+            modern = isinstance(getattr(handler, "_MODEL_FILE_STEMS", None), dict)
+            if modern:
+                expected_path = handler.paths(expected_variant).transformer
+                actual_path = getattr(state, "transformer_path", None)
+                if (getattr(state, "model", None) != diagnostics["model_id"] or not actual_path
+                        or Path(actual_path).resolve() != Path(expected_path).resolve()):
+                    raise ValueError("FlashVSR loaded model/precision differs from the requested profile.")
+            diagnostics.update(self._flashvsr_handler_diagnostics(handler, diagnostics["profile_id"]))
+            diagnostics.update(
+                verification="loaded_model_verified" if modern else "legacy_native_load_observed",
+                memory_profile=str(getattr(state, "profile", "unknown")),
+            )
+            torch_module = getattr(module, "torch", None)
+            diagnostics["torch_version"] = str(getattr(torch_module, "__version__", "unknown"))
+            diagnostics["cuda_version"] = str(getattr(getattr(torch_module, "version", None), "cuda", "unknown"))
+            try:
+                cuda = getattr(torch_module, "cuda", None)
+                if cuda is not None and cuda.is_available():
+                    diagnostics["gpu"] = str(cuda.get_device_name())
+                    diagnostics["gpu_peak_allocated_bytes"] = int(cuda.max_memory_allocated())
+            except Exception:
+                diagnostics["device_diagnostics"] = "unavailable"
+            self._log(
+                "FlashVSR native model loaded; "
+                f"profile_id={diagnostics['profile_id']} model={diagnostics['model_id']} "
+                f"precision=bf16 decoder={expected_variant} verification={diagnostics['verification']}."
+            )
+
+        @wraps(original_find)
+        def find_for_job(value):
+            if getattr(local, "active", False) and value == spatial_upsampling:
+                return handler
+            return original_find(value)
+
+        @wraps(original_generate)
+        def generate_for_job(*args, **kwargs):
+            bound = signature.bind_partial(*args, **kwargs)
+            if bound.arguments.get("client_id") != native_settings["client_id"]:
+                return original_generate(*args, **kwargs)
+            if bound.arguments.get("spatial_upsampling") != spatial_upsampling:
+                raise ValueError("FlashVSR job lost its native x2 selection before execution.")
+            local.active = True
+            try:
+                return original_generate(*args, **kwargs)
+            finally:
+                local.active = False
+
+        handler.load_upsampler = load_and_verify
+        module.generate_media = generate_for_job
+        upsampler_api.find_postprocessing_upsampler = find_for_job
+        try:
+            yield
+        finally:
+            if module.generate_media is generate_for_job:
+                module.generate_media = original_generate
+            if upsampler_api.find_postprocessing_upsampler is find_for_job:
+                upsampler_api.find_postprocessing_upsampler = original_find
+
     def _run_flashvsr_image_processing_job(
         self,
         connection: ConnectionContext,
@@ -13082,7 +13266,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "FlashVSR Crop & Upscale source dimensions must equal the requested output dimensions; "
                 f"got {source_size[0]}x{source_size[1]}, expected {target_size[0]}x{target_size[1]}."
             )
-        runtime = self._flashvsr_image_processing_runtime()
+        profile_id = processing.get("profile_id")
+        runtime = self._flashvsr_image_processing_runtime(profile_id)
         if runtime is None:
             raise ValueError("FlashVSR Crop & Upscale detail restoration is unavailable on this worker.")
         native_settings = {
@@ -13093,13 +13278,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "video_length": 1,
             "keep_frames_video_source": "1",
             "temporal_upsampling": "",
-            "spatial_upsampling": FLASHVSR_X2_SPATIAL_UPSAMPLING,
+            "spatial_upsampling": runtime["spatial_upsampling"],
             "film_grain_intensity": 0,
             "film_grain_saturation": 0.5,
             "postprocess_audio": "",
             "repeat_generation": 1,
             "batch_size": 1,
             "seed": 0,
+            "client_id": f"midom-flashvsr-{job_id}-{uuid.uuid4().hex}",
             "_api": {
                 "return_media": True,
                 "suppress_source_audio": True,
@@ -13116,22 +13302,37 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "Submitting FlashVSR Crop & Upscale detail restoration to WanGP; "
             f"job_id={job_id} input_id={source.get('input_id')} input={source_size[0]}x{source_size[1]} "
             f"native_scale=2 profile_id={processing.get('profile_id')!r} "
-            f"model_variant={runtime.get('model_variant')!r}."
+            f"model={runtime.get('model_id')!r} model_variant={runtime.get('model_variant')!r} "
+            f"spatial_upsampling={native_settings['spatial_upsampling']!r}."
         )
         callbacks = self._callbacks_for_job(connection, job_id)
         api_session = self._get_generation_session()
-        job_handle = api_session.submit_task(native_settings, callbacks=callbacks)
-        self._active_job = job_handle
-        try:
-            result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
-        finally:
-            if self._active_job is job_handle:
-                self._active_job = process_handle
+        with self._flashvsr_image_execution(api_session, native_settings, runtime):
+            job_handle = api_session.submit_task(native_settings, callbacks=callbacks)
+            self._active_job = job_handle
+            try:
+                result = self._wait_for_wangp_result(connection, job_id, job_handle, callbacks)
+            except Exception:
+                # Keep routing installed until native execution stops, including auth/lease failures.
+                try:
+                    job_handle.cancel()
+                except Exception as exc:
+                    self._log(f"FlashVSR cancellation request failed; job_id={job_id} error={exc}; waiting for native completion.", force=True)
+                try:
+                    job_handle.result()
+                except Exception:
+                    pass
+                raise
+            finally:
+                if self._active_job is job_handle:
+                    self._active_job = process_handle
         if self._cancel_requested_by_midom or process_handle.cancelled or getattr(result, "cancelled", False):
             raise RuntimeError("cancel_requested")
         if not getattr(result, "success", False):
             errors = list(getattr(result, "errors", None) or [])
             raise ValueError(str(errors[0] if errors else "WanGP FlashVSR restoration failed."))
+        if runtime.get("verification") not in {"loaded_model_verified", "legacy_native_load_observed"}:
+            raise ValueError("FlashVSR native model execution was not observed; refusing an unverified profile result.")
         generated_files = self._result_image_files(result)
         if len(generated_files) != 1:
             raise ValueError(
@@ -13162,7 +13363,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "processor_id": FLASHVSR_IMAGE_PROCESSOR_ID,
             "operation_type": RESTORE_CROP_UPSCALE_DETAIL_OPERATION,
             "contract_version": RESTORE_CROP_UPSCALE_DETAIL_CONTRACT_VERSION,
-            "profile_id": FLASHVSR_X2_STANDARD_PROFILE_ID,
+            "profile_id": profile_id,
             "method": "flashvsr",
             "input_project_derivative_id": source.get("input_id"),
             "input_sha256": source.get("sha256"),
@@ -19315,10 +19516,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 metadata["generation_elapsed_seconds"] = time.monotonic() - started
                 metadata["native_prompt_sha256"] = hashlib.sha256(settings["prompt"].encode("utf-8")).hexdigest()
                 metadata["runtime"] = {
-                    "engine": str(getattr(pipeline, "engine", "unknown")),
+                    **self._fish_audio_decoder_diagnostics(module, pipeline),
                     "expert_precision": "int4" if label.endswith("_int4") else "fp8",
                     "memory_profile": str(getattr(module, "loaded_profile", getattr(module, "profile", "unknown"))),
-                    "configured_engine": str(getattr(module, "lm_decoder_engine", "unknown")),
                     "transformer_quantization": str(getattr(module, "transformer_quantization", "unknown")),
                     "transformer_dtype": str(getattr(getattr(pipeline, "transformer", None), "_model_dtype", "unknown")),
                     "codec_dtype": str(getattr(getattr(pipeline, "vae", None), "_model_dtype", "unknown")),
@@ -19359,6 +19559,31 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         finally:
             module.generate_media = original_generate
             module.call_with_default_device = original_call
+
+    @staticmethod
+    def _fish_audio_decoder_diagnostics(module, pipeline) -> dict[str, Any]:
+        def read(owner, name):
+            try:
+                return getattr(owner, name, None)
+            except Exception:
+                return None
+
+        engine = read(pipeline, "engine")
+        configured = read(module, "lm_decoder_engine")
+        features = read(pipeline, "features")
+        result = {
+            "engine": engine[:512] if isinstance(engine, str) and engine else "unknown",
+            "configured_engine": configured[:512] if isinstance(configured, str) and configured else "unknown",
+            "decoder_diagnostics_source": "legacy_engine" if isinstance(engine, str) and engine else "unavailable",
+        }
+        for field, native in (("cuda_graphs", "graphs"), ("triton", "triton"), ("flash_attention_2", "flash")):
+            value = read(features, native)
+            result[f"decoder_{field}"] = value if type(value) is bool else None
+            reason = read(features, f"{native}_reason")
+            result[f"decoder_{field}_reason"] = reason[:512] if isinstance(reason, str) else ""
+            if type(value) is bool:
+                result["decoder_diagnostics_source"] = "pipeline_features"
+        return result
 
     @staticmethod
     def _fish_audio_runtime_details(module, model_id: str, pipeline, model_def: dict[str, Any], diagnostics: dict[str, Any]) -> None:
@@ -22236,9 +22461,6 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         file_size = path.stat().st_size
         if file_size <= 0:
             raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
-        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if mime_type not in ALLOWED_IMAGE_MIME_TYPES:
-            raise ValueError(f"Unsupported generated artifact mime type: {mime_type}")
         required_mime = str(required_mime_type or "").strip().lower()
         if required_mime and required_mime not in ALLOWED_IMAGE_MIME_TYPES:
             raise ValueError(f"Unsupported required image artifact MIME type: {required_mime}")
@@ -22251,8 +22473,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 decoded_width, decoded_height = image.size
                 decoded_format = str(image.format or "").upper()
                 decoded_color_mode = str(image.mode or "").upper()
+                image.verify()
         except Exception as exc:
             raise ValueError(f"Generated artifact could not be decoded as an image: {exc}")
+        if decoded_format not in IMAGE_ENCODING_METADATA:
+            raise ValueError(f"Unsupported generated artifact encoding: {decoded_format}")
+        mime_type = IMAGE_ENCODING_METADATA[decoded_format][0]
         source_width = int(decoded_width)
         source_height = int(decoded_height)
         source_format = decoded_format
@@ -22302,13 +22528,46 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 decoded_color_mode = str(image.mode or "").upper()
         if file_size > MAX_IMAGE_BYTES:
             raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
+        with path.open("rb") as reader:
+            data = reader.read(MAX_IMAGE_BYTES + 1)
+        file_size = len(data)
+        if not 0 < file_size <= MAX_IMAGE_BYTES:
+            raise ValueError(f"Generated artifact size is outside allowed bounds: {file_size} bytes")
+        # Validate and upload the same snapshot, not a second read of a potentially changed file.
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+                actual = (image.width, image.height, str(image.format or "").upper(), str(image.mode or "").upper())
+        except Exception as exc:
+            raise ValueError(f"Generated artifact could not be decoded as an image: {exc}") from exc
+        if actual != (decoded_width, decoded_height, decoded_format, decoded_color_mode):
+            raise ValueError("Generated artifact encoding, color mode, or dimensions changed during validation.")
+        if decoded_format not in IMAGE_ENCODING_METADATA or IMAGE_ENCODING_METADATA[decoded_format][0] != mime_type:
+            raise ValueError("Generated artifact MIME does not match its decoded encoding.")
+        if required_mime and mime_type != required_mime:
+            raise ValueError("Generated artifact does not satisfy its required image MIME type.")
+        if expected_size is not None and (decoded_width, decoded_height) != expected_size:
+            raise ValueError("Generated artifact does not satisfy its required delivery dimensions.")
+        if required_color and decoded_color_mode != required_color:
+            raise ValueError("Generated artifact does not satisfy its required image color mode.")
+        extension = IMAGE_ENCODING_METADATA[decoded_format][1]
+        if decoded_format == "JPEG" and path.suffix.lower() == ".jpeg":
+            extension = ".jpeg"
+        upload_filename = path.with_suffix(extension).name
+        if upload_filename != path.name:
+            self._log(
+                "Corrected generated image upload naming without re-encoding; "
+                f"job_id={job_id} artifact_index={artifact_index} source_filename={path.name!r} "
+                f"upload_filename={upload_filename!r} decoded_format={decoded_format!r} mime_type={mime_type}.",
+                force=True,
+            )
         alpha_validation = None
         if require_meaningful_alpha or require_atmosphere_alpha:
             if decoded_color_mode != "RGBA" or mime_type != "image/png" or decoded_format != "PNG":
                 raise ValueError(
                     "Qwen Image 2.1 alpha output must be a decoded RGBA PNG."
                 )
-            with Image.open(path) as image:
+            with Image.open(io.BytesIO(data)) as image:
                 rgba = image.convert("RGBA")
                 alpha = rgba.getchannel("A")
                 minimum_alpha, maximum_alpha = alpha.getextrema()
@@ -22408,21 +22667,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 "height": int(decoded_height),
                 "native_alpha_validation": "not_required",
             }
-        with path.open("rb") as reader:
-            data = reader.read()
         sha256 = hashlib.sha256(data).hexdigest()
         if alpha_validation is not None:
             alpha_validation["final_sha256"] = sha256
+            alpha_validation["mime_type"] = mime_type
+            alpha_validation["upload_filename"] = upload_filename
         if output_validation is not None and alpha_validation is not None:
             output_validation.append(alpha_validation)
         self._log(
             f"Uploading artifact; job_id={job_id} artifact_index={artifact_index} "
-            f"filename={path.name!r} mime_type={mime_type} decoded_format={decoded_format!r} "
+            f"filename={upload_filename!r} mime_type={mime_type} decoded_format={decoded_format!r} "
             f"color_mode={decoded_color_mode!r} dimensions={decoded_width}x{decoded_height} "
             f"bytes={file_size} sha256={sha256[:12]}..."
         )
         try:
-            with path.open("rb") as reader:
+            with io.BytesIO(data) as reader:
                 response = requests.post(
                     f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{int(job_id)}/artifacts",
                     headers=self._headers(connection),
@@ -22430,9 +22689,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         "artifact_index": str(int(artifact_index)),
                         "sha256": sha256,
                         "mime_type": mime_type,
-                        "filename": path.name,
+                        "filename": upload_filename,
                     },
-                    files={"file": (path.name, reader, mime_type)},
+                    files={"file": (upload_filename, reader, mime_type)},
                     timeout=UPLOAD_TIMEOUT_SECONDS,
                 )
         finally:

@@ -3,6 +3,7 @@ import importlib.util
 import io
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -49,13 +50,20 @@ def plugin_instance(module):
     plugin._active_job_status = {}
     plugin._active_job = None
     plugin._cancel_requested_by_midom = False
-    plugin._flashvsr_image_processing_runtime = lambda: {
+    plugin._flashvsr_image_processing_runtime = lambda profile_id=module.FLASHVSR_X2_STANDARD_PROFILE_ID: {
         "method": "flashvsr",
         "spatial_upsampling": module.FLASHVSR_X2_SPATIAL_UPSAMPLING,
         "model_variant": "Full",
         "sparse_backend": "cuda",
         "topk_ratio": 0.2,
+        "profile_id": profile_id,
+        "model_id": module.FLASHVSR_IMAGE_PROFILES[profile_id]["model_id"],
     }
+    @contextmanager
+    def execution(session, settings, diagnostics):
+        diagnostics["verification"] = "loaded_model_verified"
+        yield
+    plugin._flashvsr_image_execution = execution
     return plugin
 
 

@@ -110,6 +110,27 @@ def prepare(f, count, *, model="fish_drama3", speakers=None, contract_version="f
 
 
 @pytest.mark.parametrize("model", ["fish_drama3", "fish_drama3_int4"])
+@pytest.mark.parametrize("contract", ["fish_drama3_tts_v1", "fish_drama3_tts_v2", "fish_drama3_tts_v3"])
+def test_modern_features_reach_completion_metadata_without_changing_native_execution(native, model, contract):
+    f = native
+    del f.pipeline.engine
+    f.pipeline.features = types.SimpleNamespace(graphs=True, triton=False, flash=False,
+                                               graphs_reason="", triton_reason="disabled", flash_reason="unavailable")
+    settings, runtime, session = prepare(f, 3, model=model, contract_version=contract)
+    output = f.tmp_path / "generated.wav"
+    runtime.on_generated = lambda: output.write_bytes(wav_bytes(0.1))
+    session.files = [str(output)]
+    with f.plugin._fish_audio_execution(session, settings):
+        result = f.plugin._submit_wangp_job(session, settings, 1, None).result()
+    f.plugin._validate_fish_audio_completion(settings, [str(output)], result)
+    metadata = settings["_midom_fish_audio"]
+    assert metadata["runtime"]["decoder_diagnostics_source"] == "pipeline_features"
+    assert metadata["runtime"]["decoder_triton"] is False
+    assert metadata["finish_reason"] == "eos"
+    f.plugin._validate_fish_audio_metadata_envelope({"fish_audio": metadata})
+
+
+@pytest.mark.parametrize("model", ["fish_drama3", "fish_drama3_int4"])
 @pytest.mark.parametrize("refs", [0, 1, 2, 3])
 @pytest.mark.parametrize("contract_version", ["fish_drama3_tts_v2", "fish_drama3_tts_v3"])
 def test_reviewable_observes_real_native_return_and_flat_conditioning(native, model, refs, contract_version):

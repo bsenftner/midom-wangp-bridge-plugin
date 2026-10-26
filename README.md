@@ -14,6 +14,24 @@ Although it may be technically possible to inspect its behavior or construct req
 
 Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
 
+## Release 0.8.11
+
+- Ordinary generated-image uploads now derive MIME and the upload filename suffix from decoded PNG/JPEG/WebP bytes. Misleading supported filenames are corrected without re-encoding when no delivery normalization is needed; hashes and original files remain unchanged. Generic claims keep their existing accepted-format behavior, while explicit PNG/RGBA and typed-output requirements remain enforced. Midom's corresponding storage-side filename correction must also be deployed; historical files are not rewritten.
+- WanGP 18.80 compatibility: FlashVSR+ Turbo now submits the explicit native `flashvsrplus*2` method; v1.1 retains `flashvsr*2`. Older WanGP 18.21 uses its configuration-selected method through the same isolated handler. Candidate/claim profile IDs and the Midom contract are unchanged. Download manifests, routing, and provenance follow the selected native method; loaded-model/precision checks remain enforced.
+- WanGP 18.21 compatibility: Fish Audio now reports the executing decoder's CUDA graphs, Triton, and FlashAttention 2 feature flags and bounded unavailability reasons. Historical engine fields remain available on older runtimes. Speech recipes, contracts, acceptance policies, and speaker routing are unchanged.
+- Crop & Upscale Restore Detail now explicitly selects FlashVSR v1.1/BF16 for `flashvsr_x2_standard_v1`, preserving the configured decoder. It no longer inherits WanGP's new FlashVSR+ default.
+- Adds `flashvsr_plus_turbo_x2_standard_v1` as a separate Restore Detail profile: FlashVSR+ Turbo/BF16, Full Wan VAE decoder, native Auto Top-K, and three cache windows. Both profiles use one native x2 pass and Lanczos return to the same output canvas.
+- FlashVSR jobs use an isolated handler/configuration, with job/client/thread-scoped routing and loaded-model checks. They do not change or save the operator's global FlashVSR settings. Refresh worker capabilities after restarting WanGP; Midom must offer the new profile explicitly rather than silently switch existing jobs.
+- GPU quality/performance comparison and end-to-end workstation verification of these changes remain outstanding; automated compatibility tests do not establish restoration quality or speed.
+- Latest local verification against WanGP 18.80 (`c4d3efce`): 1,248 tests passed, four Windows-only tests skipped on Linux, including 40 new image-upload encoding cases. The FlashVSR correction also passed all 34 compatibility tests against archived WanGP 18.21 native sources. Native-source tests stub model inference; these are not GPU qualification results.
+
+After installing 0.8.11, preserve the workstation's `worker_config.json`, restart
+WanGP, click **Update Capabilities**, and reload Midom's Project page. Coordinate
+deployment of Midom's storage-side image naming fix: this plugin cannot prevent
+an older server from replacing a correct upload name with a misleading target
+suffix. No new Midom claim fields or changed profile IDs are required for the
+18.80 compatibility correction.
+
 ## Release 0.8.10
 
 - Adds Fish Audio Drama 3 Default/FP8 Experts and INT4 Experts: new voices, one-reference cloning, and dialogue with up to three cloned references and 16 scripted speaker labels. Exact reference transcripts are required; the Bridge does not transcribe references or rewrite approved scripts.
@@ -26,8 +44,8 @@ Midom, this Bridge plugin, its job and capability contracts, and WanGP itself ev
 
 Restart WanGP after updating, click **Update Capabilities**, and reload Midom's
 Project page. Keep Midom and WanGP current; this plugin remains a paired Midom
-worker, not a supported standalone API. Current Fish integration was developed
-against WanGP v18.17; release source-level tests use WanGP v18.19 (`fdc63bdf`).
+worker, not a supported standalone API. Fish integration was initially developed
+against WanGP v18.17; 0.8.10 source-level tests used WanGP v18.19 (`fdc63bdf`).
 It was also exercised through Midom on the GPU workstation. Listening tests produced usable three-speaker dialogue with
 both FP8 and INT4, but do not establish reliable voice cloning for every input.
 
@@ -609,9 +627,10 @@ Source video frame extraction support includes:
 - Provides the optional final Restore Detail step for Midom Crop & Upscale Image.
 - Accepts exactly one already-cropped, RGB PNG `source_image` with role `crop_upscale_derivative` at `768x768`, `1024x1024`, `1280x720`, or `720x1280`.
 - Runs WanGP FlashVSR through its native x2 postprocessor, then deterministically Lanczos-resizes the result back to the same selected Crop & Upscale canvas.
+- Offers explicit v1.1 and, on compatible WanGP installations, Plus Turbo profiles; model families are never silently substituted. The existing profile remains the default selection for Midom.
 - Returns exactly one typed RGB PNG: artifact index `0`, role `restored_crop_image`, MIME type `image/png`.
 - Does not reconstruct or reinsert a region into the original image, accept alpha/masks/references/prompts, or promise source-pixel preservation. It creates a new generative detail-restoration derivative at the selected crop canvas size.
-- Reports source and final hashes, native intermediate dimensions, active FlashVSR runtime variant, and Lanczos post-resize provenance.
+- Reports source and final hashes, native intermediate dimensions, selected profile/model/precision, decoder/backend settings, loaded-model verification, available checkpoint/runtime diagnostics, and Lanczos post-resize provenance.
 
 ## WanGP Asset Requirements
 

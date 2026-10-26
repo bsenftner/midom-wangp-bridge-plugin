@@ -28,6 +28,38 @@ def load_plugin():
     return module
 
 
+@pytest.mark.parametrize("flags", [(True, True, True), (True, False, False), (False, False, False)])
+def test_modern_decoder_diagnostics_preserve_feature_booleans(flags):
+    module = load_plugin()
+    features = types.SimpleNamespace(graphs=flags[0], triton=flags[1], flash=flags[2],
+                                    graphs_reason="", triton_reason="disabled", flash_reason="not installed")
+    diagnostics = module.AwsWorkerBridgePlugin._fish_audio_decoder_diagnostics(
+        types.SimpleNamespace(), types.SimpleNamespace(features=features))
+    assert diagnostics["decoder_diagnostics_source"] == "pipeline_features"
+    assert diagnostics["engine"] == diagnostics["configured_engine"] == "unknown"
+    assert [diagnostics[key] for key in ("decoder_cuda_graphs", "decoder_triton", "decoder_flash_attention_2")] == list(flags)
+    assert diagnostics["decoder_triton_reason"] == "disabled"
+
+
+def test_decoder_diagnostics_preserve_legacy_and_bound_uncertainty():
+    module = load_plugin()
+    method = module.AwsWorkerBridgePlugin._fish_audio_decoder_diagnostics
+    old = method(types.SimpleNamespace(lm_decoder_engine="cg"), types.SimpleNamespace(engine="vllm"))
+    assert old["engine"] == "vllm" and old["configured_engine"] == "cg"
+    assert old["decoder_diagnostics_source"] == "legacy_engine"
+    assert old["decoder_cuda_graphs"] is None
+    new = method(None, types.SimpleNamespace(features=types.SimpleNamespace(
+        graphs=1, triton="false", flash=False, flash_reason="x" * 10000)))
+    assert new["decoder_cuda_graphs"] is None and new["decoder_triton"] is None
+    assert new["decoder_flash_attention_2"] is False
+    assert len(new["decoder_flash_attention_2_reason"]) == 512
+    class Unsupported:
+        @property
+        def features(self):
+            raise RuntimeError("unavailable diagnostic")
+    assert method(None, Unsupported())["decoder_diagnostics_source"] == "unavailable"
+
+
 @pytest.fixture
 def bridge(monkeypatch):
     module = load_plugin()
