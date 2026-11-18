@@ -1,0 +1,24 @@
+{
+  "fixture_set_id": "media_assembly_agent_overlays_v1_fixtures_v1",
+  "status": "contract_only_ready_to_mirror_not_implemented",
+  "files": {
+    "capabilities.json": "759a7be4d3d5d8f3707958ca7b506064db3bc85eebcc3bbc03652ab8d39efdf9",
+    "jobs.json": "31511045f05a3a5847aeb8039454945fc6c066ee6b9fa5795f364d59b6cfcbb8",
+    "geometry.json": "2407328e5f706605936160a939037bfe03066dee9a160de20e5ed71154adc683",
+    "rejections.json": "119c5fdd8206ae78719365f620bc6f343f0d1cb823bf21db1afc7f275e6d6028",
+    "recovery.json": "acc6474f3543ce22a934e67a38fce40170579db2475c9073eb142dfa50c8a98b"
+  },
+  "runtime_implementation": false,
+  "runtime_advertisement": false,
+  "joint_worker_verification": false,
+  "capacity_measurements": false,
+  "worker_assisted_recovery_payload": "not_defined_separate_freeze_required",
+  "reconciliation_lookup_endpoint": "not_defined_Midom_owned",
+  "runtime_safeguards_before_advertisement": [
+    "bounded_decode_and_processing_time_with_verified_process_exit",
+    "scratch_space_and_decoded_memory_guards",
+    "single_active_local_job_and_no_new_batch_interface",
+    "real_PNG_and_FFmpeg_output_tests_with_cancellation_and_byte_limits",
+    "authorized_reconciliation_integration_tests_no_automatic_rerender"
+  ]
+}

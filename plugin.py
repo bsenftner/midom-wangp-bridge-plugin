@@ -2,6 +2,7 @@ import hashlib
 import array
 import copy
 import inspect
+import importlib.util
 import io
 import ipaddress
 import json
@@ -10,12 +11,15 @@ import mimetypes
 import os
 import queue
 import re
+import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
+import wave
 from collections import deque
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -35,8 +39,50 @@ from shared.utils.plugins import WAN2GPPlugin
 
 PLUGIN_ID = "Midom-at-AWS-worker-bridge"
 PLUGIN_NAME = "Midom Remote Worker"
+
+
+def _read_plugin_version(metadata_path: Optional[Path] = None) -> tuple[str, str]:
+    path = metadata_path if metadata_path is not None else Path(__file__).resolve().with_name("plugin_info.json")
+    try:
+        with path.open("r", encoding="utf-8") as reader:
+            metadata = json.load(reader)
+        version = metadata.get("version") if isinstance(metadata, dict) else None
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", version):
+            return "unavailable", "Plugin version unavailable: plugin_info.json has no valid version."
+        return version, ""
+    except (OSError, ValueError):
+        return "unavailable", "Plugin version unavailable: plugin_info.json could not be read."
+
+
+# Capture the loaded build, not metadata copied over an already-running plugin.
+PLUGIN_VERSION, PLUGIN_VERSION_WARNING = _read_plugin_version()
 CONFIG_FILENAME = "worker_config.json"
 LOCAL_WANGP_BUSY_MESSAGE = "Local WanGP is busy with another UI or Deepy generation; queued Midom jobs will wait."
+
+
+def _overlay_module():
+    path = Path(__file__).resolve().with_name("overlay_processing.py")
+    name = "midom_bounded_overlays_" + hashlib.sha256(str(path).encode()).hexdigest()[:16]
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[name] = module
+    return sys.modules[name]
+
+
+def _bounded_overlay_operation(payload):
+    # Legacy jobs must still work if an installation is missing the new helper.
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    processing = payload.get("processing") or summary.get("processing") or {}
+    values = [payload.get("operation_type"), summary.get("operation_type")]
+    if isinstance(processing, dict):
+        values += [processing.get("operation_type"), processing.get("operation")]
+    if "overlay_png_on_image" in values or "image_overlay_processor" in (payload.get("model_id"), payload.get("processor_id")):
+        return "overlay_png_on_image"
+    return "overlay_png_on_video_positioned" if "overlay_png_on_video_positioned" in values else None
+
+
 MAX_PROMPT_CHARS = 4000
 MAX_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_AUDIO_BYTES = 52_428_800
@@ -183,7 +229,7 @@ REQUEST_TIMEOUT_SECONDS = 30
 PAIRING_TIMEOUT_SECONDS = 15
 UPLOAD_TIMEOUT_SECONDS = 120
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
-USER_AGENT = f"{PLUGIN_ID}/0.1.0"
+USER_AGENT = f"{PLUGIN_ID}/{PLUGIN_VERSION}"
 VERBOSE_LOGGING = True
 UI_LOG_LINES = 300
 HEARTBEAT_LOG_SECONDS = 60
@@ -440,7 +486,13 @@ SVI_SPEED_PROFILE_ID = "enhanced_lightning_v2_8_step"
 LTX23_VIDEO_MODEL_ID = "ltx2_22B_1_1"
 LTX25_DISTILLED_VIDEO_MODEL_ID = "ltx2_25_22B_distilled"
 LTX_VIDEO_MODEL_IDS = {LTX23_VIDEO_MODEL_ID, LTX25_DISTILLED_VIDEO_MODEL_ID}
-ALLOWED_VIDEO_MODEL_TYPES = {"longcat_avatar_v1_5", *LTX_VIDEO_MODEL_IDS, SVI_VIDEO_MODEL_ID}
+H3_VIDEO_MODEL_ID = "minimax_h3_fl2va_hyperflow"
+H3_VIDEO_CONTRACT = "h3_fl2va_soundtrack_v1"
+H3_SPEED_PROFILE = "hyperflow_6_step"
+H3_DURATION_MODE = "fit_to_driving_audio_max_15"
+H3_MAX_PROMPT_CHARS = 3000
+H3_RENDER_RESOLUTIONS = {"1280x720": "1280x736", "720x1280": "736x1280"}
+ALLOWED_VIDEO_MODEL_TYPES = {"longcat_avatar_v1_5", *LTX_VIDEO_MODEL_IDS, SVI_VIDEO_MODEL_ID, H3_VIDEO_MODEL_ID}
 ALLOWED_CONTROL_VIDEO_MIME_TYPES = {"video/mp4"}
 ALLOWED_VIDEO_INPUT_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES | ALLOWED_AUDIO_INPUT_MIME_TYPES | ALLOWED_CONTROL_VIDEO_MIME_TYPES
 ALLOWED_VIDEO_OUTPUT_MIME_TYPES = {"video/mp4"}
@@ -1138,7 +1190,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = PLUGIN_NAME
-        self.version = "0.8.3"
+        self.version = PLUGIN_VERSION
         self.description = "Connects this local WanGP workstation to Midom as a scoped project media worker."
         self._worker_thread = None
         self._stop_event = threading.Event()
@@ -1150,6 +1202,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._last_idle_poll_log_at = 0.0
         self._last_local_wangp_busy_log_at = 0.0
         self._last_heartbeat_at = 0.0
+        self._worker_started_at = None
+        self._connection_health_lock = threading.Lock()
+        self._connection_health = {}
         self._last_candidate_poll_at = 0.0
         self._idle_since_at = None
         self._last_idle_mode = None
@@ -1169,6 +1224,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._progress_budgets = {}
         self._job_progress = None
         self._closed_progress_job = None
+        if PLUGIN_VERSION_WARNING:
+            self._log(PLUGIN_VERSION_WARNING, force=True)
 
     def _log(self, message: str, *, force: bool = False) -> None:
         if not VERBOSE_LOGGING and not force:
@@ -1328,6 +1385,12 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             with self._progress_lock:
                 self._progress_budgets = {
                     key: value for key, value in self._progress_budgets.items() if key[0] in connection_ids
+                }
+        if hasattr(self, "_connection_health_lock"):
+            connection_ids = {str(record.get("connection_id")) for record in connections}
+            with self._connection_health_lock:
+                self._connection_health = {
+                    key: value for key, value in self._connection_health.items() if key in connection_ids
                 }
         return config
 
@@ -2285,6 +2348,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         })
         models.append(self._ltx_video_capability(LTX23_VIDEO_MODEL_ID, "LTX-2 2.3 Dev 1.1 22B"))
         models.append(self._ltx_video_capability(LTX25_DISTILLED_VIDEO_MODEL_ID, "LTX-2 2.5 Distilled 22B"))
+        models.append(self._h3_video_capability())
         models.append({
             "model_id": SVI_VIDEO_MODEL_ID,
             "family": "wan2_2",
@@ -2335,6 +2399,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             },
         })
         media_processing = []
+        image_overlay_capability = self._bounded_overlay_capability("overlay_png_on_image")
+        if image_overlay_capability:
+            media_processing.append(image_overlay_capability)
         event_capability = self._event_video_processing_capability()
         if event_capability:
             media_processing.append(event_capability)
@@ -2419,7 +2486,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         source_mime_types = ["video/mp4", "video/webm"]
         if probe.get("quicktime_demux_available"):
             source_mime_types.append("video/quicktime")
-        return {
+        result = {
             "family": "media_processing",
             "media_type": "video",
             "processing_task": STORYBOARD_FFMPEG_PROCESSING_TASK,
@@ -2687,6 +2754,44 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 },
             },
         }
+        positioned = self._bounded_overlay_capability("overlay_png_on_video_positioned")
+        if positioned:
+            for key in ("operation_types", "supported_operations"):
+                result[key] = sorted(set(result[key] + positioned[key]))
+            for key in ("contracts", "operation_features", "limits"):
+                result.setdefault(key, {}).update(positioned[key])
+            result["positioned_overlay_resource_safeguards"] = positioned["resource_safeguards"]
+            result["aac_encoder_available"] = True
+        return result
+
+    def _bounded_overlay_capability(self, operation):
+        try:
+            helper = _overlay_module()
+            video = operation == helper.VIDEO_OPERATION
+            probe = helper.dependency_probe(self._ffmpeg_binary() if video else None, self._ffprobe_binary() if video else None)
+            if not probe.get("memory_guard") or "image/png" not in probe.get("image_mime_types", []):
+                return None
+            if video and not probe.get("video_available"):
+                return None
+            result = helper.capability(operation, probe["image_mime_types"])
+            if video:
+                result.update(ffmpeg_available=True, ffprobe_available=True, h264_encoder="libx264", aac_encoder_available=True)
+            return result
+        except Exception as exc:
+            self._log(f"Bounded overlay capability unavailable; operation={operation} diagnostic={type(exc).__name__}.")
+            return None
+
+    def _validate_bounded_overlay_job(self, job, connection):
+        helper = _overlay_module()
+        operation = helper.identify(job)
+        capability = self._bounded_overlay_capability(operation)
+        helper.require(capability is not None, "Requested bounded overlay operation is unavailable")
+        recipe = helper.validate_claim(job, capability["limits"][operation])
+        selected = job.get("_midom_overlay_candidate")
+        if selected is not None:
+            helper.match_candidate_claim(selected, job, capability["limits"][operation])
+        return {"_midom_media_type": "media_processing", "_midom_processor_id": job["processor_id"],
+            "_midom_operation_type": operation, "_midom_output_count": 1, "_midom_overlay_recipe": recipe}
 
     def _flashvsr_profile_handler(self, profile_id: str):
         """Make an isolated native handler; polling must not normalize the global config."""
@@ -3148,7 +3253,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def _seedvc_speech_available(self) -> bool:
         try:
             from postprocessing import audio_processors as audio_processor_api
-            from postprocessing.seedvc.wgp_bridge import SeedVCBridge
+            from postprocessing.seedvc_processor.bridge import SeedVCBridge
 
             handler = audio_processor_api.find_processor(SEEDVC_METHOD_ONE_SPEAKER)
             if handler is None:
@@ -3162,7 +3267,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 self._log("SeedVC capability withheld; SeedVC handler has no server_config.")
                 return False
             config = audio_processor_api.read_config_section(server_config, handler)
-            mode = int(config.get("mode") or SeedVCBridge.MODE_OFF)
+            mode = int(config.get("mode") or 0)
             if mode != SeedVCBridge.MODE_V1:
                 self._log(f"SeedVC capability withheld; configured SeedVC mode is not speech v1. mode={mode}.")
                 return False
@@ -3339,6 +3444,47 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "unavailable_reason": None,
             "lora_relative_path": relative_path,
             "lora_sha256": actual_sha256,
+        }
+
+    def _h3_video_capability(self) -> dict[str, Any]:
+        return {
+            "model_id": H3_VIDEO_MODEL_ID,
+            "family": "minimax_h3", "media_type": "video",
+            "display_name": "MiniMax H3 FL2VA HyperFlow Flash 14B",
+            "supported": True, "detected": True,
+            "capabilities": {
+                "audio_conditioned_video": True, "audio_guided_video": True,
+                "driving_audio_guided": True, "prompt_generated_audio": False,
+                "end_image": True, "ending_image_target": True,
+                "control_video": False, "control_video_audio_guided": False,
+                "reference_voice_video": False, "image_reference": False,
+                "multi_output": False,
+            },
+            "limits": {
+                "video_contract_version": H3_VIDEO_CONTRACT,
+                "video_tasks": ["audio_conditioned_video"],
+                "audio_video_modes": ["driving_audio_guided"],
+                "min_duration_seconds": 5, "max_duration_seconds": 15,
+                "max_outputs": 1, "max_artifact_bytes": MAX_VIDEO_BYTES,
+                "max_prompt_chars": H3_MAX_PROMPT_CHARS,
+                "resolutions": list(H3_RENDER_RESOLUTIONS),
+                "fps": 24, "frame_grid": {"offset": 5, "step": 17},
+                "input_mime_types": sorted(ALLOWED_IMAGE_MIME_TYPES | ALLOWED_AUDIO_INPUT_MIME_TYPES),
+                "output_mime_types": ["video/mp4"],
+                "required_output_roles": ["video"],
+                "required_input_kinds": ["start_image", "driving_audio"],
+                "optional_input_kinds": ["end_image"], "max_end_images": 1,
+                "duration_modes": [H3_DURATION_MODE], "default_duration_mode": H3_DURATION_MODE,
+                "prompt_modes": ["plain"], "prompt_enhancement_by_worker": False,
+                "soundtrack_policy": "supplied_audio_remux_v1",
+                "duration_policy": "render_grid_ceil_trim_video_to_audio_v1",
+                "delivery_adapter": "overscan_center_crop_32_v1",
+                "lip_sync_verification": "human_review_required",
+                "speed_profiles": [{"profile_id": H3_SPEED_PROFILE, "display_name": "HyperFlow 6 Steps",
+                                    "steps": 6, "available": True, "default": True}],
+            },
+            "video_sync_profiles": [{"profile_id": "standard", "display_name": "Standard",
+                                     "available": True, "default": True}],
         }
 
     def _ltx_video_capability(self, model_id: str, display_name: str) -> dict[str, Any]:
@@ -3681,6 +3827,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             raise ValueError("Job payload must be a JSON object.")
         job_id = self._coerce_job_id(job)
         self._validate_job_scope(job, config)
+        if _bounded_overlay_operation(job):
+            return self._validate_bounded_overlay_job(job, config)
         if self._is_sam_click_seed_mask_processing_job(job):
             return self._validate_sam_click_seed_mask_processing_job(job, job_id)
         if self._is_matanyone_v2_alpha_matte_processing_job(job):
@@ -8277,6 +8425,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         model_type = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
         if model_type not in ALLOWED_VIDEO_MODEL_TYPES:
             raise ValueError(f"Unsupported video model_type: {model_type}")
+        if model_type == H3_VIDEO_MODEL_ID:
+            return self._validate_h3_video_job(job, job_id)
         if model_type in LTX_VIDEO_MODEL_IDS:
             return self._validate_ltx_video_job(job, job_id, model_type)
         if model_type == SVI_VIDEO_MODEL_ID:
@@ -8488,6 +8638,123 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"prompt_mode={prompt_mode!r} prompt_chars={len(prompt)} "
             f"start_image_count={start_image_count} end_image_count={end_image_count}."
         )
+        return settings
+
+    @staticmethod
+    def _h3_selection_error(selection: dict[str, Any]) -> Optional[str]:
+        expected = {
+            "video_contract_version": H3_VIDEO_CONTRACT,
+            "video_task": "audio_conditioned_video",
+            "audio_video_mode": "driving_audio_guided",
+            "speed_profile_id": H3_SPEED_PROFILE,
+            "duration_mode": H3_DURATION_MODE,
+            "prompt_mode": "plain",
+        }
+        for key, value in expected.items():
+            if selection.get(key) != value:
+                return f"H3 unsupported {key}: {selection.get(key)!r}; expected {value!r}"
+        if selection.get("video_sync_profile_id", "standard") != "standard":
+            return "H3 supports only standard video_sync_profile_id"
+        if selection.get("prompt_enhancement_by_worker", False) is not False:
+            return "H3 does not support worker prompt enhancement"
+        return None
+
+    def _validate_h3_video_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
+        generation, output, inputs = job.get("generation"), job.get("output"), job.get("inputs")
+        if not isinstance(generation, dict) or not isinstance(output, dict) or not isinstance(inputs, list):
+            raise ValueError("H3 requires generation/output objects and an inputs array.")
+        error = self._h3_selection_error(generation)
+        if error:
+            raise ValueError(error)
+        allowed_fields = {"video_contract_version", "video_task", "audio_video_mode", "speed_profile_id",
+                          "duration_mode", "duration_seconds", "prompt_mode", "video_sync_profile_id",
+                          "prompt_enhancement_by_worker", "seed", "options"}
+        if set(generation) - allowed_fields:
+            raise ValueError("H3 does not accept extra generation settings.")
+        options = generation.get("options", {})
+        if not isinstance(options, dict) or set(options) - {"multi_prompts_gen_type"} or options.get("multi_prompts_gen_type", "FG") != "FG":
+            raise ValueError("H3 accepts only FG prompt options.")
+        if type(output.get("count")) is not int or output["count"] != 1 or output.get("format") != "mp4":
+            raise ValueError("H3 requires exactly one MP4 output.")
+        if output.get("mime_type", "video/mp4") != "video/mp4":
+            raise ValueError("H3 output MIME must be video/mp4.")
+        artifacts = output.get("artifacts")
+        if artifacts is not None and (
+            not isinstance(artifacts, list) or len(artifacts) != 1 or not isinstance(artifacts[0], dict)
+            or artifacts[0].get("artifact_index") != 0 or artifacts[0].get("role") != "video"
+            or artifacts[0].get("mime_type") != "video/mp4"
+            or artifacts[0].get("required", True) is not True
+        ):
+            raise ValueError("H3 supports only typed artifact index 0, role video, video/mp4.")
+        if output.get("color_mode", "rgb") != "rgb":
+            raise ValueError("H3 supports RGB video only.")
+        if type(output.get("width")) is not int or type(output.get("height")) is not int:
+            raise ValueError("H3 requires explicit integer output width and height.")
+        resolution = f"{output['width']}x{output['height']}"
+        if resolution not in H3_RENDER_RESOLUTIONS:
+            raise ValueError(f"Unsupported H3 delivery resolution: {resolution}")
+        if output.get("resolution", resolution) != resolution:
+            raise ValueError("H3 output resolution declarations disagree.")
+        duration = generation.get("duration_seconds", 15)
+        if type(duration) is not int or not 5 <= duration <= 15:
+            raise ValueError("H3 duration_seconds ceiling must be an integer from 5 through 15.")
+        maximum = output.get("max_duration_seconds", duration)
+        if isinstance(maximum, bool) or not isinstance(maximum, (int, float)) or not math.isfinite(maximum) or not 5 <= maximum <= 15:
+            raise ValueError("H3 output.max_duration_seconds must be within 5 through 15 when provided.")
+        counts = {"start_image": 0, "end_image": 0, "driving_audio": 0}
+        for item in inputs:
+            if not isinstance(item, dict) or item.get("kind") not in counts:
+                raise ValueError("H3 accepts only start_image, driving_audio and optional end_image inputs.")
+            kind = item["kind"]
+            if item.get("role", kind) != kind:
+                raise ValueError(f"H3 {kind} input role must match its kind.")
+            counts[kind] += 1
+        if counts["start_image"] != 1 or counts["driving_audio"] != 1 or counts["end_image"] > 1:
+            raise ValueError("H3 requires one start_image, one driving_audio, and at most one end_image.")
+        prompt = job.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > H3_MAX_PROMPT_CHARS:
+            raise ValueError("H3 requires a nonempty prompt within the advertised character limit.")
+        if re.search(r"\[\s*/", prompt):
+            raise ValueError("H3 plain prompts must not contain WanGP window commands.")
+        expanded_prompt = (
+            "integrated_multimodal_description: [Shot 1] " + prompt.strip()
+            + " The visible speaker is speaking with natural lip movements synchronized."
+            " Keep the speaking performance clear and gestures restrained.\n"
+            "overall_soundscape: N/A\nnon_diegetic_music: N/A"
+        )
+        settings = {
+            "model_type": H3_VIDEO_MODEL_ID, "prompt": expanded_prompt,
+            "client_id": f"midom-h3-{job_id}-{uuid.uuid4().hex}",
+            "negative_prompt": "", "prompt_enhancer": "",
+            "resolution": H3_RENDER_RESOLUTIONS[resolution],
+            "image_mode": 0, "image_prompt_type": "SE" if counts["end_image"] else "S",
+            "video_prompt_type": "", "audio_prompt_type": "AS",
+            "num_inference_steps": 6, "guidance_scale": 1.0, "guidance_phases": 1,
+            "flow_shift": 12.0, "sample_solver": "euler", "custom_sigmas": "",
+            "skip_steps_cache_type": "", "activated_loras": [], "loras_multipliers": "",
+            "custom_settings": {"audio_refinement": "none"},
+            "duration_seconds": duration, "video_length": 362,
+            "sliding_window_size": 362, "sliding_window_overlap": 18,
+            "sliding_window_discard_last_frames": 0, "sliding_window_trim_first_frames": 0,
+            "repeat_generation": 1, "batch_size": 1, "multi_prompts_gen_type": "FG",
+            "multi_images_gen_type": "SI", "force_fps": "24", "input_video_strength": 1.0,
+            "audio_scale": 1.0, "audio_guidance_scale": 1.0, "remove_background_images_ref": 0,
+            "temporal_upsampling": "", "spatial_upsampling": "", "postprocess_audio": "",
+            "film_grain_intensity": 0,
+            "_api": {"return_media": True},
+            "_midom_job_id": job_id, "_midom_media_type": "video",
+            "_midom_requested_seed": self._optional_seed(generation.get("seed")),
+            "_midom_video_task": "audio_conditioned_video", "_midom_audio_video_mode": "driving_audio_guided",
+            "_midom_output_count": 1, "_midom_output_format": "mp4",
+            "_midom_speed_profile_id": H3_SPEED_PROFILE, "_midom_prompt_mode": "plain",
+            "_midom_duration_mode": H3_DURATION_MODE, "_midom_requested_resolution": resolution,
+            "_midom_max_artifact_bytes": self._coerce_int((job.get("limits") or {}).get("max_artifact_bytes"), MAX_VIDEO_BYTES, 1, MAX_VIDEO_BYTES),
+            "_midom_h3": {"contract_version": H3_VIDEO_CONTRACT, "recipe_version": "h3_fl2va_hyperflow_soundtrack_6step_v1",
+                          "generation_ceiling_seconds": min(duration, maximum), "user_prompt": prompt,
+                          "expanded_prompt": expanded_prompt, "lip_sync_verification": "not_verified"},
+        }
+        if settings["_midom_requested_seed"] is not None:
+            settings["seed"] = settings["_midom_requested_seed"]
         return settings
 
     def _validate_ltx_video_job(self, job: dict[str, Any], job_id: int, model_type: str) -> dict[str, Any]:
@@ -9202,6 +9469,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         }
         if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
             metadata["fish_audio"] = settings["_midom_fish_audio"]
+        if settings.get("model_type") == H3_VIDEO_MODEL_ID:
+            metadata["h3_video"] = settings["_midom_h3"]
         if artifact_seeds:
             metadata["artifact_seeds"] = artifact_seeds
         if str(settings.get("model_type") or "") == "qwen_image_layered_20B":
@@ -9629,41 +9898,45 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def create_ui(self, api_session):
         config = self._load_config()
 
-        gr.Markdown(f"## {PLUGIN_NAME}")
-        gr.Markdown("Pair this local WanGP worker only with Midom projects you control. HTTPS is required except explicit local development modes.")
-        gr.Markdown(
-            "Local Media Processing is reported separately from AI generation. "
-            "When local FFmpeg/FFprobe are available, this worker can also opt in to deterministic Event Video Processing jobs."
+        version_label = f"v{self.version}" if self.version != "unavailable" else "Version unavailable"
+        gr.Markdown(f"## {PLUGIN_NAME} | {version_label}")
+        worker_status = gr.Markdown(
+            value=self._worker_status_markdown(config),
+            line_breaks=True,
+            elem_id="midom-worker-status",
         )
         with gr.Row():
-            api_base_url = gr.Textbox(
-                label="API Base URL",
-                value=str(config.get("api_base_url") or ""),
-                placeholder="https://your-app.example.com",
-            )
-            machine_name = gr.Textbox(
-                label="Machine Name",
-                value=str(config.get("machine_name") or ""),
-                placeholder="Studio GPU Workstation",
-            )
-            pairing_code = gr.Textbox(label="Pairing Code", type="password")
-        allow_insecure_local_dev = gr.Checkbox(
-            label="Allow HTTP for localhost development only",
-            value=bool(config.get("allow_insecure_local_dev", False)),
-        )
-        allow_insecure_lan_dev = gr.Checkbox(
-            label="Allow HTTP for private LAN / tailnet development only",
-            value=bool(config.get("allow_insecure_lan_dev", False)),
-        )
-
-        with gr.Row():
-            pair_btn = gr.Button("Add Project Pairing", interactive=not self._worker_is_running())
-            update_capabilities_btn = gr.Button(self._capabilities_button_label())
-            refresh_log_btn = gr.Button("Refresh Log")
             worker_toggle_btn = gr.Button(
                 self._worker_toggle_label(),
-                interactive=self._worker_is_running() or self._is_paired(config),
+                interactive=self._worker_toggle_interactive(config),
+                min_width=280,
             )
+            update_capabilities_btn = gr.Button(self._capabilities_button_label(), min_width=220)
+            refresh_log_btn = gr.Button("Refresh Status & Log", min_width=180)
+
+        with gr.Accordion("Project Pairing Setup", open=not self._is_paired(config)):
+            with gr.Row():
+                api_base_url = gr.Textbox(
+                    label="API Base URL",
+                    value=str(config.get("api_base_url") or ""),
+                    placeholder="https://your-app.example.com",
+                )
+                machine_name = gr.Textbox(
+                    label="Machine Name",
+                    value=str(config.get("machine_name") or ""),
+                    placeholder="Studio GPU Workstation",
+                )
+                pairing_code = gr.Textbox(label="Pairing Code", type="password")
+            with gr.Accordion("Development Connection Settings", open=False):
+                allow_insecure_local_dev = gr.Checkbox(
+                    label="Allow HTTP for localhost development only",
+                    value=bool(config.get("allow_insecure_local_dev", False)),
+                )
+                allow_insecure_lan_dev = gr.Checkbox(
+                    label="Allow HTTP for private LAN / tailnet development only",
+                    value=bool(config.get("allow_insecure_lan_dev", False)),
+                )
+            pair_btn = gr.Button("Pair Project & Start Worker", interactive=not self._worker_is_running())
         connection_list = gr.Textbox(
             label="Paired Project Connections",
             interactive=False,
@@ -9677,8 +9950,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 value=self._default_connection_choice(config),
                 interactive=self._is_paired(config),
             )
-            disconnect_selected_btn = gr.Button("Disconnect Selected Pairing", interactive=self._is_paired(config))
-            disconnect_all_btn = gr.Button("Forget All Local Pairings", interactive=self._is_paired(config))
+            disconnect_selected_btn = gr.Button("Disconnect Selected Pairing", interactive=self._is_paired(config), min_width=240)
+            disconnect_all_btn = gr.Button("Forget All Local Pairings", interactive=self._is_paired(config), min_width=220)
 
         event_keep_awake_can_enable = self._event_processing_can_keep_awake(config)
         event_keep_awake_active = self._event_processing_keep_awake_active(config)
@@ -9698,7 +9971,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             )
 
         status = gr.Textbox(label="Plugin Log", interactive=False, value=self._log_text(), lines=18)
-        self._log("Plugin Log visible auto-refresh is disabled for Gradio compatibility; use Refresh Log to update the panel.")
+        self._log("Status and log auto-refresh are disabled for Gradio compatibility; use Refresh Status & Log to update the panel.")
         ui_outputs = [
             status,
             worker_toggle_btn,
@@ -9713,6 +9986,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             event_keep_awake_8h_btn,
             event_keep_awake_12h_btn,
             event_keep_awake_disable_btn,
+            worker_status,
         ]
 
         pair_btn.click(
@@ -9781,7 +10055,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._log_text(),
             gr.update(
                 value=self._worker_toggle_label(),
-                interactive=self._worker_is_running() or self._is_paired(config),
+                interactive=self._worker_toggle_interactive(config),
             ),
             gr.update(interactive=not self._worker_is_running()),
             gr.update(interactive=self._is_paired()),
@@ -9791,14 +10065,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             gr.update(value=self._connection_list_text(config)),
             gr.update(value=self._event_processing_keep_awake_text(config)),
             *self._event_processing_keep_awake_button_updates(config),
+            self._worker_status_markdown(config),
         )
 
     def _connection_label(self, record: dict[str, Any]) -> str:
         active_context = self._active_job_context
         connection_id = str(record.get("connection_id") or f"worker-{record.get('worker_id')}").strip()
         active_marker = ""
-        if active_context is not None and str(active_context.connection_id) == connection_id:
-            active_marker = f" | active job {self._current_active_job_id()}"
+        if self._active_job_id is not None and active_context is not None and str(active_context.connection_id) == connection_id:
+            active_marker = f" | active job {self._active_job_id}"
         return (
             f"{connection_id} | worker {record.get('worker_id')} | "
             f"org {record.get('org_id')} | project {record.get('project_id')} | "
@@ -9830,10 +10105,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         return self._worker_thread is not None and self._worker_thread.is_alive()
 
     def _worker_toggle_label(self) -> str:
-        return "Stop Worker" if self._worker_is_running() else "Start Worker"
+        if not self._worker_is_running():
+            return "Start Worker"
+        if self._stop_event.is_set():
+            return "Stopping..."
+        if self._active_job_id is not None:
+            return "Stop Worker & Cancel Current Job"
+        return "Stop Worker"
+
+    def _worker_toggle_interactive(self, config: Optional[dict[str, Any]] = None) -> bool:
+        if self._worker_is_running():
+            return not self._stop_event.is_set()
+        return self._is_paired(config)
 
     def _capabilities_button_label(self) -> str:
-        return "Wake for Active Use" if self._worker_is_idle_standby() else "Update Capabilities"
+        return "Wake Worker" if self._worker_is_idle_standby() else "Refresh Midom Capabilities"
 
     def _event_processing_keep_awake_until(self, config: Optional[dict[str, Any]] = None) -> int:
         config = self._load_config() if config is None else config
@@ -10008,6 +10294,131 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
     def _refresh_log_text_ui(self):
         return self._log_text()
 
+    def _record_heartbeat_result(self, connection: ConnectionContext, error: Optional[Exception] = None) -> None:
+        if not hasattr(self, "_connection_health_lock"):
+            return
+        connection_id = str(connection.connection_id)
+        with self._connection_health_lock:
+            health = dict(self._connection_health.get(connection_id, {}))
+            if error is None:
+                health.update(last_success_at=time.time(), last_success_monotonic=time.monotonic(), error="")
+            else:
+                # Exceptions and server bodies can contain URLs, credentials, or prompts.
+                response = getattr(error, "response", None)
+                code = getattr(response, "status_code", None)
+                if isinstance(code, int):
+                    description = f"Heartbeat failed (HTTP {code})"
+                elif isinstance(error, requests.Timeout):
+                    description = "Heartbeat timed out"
+                elif isinstance(error, requests.ConnectionError):
+                    description = "Heartbeat connection failed"
+                else:
+                    description = "Heartbeat response failed"
+                health["error"] = description
+            self._connection_health[connection_id] = health
+
+    def _worker_status_snapshot(self, config: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+        config = self._load_config() if config is None else config
+        records = self._connection_records(config)
+        with self._connection_health_lock:
+            health = {key: dict(value) for key, value in self._connection_health.items()}
+        connections = []
+        started_at = self._worker_started_at
+        for record in records:
+            entry = health.get(str(record["connection_id"]), {})
+            success = entry.get("last_success_monotonic")
+            connections.append({
+                "project_id": record["project_id"],
+                "worker_id": record["worker_id"],
+                "last_success_at": entry.get("last_success_at"),
+                "error": entry.get("error", ""),
+                "confirmed": success is not None and (started_at is None or success >= started_at) and not entry.get("error"),
+            })
+        running = self._worker_is_running()
+        active_job_id = self._active_job_id
+        active_context = self._active_job_context
+        job_status = dict(self._active_job_status or {})
+        error_count = sum(bool(entry["error"]) for entry in connections)
+        if not records:
+            state = "Unpaired"
+        elif running and self._stop_event.is_set():
+            state = "Stopping"
+        elif not running:
+            state = "Stopped"
+        elif active_job_id is not None:
+            state = "Working"
+        elif error_count == len(connections):
+            state = "Connection Error"
+        elif self._last_idle_mode == "standby":
+            state = "Standby"
+        elif self._local_wangp_busy_reason():
+            state = "Waiting for WanGP"
+        elif not any(entry["confirmed"] for entry in connections):
+            state = "Starting"
+        else:
+            state = "Ready"
+        # Only curated stage labels are displayed: native status strings may contain prompts.
+        phase = str(job_status.get("phase") or "")
+        stage = {
+            "claimed": "Preparing job", "preparing": "Preparing inputs", "generation": "Generating",
+            "pre_submit": "Preparing submission", "starting": "Starting generation",
+            "loading": "Loading model", "loading_model": "Loading model", "encoding_text": "Encoding text",
+            "inference": "Generating", "decoding": "Decoding", "processing": "Processing",
+            "validating_output": "Validating output", "preparing_artifact": "Preparing artifact",
+            "uploading": "Uploading", "completing": "Finalizing",
+            "post_generation": "Preparing output", "canceling": "Canceling job",
+            "loading_sam": "Loading SAM", "segmenting_seed_frame": "Segmenting seed frame",
+            "validating_seed_mask": "Validating seed mask", "loading_matanyone": "Loading MatAnyone",
+            "propagating_alpha_matte": "Propagating alpha matte", "encoding_alpha_matte": "Encoding alpha matte",
+            "validating_alpha_matte": "Validating alpha matte", "preparing_alpha_matte": "Preparing alpha matte",
+            "submitting_alpha_matte": "Submitting alpha matte", "extracting_alpha_matte": "Extracting alpha matte",
+            "finalizing_alpha_matte": "Finalizing alpha matte", "restoring_detail": "Restoring detail",
+            "post_resize": "Resizing restored image",
+        }.get(phase, "Processing")
+        progress = job_status.get("progress")
+        progress = max(0, min(100, progress)) if isinstance(progress, int) and not isinstance(progress, bool) else None
+        return {
+            "state": state,
+            "connections": connections,
+            "active_job_id": active_job_id,
+            "active_project_id": active_context.project_id if active_context is not None else None,
+            "active_worker_id": active_context.worker_id if active_context is not None else None,
+            "stage": stage,
+            "progress": progress,
+            "refreshed_at": time.time(),
+        }
+
+    @staticmethod
+    def _status_timestamp(epoch: float) -> str:
+        return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch))
+
+    def _worker_status_summary(self, config: Optional[dict[str, Any]] = None) -> str:
+        snapshot = self._worker_status_snapshot(config)
+        lines = [f"State: {snapshot['state']}"]
+        if snapshot["active_job_id"] is not None:
+            lines.append(
+                f"Active job: {snapshot['active_job_id']} | Project: {snapshot['active_project_id']} | "
+                f"Worker: {snapshot['active_worker_id']}"
+            )
+            progress = snapshot["progress"]
+            lines.append(f"Stage: {snapshot['stage']}" + (f" | Progress: {progress}%" if progress is not None else ""))
+        connections = snapshot["connections"]
+        if connections:
+            errors = sum(bool(entry["error"]) for entry in connections)
+            confirmed = sum(entry["confirmed"] for entry in connections)
+            lines.append(f"Connections: {len(connections)} paired | {confirmed} heartbeat confirmed | {errors} connection errors")
+            for entry in connections:
+                stamp = entry["last_success_at"]
+                contact = f"Last successful heartbeat: {self._status_timestamp(stamp)}" if stamp is not None else "No successful heartbeat recorded"
+                if entry["error"]:
+                    contact += f" | {entry['error']}"
+                lines.append(f"Project {entry['project_id']} / worker {entry['worker_id']}: {contact}")
+        lines.append(f"Snapshot refreshed: {self._status_timestamp(snapshot['refreshed_at'])}")
+        return "\n".join(lines)
+
+    def _worker_status_markdown(self, config: Optional[dict[str, Any]] = None) -> str:
+        return "### Worker Status\n\n" + self._worker_status_summary(config)
+
     def _toggle_worker(self, api_session):
         try:
             if self._worker_is_running():
@@ -10073,6 +10484,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return self._status_text()
         self._stop_event.clear()
         self._wake_event.clear()
+        self._worker_started_at = time.monotonic()
         self._log(
             f"Starting worker loop for {len(connections)} project pairing(s). "
             "WanGP jobs will use a background-safe session, not the live Gradio request session."
@@ -10215,7 +10627,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             elif idle_mode == "standby":
                 self._log(
                     "Worker entered long-idle standby; reporting paused/not accepting and pausing candidate polling. "
-                    "Use Wake for Active Use to resume normal polling.",
+                    "Use Wake Worker to resume normal polling.",
                     force=True,
                 )
             elif idle_mode == "active":
@@ -10302,26 +10714,31 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             status = "busy" if active_job_id is not None else ("paused" if idle_mode == "standby" else "idle")
             heartbeat_active_job_id = active_job_id
             message = self._heartbeat_message(status, accepting, active_job_id, idle_mode)
-        response = requests.post(
-            f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/heartbeat",
-            headers={**self._headers(connection), "Content-Type": "application/json"},
-            json={
-                "status": status,
-                "accepting": accepting,
-                "active_job_id": heartbeat_active_job_id,
-                "message": message,
-                "capabilities_revision": connection.capabilities_revision,
-            },
-            timeout=REQUEST_TIMEOUT_SECONDS,
-        )
-        if response.status_code in {401, 403} and self._forget_unauthorized_connection(
-            connection,
-            "Heartbeat",
-            self._midom_error_message(response),
-        ):
-            return
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = requests.post(
+                f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/heartbeat",
+                headers={**self._headers(connection), "Content-Type": "application/json"},
+                json={
+                    "status": status,
+                    "accepting": accepting,
+                    "active_job_id": heartbeat_active_job_id,
+                    "message": message,
+                    "capabilities_revision": connection.capabilities_revision,
+                },
+                timeout=REQUEST_TIMEOUT_SECONDS,
+            )
+            if response.status_code in {401, 403} and self._forget_unauthorized_connection(
+                connection,
+                "Heartbeat",
+                self._midom_error_message(response),
+            ):
+                return
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self._record_heartbeat_result(connection, exc)
+            raise
+        self._record_heartbeat_result(connection)
         now = time.monotonic()
         if now - self._last_heartbeat_log_at >= HEARTBEAT_LOG_SECONDS or active_job_id is not None:
             self._last_heartbeat_log_at = now
@@ -10535,6 +10952,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 self._log(f"Claim conflict or unavailable candidate; job_id={candidate_job_id}.")
                 continue
             self._reset_idle_backoff_for_active_use(f"claimed Midom job {candidate_job_id}")
+            if _bounded_overlay_operation(candidate):
+                claimed["_midom_overlay_candidate"] = copy.deepcopy(candidate)
             self._run_job(connection, claimed)
             return True
         return False
@@ -10589,6 +11008,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return f"requested_by_user_id mismatch: {requested_by_user_id}"
         media_type = str(candidate.get("media_type") or "").lower()
         model_id = str(candidate.get("model_id") or "").strip()
+        if _bounded_overlay_operation(candidate):
+            try:
+                helper = _overlay_module()
+                operation = helper.identify(candidate)
+                capability = self._bounded_overlay_capability(operation)
+                helper.require(capability is not None, "Requested bounded overlay operation is unavailable")
+                helper.validate_candidate(candidate, capability["limits"][operation])
+                return None
+            except (ValueError, RuntimeError) as exc:
+                return str(exc)
         if self._candidate_is_sam_click_seed_mask_processing(candidate):
             return self._sam_click_seed_mask_candidate_incompatibility_reason(candidate)
         if self._candidate_is_matanyone_v2_alpha_matte_processing(candidate):
@@ -11049,6 +11478,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return self._fish_audio_candidate_incompatibility_reason(summary, model_id)
         if media_type == "video" and model_id not in ALLOWED_VIDEO_MODEL_TYPES:
             return f"unsupported video model_id: {candidate.get('model_id')}"
+        if media_type == "video" and model_id == H3_VIDEO_MODEL_ID:
+            return self._h3_video_candidate_incompatibility_reason(summary)
         if isinstance(summary, dict):
             try:
                 output_count = int(summary.get("output_count") or 1)
@@ -11278,6 +11709,30 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         return f"unsupported input_image_count: {input_image_count}"
                     if input_audio_count != 1:
                         return f"unsupported input_audio_count: {input_audio_count}"
+        return None
+
+    def _h3_video_candidate_incompatibility_reason(self, summary: dict[str, Any]) -> Optional[str]:
+        if not isinstance(summary, dict):
+            return "H3 candidate summary must be an object"
+        error = self._h3_selection_error(summary)
+        if error:
+            return error
+        for key, allowed in {
+            "start_image_count": {1}, "end_image_count": {0, 1}, "input_audio_count": {1},
+            "control_video_count": {0}, "reference_image_count": {0}, "mask_image_count": {0},
+            "control_image_count": {0}, "output_count": {1},
+        }.items():
+            value = summary.get(key, 0 if key not in {"start_image_count", "input_audio_count", "output_count"} else None)
+            if type(value) is not int or value not in allowed:
+                return f"H3 unsupported {key}: {value!r}"
+        if summary.get("output_format") != "mp4":
+            return "H3 requires MP4 output"
+        width, height = summary.get("output_width"), summary.get("output_height")
+        if type(width) is not int or type(height) is not int or f"{width}x{height}" not in H3_RENDER_RESOLUTIONS:
+            return "H3 unsupported output dimensions"
+        duration = summary.get("duration_seconds", 15)
+        if type(duration) is not int or not 5 <= duration <= 15:
+            return "H3 duration_seconds ceiling must be an integer from 5 through 15"
         return None
 
     def _candidate_is_event_video_processing(self, candidate: dict[str, Any]) -> bool:
@@ -11765,6 +12220,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         try:
             settings = self._validate_job(job, connection)
+            if settings.get("_midom_overlay_recipe"):
+                return self._run_bounded_overlay_job(connection, job, settings)
             media_type = str(settings.get("_midom_media_type") or "image")
             output_count = int(settings.pop("_midom_output_count"))
             downloaded_inputs = []
@@ -12109,7 +12566,11 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         settings["_midom_combined_audio_segment_count"] = segment_count
                         generated_files = [combined_audio_path]
                 elif media_type == "video":
-                    generated_files = self._result_video_files(result, settings)
+                    generated_files = (
+                        self._result_h3_video_files(result, settings, api_session)
+                        if settings.get("model_type") == H3_VIDEO_MODEL_ID
+                        else self._result_video_files(result, settings)
+                    )
                 else:
                     generated_files = self._result_image_files(result)
                 if media_type == "audio":
@@ -12208,9 +12669,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 )
                 self._log(f"Job complete accepted by Midom; job_id={job_id}.")
         except Exception as exc:
+            if getattr(exc, "overlay_outcome_uncertain", False):
+                self._log(f"Overlay delivery outcome uncertain; job_id={job_id}; Midom owns reconciliation of the original operation. No automatic retry or failure report sent.", force=True)
+                return
             self._log(f"Job failed locally; attempting fail report; job_id={job_id} error={exc}", force=True)
             try:
                 reason = "validation_or_runtime_error"
+                if _bounded_overlay_operation(job) and str(exc) == "cancel_requested":
+                    reason = "cancel_requested"
                 if job.get("model_id") in FISH_AUDIO_MODEL_IDS:
                     for code in ("speech_duration_limit_reached", "speech_stopped_prematurely", "speech_completion_diagnostics_unavailable", "cancel_requested"):
                         if code in str(exc):
@@ -12232,6 +12698,149 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._active_job_status = {}
             self._reset_idle_backoff_for_active_use(f"finished Midom job {job_id}", wake=True)
             self._log(f"Cleared active job state; job_id={job_id}.")
+
+    def _overlay_tick(self, connection, job_id, phase, status):
+        if self._cancel_requested_by_midom or (getattr(self, "_stop_event", None) and self._stop_event.is_set()):
+            raise RuntimeError("cancel_requested")
+        self._set_active_job_status(phase=phase, status=status, progress=None)
+        now = time.monotonic()
+        if now >= getattr(self, "_overlay_next_progress", 0):
+            self._overlay_next_progress = now + 2
+            self._post_job_update(connection, job_id, "progress", dict(self._active_job_status))
+        if now >= getattr(self, "_overlay_next_heartbeat", 0):
+            self._overlay_next_heartbeat = now + JOB_KEEPALIVE_SECONDS
+            self._heartbeat_once(connection)
+        if self._cancel_requested_by_midom:
+            raise RuntimeError("cancel_requested")
+
+    def _download_bounded_overlay_inputs(self, connection, job, recipe, directory):
+        helper = _overlay_module()
+        helper.require(shutil.disk_usage(directory).free >= helper.SCRATCH_BYTES, "Insufficient overlay scratch space")
+        downloaded = []
+        for index, descriptor in enumerate(job["inputs"]):
+            limit = recipe["limits"]["max_video_input_bytes"] if descriptor["kind"] == "source_video" else recipe["limits"]["max_image_input_bytes"]
+            input_id, job_id = descriptor["input_id"], self._coerce_job_id(job)
+            self._overlay_tick(connection, job_id, "downloading", "Downloading bounded overlay inputs.")
+            response = requests.get(
+                f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/inputs/{input_id}",
+                headers=self._headers(connection), stream=True, timeout=REQUEST_TIMEOUT_SECONDS,
+                allow_redirects=False,
+            )
+            suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp", "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"}[descriptor["mime_type"]]
+            path = Path(directory) / f"input-{index}{suffix}"
+            try:
+                if response.status_code in (401, 403):
+                    self._handle_authorization_failure("Overlay input authorization was rejected by Midom.")
+                response.raise_for_status()
+                helper.require(response.status_code == 200, "Overlay input response was not a direct download")
+                mime = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                helper.require(mime == descriptor["mime_type"], "Overlay input HTTP MIME mismatch")
+                length = response.headers.get("Content-Length")
+                if length is not None:
+                    helper.require(0 < int(length) <= limit, "Overlay input byte limit exceeded")
+                count, digest, deadline = 0, hashlib.sha256(), time.monotonic() + 180
+                with path.open("wb") as stream:
+                    for block in response.iter_content(chunk_size=65536):
+                        self._overlay_tick(connection, job_id, "downloading", "Downloading bounded overlay inputs.")
+                        helper.require(time.monotonic() < deadline, "Overlay input download timed out")
+                        if block:
+                            count += len(block)
+                            helper.require(count <= limit, "Overlay input byte limit exceeded")
+                            stream.write(block)
+                            digest.update(block)
+                helper.require(count > 0 and (length is None or int(length) == count), "Overlay input download incomplete")
+                for key in ("bytes", "encoded_bytes"):
+                    if key in descriptor:
+                        helper.require(type(descriptor[key]) is int and descriptor[key] == count, "Overlay input declared size mismatch")
+                helper.require(digest.hexdigest() == descriptor["sha256"], "Overlay input SHA-256 mismatch")
+            finally:
+                response.close()
+            downloaded.append({**descriptor, "path": str(path)})
+        return downloaded
+
+    def _upload_bounded_overlay_artifact(self, connection, job_id, path, metadata, recipe):
+        helper = _overlay_module()
+        output = metadata["outputs"][0]
+        helper.require(0 < path.stat().st_size <= recipe["limits"]["max_artifact_bytes"], "Overlay output byte limit exceeded")
+        data = path.read_bytes()
+        helper.require(hashlib.sha256(data).hexdigest() == output["sha256"] and len(data) == output["encoded_bytes"], "Overlay artifact changed after validation")
+        self._overlay_tick(connection, job_id, "uploading", "Uploading verified overlay artifact.")
+        identity = {k: output[k] for k in ("artifact_index", "role", "mime_type", "sha256")}
+        try:
+            response = requests.post(
+                f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id}/artifacts",
+                headers=self._headers(connection),
+                data={**{k: str(v) for k, v in identity.items()}, "filename": path.name},
+                files={"file": (path.name, io.BytesIO(data), output["mime_type"])},
+                timeout=UPLOAD_TIMEOUT_SECONDS, allow_redirects=False,
+            )
+            try:
+                if response.status_code in (401, 403):
+                    self._handle_authorization_failure("Overlay artifact authorization was rejected by Midom.")
+                response.raise_for_status()
+                helper.require(200 <= response.status_code < 300, "Overlay artifact response is not an acknowledgement")
+                payload = response.json()
+                helper.require(isinstance(payload, dict), "Overlay artifact acknowledgement is malformed")
+                for key in ("artifact_index", "role", "mime_type", "sha256"):
+                    if key in payload:
+                        helper.require(payload[key] == identity[key], "Overlay artifact acknowledgement identity conflict")
+                helper.require(all(helper.number(payload.get(k), 1, 2**53, True) for k in ("artifact_id", "file_id")), "Overlay artifact acknowledgement lacks valid IDs")
+                artifact = {"artifact_id": payload["artifact_id"], "file_id": payload["file_id"], "artifact_index": 0, "role": output["role"]}
+                return artifact
+            finally:
+                response.close()
+        except Exception as exc:
+            raise helper.OutcomeUncertain("Overlay upload outcome requires authorized reconciliation; no retry was attempted") from exc
+
+    def _run_bounded_overlay_job(self, connection, job, settings):
+        helper = _overlay_module()
+        recipe, job_id = settings["_midom_overlay_recipe"], self._coerce_job_id(job)
+        side_effect_possible = False
+        handle = LocalProcessJob()
+        self._active_job = handle
+        self._overlay_next_progress = self._overlay_next_heartbeat = 0
+        try:
+            with tempfile.TemporaryDirectory(prefix="midom-overlay-") as directory:
+                downloaded = self._download_job_inputs(connection, job, directory)
+                spec = {"operation": recipe["operation"], "recipe": recipe, "inputs": downloaded, "job_id": job_id}
+                if recipe["operation"] == helper.VIDEO_OPERATION:
+                    spec.update(ffmpeg=self._ffmpeg_binary(), ffprobe=self._ffprobe_binary())
+                specification = Path(directory) / "overlay-job.json"
+                encoded = json.dumps(spec, allow_nan=False).encode()
+                helper.require(len(encoded) <= helper.RESULT_BYTES, "Overlay specification too large")
+                specification.write_bytes(encoded)
+                tick = lambda: self._overlay_tick(connection, job_id, "processing", "Rendering and validating the bounded overlay.")
+                helper.supervise([sys.executable, str(Path(helper.__file__).resolve()), str(specification)], directory,
+                    helper.TIMEOUTS[recipe["operation"]], handle=handle, tick=tick, output_limit=recipe["limits"]["max_artifact_bytes"])
+                result = Path(directory) / "overlay-metadata.json"
+                helper.require(result.stat().st_size <= 32768, "Overlay completion metadata too large")
+                metadata = json.loads(result.read_text(encoding="utf-8"))
+                helper.validate_completion_metadata(metadata, job, recipe)
+                path = Path(directory) / ("overlay-result.png" if recipe["operation"] == helper.IMAGE_OPERATION else "overlay-result.mp4")
+                # From this point a POST may save an artifact despite a lost acknowledgement.
+                # Never turn an ambiguous delivery into an ordinary failed/retryable operation.
+                artifact = self._upload_bounded_overlay_artifact(connection, job_id, path, metadata, recipe)
+                side_effect_possible = True
+                self._overlay_tick(connection, job_id, "completing", "Finalizing the original overlay operation.")
+                payload = {"artifacts": [artifact], "backend": "pillow" if recipe["operation"] == helper.IMAGE_OPERATION else "ffmpeg",
+                    "model_id": job["processor_id"], "processor_id": job["processor_id"], "processing_metadata": metadata}
+                helper.require(len(json.dumps(payload, allow_nan=False).encode()) <= 32768, "Overlay completion envelope too large")
+                self._post_job_update(connection, job_id, "complete", payload)
+                self._log(f"Bounded overlay complete accepted; job_id={job_id} operation={recipe['operation']}.")
+        except Exception as exc:
+            if side_effect_possible or getattr(exc, "overlay_outcome_uncertain", False):
+                raise helper.OutcomeUncertain("Overlay delivery outcome requires explicit authorized reconciliation") from exc
+            raise
+        finally:
+            process = handle._process
+            if process is not None and process.poll() is None:
+                self._overlay_unstopped_job = handle
+                self._stop_event.set()
+                self._log("Overlay process exit could not be verified; worker polling stopped. Operator intervention required.", force=True)
+            else:
+                handle.mark_done()
+                if self._active_job is handle:
+                    self._active_job = None
 
     def _run_sam_click_seed_mask_processing_job(
         self,
@@ -17609,6 +18218,20 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
 
     def _submit_wangp_job(self, api_session, settings: dict[str, Any], output_count: int, callbacks):
+        self._assert_h3_submission_integrity(settings)
+        if settings.get("model_type") == H3_VIDEO_MODEL_ID:
+            if output_count != 1:
+                raise ValueError("H3 supports exactly one output.")
+            runtime = api_session._ensure_runtime().module
+            config = getattr(runtime, "server_config", {})
+            settings["_midom_h3"].update({
+                "wangp_version": str(getattr(runtime, "WanGP_version", "unknown")),
+                "steps": 6, "sampler": "euler", "flow_shift": 12, "guidance_phases": 1,
+                "transformer_quantization": str(getattr(runtime, "transformer_quantization", "unknown")),
+                "attention_mode": str(getattr(runtime, "attention_mode", "auto")),
+                "inputs_chunker": str(config.get("inputs_chunker", "auto")),
+                "vae_tiling": str(config.get("vae_config", "auto")),
+            })
         self._assert_ltx_control_video_submission_integrity(settings)
         self._assert_ltx_prompt_generated_audio_submission_integrity(settings)
         self._capture_qwen21_native_rgba_runtime_diagnostics(
@@ -18071,6 +18694,26 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         return str(target_path)
 
+    def _result_h3_video_files(self, result, settings: dict[str, Any], api_session) -> list[str]:
+        artifacts = tuple(getattr(result, "artifacts", ()) or ())
+        if len(artifacts) != 1 or getattr(artifacts[0], "client_id", None) != settings["client_id"]:
+            raise ValueError("H3 requires exactly one job-associated native artifact.")
+        artifact = artifacts[0]
+        if getattr(artifact, "media_type", None) != "video" or not getattr(artifact, "path", None):
+            raise ValueError("H3 native artifact must be a saved video.")
+        base = self._wangp_output_base(api_session)
+        files = []
+        for raw in [*(getattr(result, "generated_files", ()) or ()), artifact.path]:
+            path = self._canonical_wangp_output_path(raw, base)
+            if not path.is_file() or path.suffix.lower() != ".mp4":
+                raise ValueError("H3 native output is missing or is not MP4.")
+            if not any(self._same_wangp_output_file(path, existing) for existing in files):
+                files.append(path)
+        if len(files) != 1:
+            raise ValueError("H3 requires exactly one generated video file; refusing ambiguous output.")
+        settings["_midom_h3"]["native_client_id"] = settings["client_id"]
+        return [str(files[0])]
+
     def _result_video_files(self, result, settings: Optional[dict[str, Any]] = None) -> list[str]:
         files = []
         for file_path in list(getattr(result, "generated_files", []) or []):
@@ -18525,6 +19168,13 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         inputs = job.get("inputs") or []
         if not isinstance(inputs, list):
             raise ValueError("Job inputs must be a list.")
+        if _bounded_overlay_operation(job):
+            helper = _overlay_module()
+            operation = helper.identify(job)
+            capability = self._bounded_overlay_capability(operation)
+            helper.require(capability is not None, "Requested bounded overlay operation is unavailable")
+            recipe = helper.validate_claim(job, capability["limits"][operation])
+            return self._download_bounded_overlay_inputs(connection, job, recipe, temp_dir)
         if self._is_sam_click_seed_mask_processing_job(job):
             return self._download_sam_click_seed_mask_processing_inputs(connection, job, temp_dir, inputs)
         if self._is_matanyone_v2_alpha_matte_processing_job(job):
@@ -19943,7 +20593,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             and video_task == "audio_conditioned_video"
             and audio_video_mode == LTX_PROMPT_GENERATED_AUDIO_MODE
         )
-        if model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID:
+        if model_type in LTX_VIDEO_MODEL_IDS or model_type in {SVI_VIDEO_MODEL_ID, H3_VIDEO_MODEL_ID}:
             required_image_kind = "start_image"
         else:
             required_image_kind = "reference_image"
@@ -19954,7 +20604,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         )
         optional_driving_audio = is_ltx_control_video
         requires_control_video = is_ltx_control_video
-        model_label = "SVI" if model_type == SVI_VIDEO_MODEL_ID else ("LTX" if model_type in LTX_VIDEO_MODEL_IDS else "LongCat")
+        model_label = "H3" if model_type == H3_VIDEO_MODEL_ID else "SVI" if model_type == SVI_VIDEO_MODEL_ID else ("LTX" if model_type in LTX_VIDEO_MODEL_IDS else "LongCat")
         reference_image_count = 0
         end_image_count = 0
         driving_audio_count = 0
@@ -19964,7 +20614,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             f"required_{required_image_kind}=1 required_driving_audio={1 if requires_driving_audio else 0} "
             f"optional_driving_audio={1 if optional_driving_audio else 0} "
             f"required_control_video={1 if requires_control_video else 0} "
-            f"optional_end_image={1 if (model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID) and not is_ltx_control_video else 0}."
+            f"optional_end_image={1 if (model_type in LTX_VIDEO_MODEL_IDS or model_type in {SVI_VIDEO_MODEL_ID, H3_VIDEO_MODEL_ID}) and not is_ltx_control_video else 0}."
         )
         for item in inputs:
             if not isinstance(item, dict):
@@ -19976,7 +20626,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 allowed_kinds.add("driving_audio")
             if requires_control_video:
                 allowed_kinds.add("control_video")
-            if (model_type in LTX_VIDEO_MODEL_IDS or model_type == SVI_VIDEO_MODEL_ID) and not is_ltx_control_video:
+            if (model_type in LTX_VIDEO_MODEL_IDS or model_type in {SVI_VIDEO_MODEL_ID, H3_VIDEO_MODEL_ID}) and not is_ltx_control_video:
                 allowed_kinds.add("end_image")
             if kind not in allowed_kinds:
                 raise ValueError(f"Unsupported video job input kind: {kind}")
@@ -20599,6 +21249,139 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"expected {expected_size[0]}x{expected_size[1]}, got {actual_size[0]}x{actual_size[1]}."
             )
 
+    def _h3_process(self, command: list[str]) -> None:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 180
+        last_keepalive = time.monotonic()
+        try:
+            while True:
+                connection = getattr(self, "_active_job_context", None)
+                if connection is not None:
+                    self._raise_job_progress_error(connection, self._active_job_id)
+                if getattr(self, "_cancel_requested_by_midom", False) or getattr(self, "_stop_event", threading.Event()).is_set():
+                    raise ValueError("H3 cancel_requested during media preparation.")
+                try:
+                    _, stderr = process.communicate(timeout=1)
+                    if process.returncode:
+                        raise ValueError(f"H3 media preparation failed: {stderr.decode('utf-8', errors='replace')[-2000:]}")
+                    return
+                except subprocess.TimeoutExpired:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("H3 media preparation exceeded 180 seconds.")
+                    if connection is not None and time.monotonic() - last_keepalive >= 15:
+                        self._post_job_update(connection, self._active_job_id, "progress", dict(self._active_job_status))
+                        last_keepalive = time.monotonic()
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate()
+
+    def _apply_h3_video_inputs(self, settings: dict[str, Any], inputs: list[dict[str, Any]]) -> None:
+        starts = [item for item in inputs if item.get("kind") == "start_image"]
+        ends = [item for item in inputs if item.get("kind") == "end_image"]
+        audios = [item for item in inputs if item.get("kind") == "driving_audio"]
+        if len(starts) != 1 or len(audios) != 1 or len(ends) > 1 or len(inputs) != len(starts) + len(ends) + len(audios):
+            raise ValueError("H3 requires one start image, one driving audio, and optional end image only.")
+        requested = self._parse_resolution_size(settings["_midom_requested_resolution"])
+        internal = self._parse_resolution_size(settings["resolution"])
+        metadata = settings["_midom_h3"]
+        prepared = {}
+        for item in inputs:
+            path = Path(item["path"])
+            digest = self._sha256_file(path)
+            if item.get("sha256") and digest != item["sha256"]:
+                raise ValueError("H3 input hash changed after download.")
+            kind = item["kind"]
+            metadata[f"{kind}_input_id"] = item.get("input_id")
+            metadata[f"{kind}_sha256"] = digest
+            if kind != "driving_audio":
+                self._validate_image_input_exact_size(path, requested, f"H3 {kind}")
+                with Image.open(path) as image:
+                    image.load()
+                    if image.getexif().get(274, 1) != 1:
+                        raise ValueError("H3 anchor images must be physically oriented before submission.")
+                prepared[kind] = self._prepare_ltx_overscan_image(path, requested, internal, f"H3 {kind}", adapter_label="H3")
+        source = Path(audios[0]["path"])
+        audio_info = self._probe_audio_metadata(source)
+        duration = float(audio_info["duration_seconds"])
+        ceiling = float(metadata["generation_ceiling_seconds"])
+        if not math.isfinite(duration) or not 5 <= duration <= ceiling + 0.001:
+            raise ValueError(f"H3 driving audio must be 5 through {ceiling:g} seconds; prepare a bounded Storyboard segment first.")
+        # The extra conditioning samples cover the H3 frame grid and native audio tail only.
+        prepared_dir = Path(tempfile.mkdtemp(prefix="h3-prepared-", dir=str(source.parent)))
+        decoded = prepared_dir / "conditioning-source.wav"
+        self._h3_process([self._ffmpeg_binary(), "-y", "-v", "error", "-nostdin", "-i", str(source),
+                          "-map", "0:a:0", "-t", "15.1", "-ar", "32000", "-ac", "2", "-c:a", "pcm_s16le", str(decoded)])
+        with wave.open(str(decoded), "rb") as recording:
+            duration = recording.getnframes() / recording.getframerate()
+            samples = recording.readframes(recording.getnframes())
+        if not 5 <= duration <= ceiling + 0.001 or not any(samples):
+            raise ValueError("H3 decoded driving audio is silent or outside the selected duration bounds.")
+        delivery_frames = math.ceil(duration * 24)
+        frame_count = 5 + 17 * math.ceil((delivery_frames - 5) / 17)
+        render_duration = frame_count / 24
+        guide = prepared_dir / "conditioning-padded.wav"
+        self._h3_process([self._ffmpeg_binary(), "-y", "-v", "error", "-nostdin", "-i", str(decoded),
+                          "-af", "apad", "-t", f"{render_duration + 0.1:.9f}", "-c:a", "pcm_s16le", str(guide)])
+        for key in ("video_guide", "video_guide2", "video_guide3", "video_source", "video_mask", "image_mask",
+                    "image_guide", "image_refs", "audio_guide2", "audio_guide3"):
+            settings[key] = None
+        # An injected ending anchor targets the retained timeline, not the padded render's last frame.
+        settings.update({"image_start": [prepared["start_image"]], "image_end": None,
+                         "image_refs": [prepared["end_image"]] if ends else None,
+                         "frames_positions": str(delivery_frames) if ends else "",
+                         "image_prompt_type": "S", "audio_prompt_type": "AS",
+                         "audio_guide": str(guide), "video_prompt_type": "KFI" if ends else "", "video_length": frame_count})
+        settings["_midom_h3_prepared_anchors"] = {
+            path: self._sha256_file(Path(path)) for path in prepared.values()
+        }
+        settings["_midom_h3_source_audio_path"] = str(source)
+        settings["_midom_h3_guide_sha256"] = self._sha256_file(guide)
+        metadata.update({"source_audio_duration_seconds": duration, "delivery_frames": delivery_frames, "render_frames": frame_count,
+                         "render_duration_seconds": render_duration,
+                         "conditioning_padding_seconds": round(render_duration + 0.1 - duration, 9),
+                         "requested_dimensions": list(requested), "internal_dimensions": list(internal),
+                         "crop_offsets": [(internal[0] - requested[0]) // 2, (internal[1] - requested[1]) // 2],
+                         "end_anchor_frame_index": delivery_frames - 1 if ends else None,
+                         "soundtrack_policy": "supplied_audio_remux_v1",
+                         "duration_policy": "render_grid_ceil_trim_video_to_audio_v1"})
+        self._log(f"H3 soundtrack inputs prepared; job_id={settings['_midom_job_id']} frames={frame_count} "
+                  f"audio_seconds={duration:.6f} render_seconds={render_duration:.6f} resolution={settings['resolution']} "
+                  f"end_image={bool(ends)} audio_prompt_type='AS'.")
+
+    def _assert_h3_submission_integrity(self, settings: dict[str, Any]) -> None:
+        if settings.get("model_type") != H3_VIDEO_MODEL_ID:
+            return
+        metadata = settings.get("_midom_h3") or {}
+        has_end = metadata.get("end_anchor_frame_index") is not None
+        if (settings.get("audio_prompt_type") != "AS" or settings.get("video_prompt_type") != ("KFI" if has_end else "")
+                or settings.get("num_inference_steps") != 6 or settings.get("sample_solver") != "euler"
+                or settings.get("guidance_phases") != 1 or settings.get("flow_shift") != 12.0
+                or settings.get("activated_loras") or settings.get("skip_steps_cache_type")
+                or settings.get("prompt_enhancer") or settings.get("custom_sigmas")):
+            raise ValueError("H3 soundtrack recipe changed before submission.")
+        for key in ("video_guide", "video_guide2", "video_guide3", "video_source", "video_mask", "image_mask",
+                    "image_guide", "image_end", "audio_guide2", "audio_guide3"):
+            if settings.get(key) is not None:
+                raise ValueError(f"H3 submission must not contain {key}.")
+        guide = Path(str(settings.get("audio_guide") or ""))
+        source = Path(str(settings.get("_midom_h3_source_audio_path") or ""))
+        if not guide.is_file() or self._sha256_file(guide) != settings.get("_midom_h3_guide_sha256"):
+            raise ValueError("H3 conditioning audio is missing or changed before submission.")
+        if not source.is_file() or self._sha256_file(source) != settings["_midom_h3"]["driving_audio_sha256"]:
+            raise ValueError("H3 source soundtrack is missing or changed before submission.")
+        anchors = settings.get("_midom_h3_prepared_anchors") or {}
+        paths = [*(settings.get("image_start") or []), *(settings.get("image_refs") or [])]
+        if (len(settings.get("image_start") or []) != 1 or len(settings.get("image_refs") or []) != int(has_end)
+                or set(paths) != set(anchors)
+                or settings.get("frames_positions") != (str(metadata["delivery_frames"]) if has_end else "")
+                or settings.get("video_length") != metadata.get("render_frames")
+                or settings.get("resolution") != H3_RENDER_RESOLUTIONS.get(settings.get("_midom_requested_resolution"))):
+            raise ValueError("H3 prepared anchors, timeline or geometry changed before submission.")
+        for path, digest in anchors.items():
+            if self._sha256_file(Path(path)) != digest:
+                raise ValueError("H3 prepared anchor hash changed before submission.")
+
     def _ltx_requested_size(self, settings: dict[str, Any]) -> tuple[int, int]:
         requested_size = self._parse_resolution_size(settings.get("_midom_requested_resolution") or settings.get("resolution"))
         if requested_size is None:
@@ -20617,6 +21400,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         requested_size: tuple[int, int],
         internal_size: tuple[int, int],
         label: str,
+        *,
+        adapter_label: str = "LTX",
     ) -> str:
         if requested_size == internal_size:
             return str(source_path)
@@ -20644,10 +21429,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         paste_x = (internal_size[0] - requested_size[0]) // 2
         paste_y = (internal_size[1] - requested_size[1]) // 2
         background.paste(source, (paste_x, paste_y))
-        target_path = source_path.with_name(f"{source_path.stem}-ltx-overscan.png")
+        target_path = source_path.with_name(f"{source_path.stem}-{adapter_label.lower()}-overscan.png")
         background.save(target_path, format="PNG", optimize=True)
         self._log(
-            "Prepared LTX overscan image input; "
+            f"Prepared {adapter_label} overscan image input; "
             f"label={label!r} source={source_path.name!r} target={target_path.name!r} "
             f"requested={requested_size[0]}x{requested_size[1]} internal={internal_size[0]}x{internal_size[1]}."
         )
@@ -20830,6 +21615,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if media_type == "video":
             model_type = str(settings.get("model_type") or job.get("model_id") or "").strip()
             driving_audio_inputs = [item for item in downloaded_inputs if item.get("kind") == "driving_audio"]
+            if model_type == H3_VIDEO_MODEL_ID:
+                self._apply_h3_video_inputs(settings, downloaded_inputs)
+                return
             if model_type == SVI_VIDEO_MODEL_ID:
                 start_image_inputs = [item for item in downloaded_inputs if item.get("kind") == "start_image"]
                 end_image_inputs = [item for item in downloaded_inputs if item.get("kind") == "end_image"]
@@ -22397,11 +23185,15 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         self._ensure_job_flow_enabled()
         route_status = "complete" if status == "complete" else status
         self._log(f"Posting job update; job_id={job_id_int} status={status} payload_keys={sorted(payload.keys())}.")
+        bounded_overlay = status == "complete" and (payload.get("processing_metadata") or {}).get("operation_type") in {
+            "overlay_png_on_image", "overlay_png_on_video_positioned",
+        }
         response = requests.post(
             f"{connection.api_base_url}/b1/media-workers/{connection.worker_id}/jobs/{job_id_int}/{route_status}",
             headers={**self._headers(connection), "Content-Type": "application/json"},
             json=payload,
             timeout=REQUEST_TIMEOUT_SECONDS,
+            **({"allow_redirects": False} if bounded_overlay else {}),
         )
         if response.status_code in {401, 403}:
             self._handle_authorization_failure(f"Job {status} update was rejected by Midom authorization.")
@@ -22416,6 +23208,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 message += f": {detail}"
             self._log(f"Job update rejected; job_id={job_id_int} status={status} error={message}", force=True)
             raise requests.HTTPError(message, response=response, request=getattr(response, "request", None)) from exc
+        if bounded_overlay and not 200 <= response.status_code < 300:
+            raise _overlay_module().OutcomeUncertain("Overlay completion did not receive a direct success acknowledgement")
         self._log(f"Job update accepted; job_id={job_id_int} status={status} http_status={response.status_code}.")
         if status == "progress":
             response_payload = response.json() if response.content else {}
@@ -22923,6 +23717,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         suffix = path.suffix.lower()
         if suffix not in ALLOWED_VIDEO_SUFFIXES:
             raise ValueError(f"Unsupported generated video artifact extension: {suffix}")
+        if settings.get("model_type") == H3_VIDEO_MODEL_ID:
+            path = self._prepare_h3_video_artifact(path, settings)
         if settings.get("_midom_ltx_delivery_adapter") == "overscan_center_crop":
             path = Path(self._prepare_ltx_video_artifact_for_upload(path, settings, job_id, artifact_index))
             suffix = path.suffix.lower()
@@ -22966,6 +23762,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     "sha256": sha256,
                     "mime_type": "video/mp4",
                     "filename": path.name,
+                    **({"role": "video"} if settings.get("model_type") == H3_VIDEO_MODEL_ID else {}),
                 },
                 files={"file": (path.name, reader, "video/mp4")},
                 timeout=UPLOAD_TIMEOUT_SECONDS,
@@ -22981,6 +23778,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Video artifact upload response was not a JSON object.")
+        if settings.get("model_type") == H3_VIDEO_MODEL_ID and (
+            payload.get("artifact_index", 0) != 0 or payload.get("role", "video") != "video"
+        ):
+            raise ValueError("H3 artifact upload acknowledgement does not match index 0 / role video.")
         self._log(
             f"Video artifact upload accepted; job_id={job_id} artifact_index={payload.get('artifact_index', artifact_index)} "
             f"artifact_id={payload.get('artifact_id')} file_id={payload.get('file_id')}."
@@ -23079,6 +23880,51 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if len(data) < 12:
             return False
         return data[4:8] == b"ftyp" or b"ftyp" in data[:64]
+
+    def _prepare_h3_video_artifact(self, source: Path, settings: dict[str, Any]) -> Path:
+        self._assert_h3_submission_integrity(settings)
+        if source.stat().st_size <= 0 or source.stat().st_size > settings["_midom_max_artifact_bytes"]:
+            raise ValueError("H3 generated video exceeds artifact safety bounds.")
+        metadata = settings["_midom_h3"]
+        requested = tuple(metadata["requested_dimensions"])
+        internal = tuple(metadata["internal_dimensions"])
+        probe = self._probe_event_video_metadata(source)
+        expected_duration = metadata["render_frames"] / 24
+        if ((probe["width"], probe["height"]) != internal
+                or abs(float(probe.get("rotation_degrees") or 0)) > 0.01
+                or abs(float(probe.get("fps") or 0) - 24) > 0.01
+                or abs(probe["duration_seconds"] - expected_duration) > 0.15):
+            raise ValueError("H3 generated video geometry, frame rate or duration does not match the prepared job.")
+        if not probe.get("has_audio"):
+            raise ValueError("H3 soundtrack-conditioned generation returned no audio stream.")
+        soundtrack = Path(settings["_midom_h3_source_audio_path"])
+        target = Path(settings["audio_guide"]).parent / "soundtrack-video.mp4"
+        crop_x, crop_y = metadata["crop_offsets"]
+        duration = metadata["source_audio_duration_seconds"]
+        self._log(f"Finalizing H3 supplied soundtrack; job_id={settings['_midom_job_id']} "
+                  f"delivery={requested} crop={crop_x}:{crop_y} seconds={duration:.6f}; discarding native soundtrack.")
+        self._h3_process([
+            self._ffmpeg_binary(), "-y", "-v", "error", "-nostdin", "-i", str(source), "-i", str(soundtrack),
+            "-map", "0:v:0", "-map", "1:a:0", "-map_metadata", "-1",
+            "-vf", f"crop={requested[0]}:{requested[1]}:{crop_x}:{crop_y},setsar=1",
+            "-t", f"{duration:.9f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+            "-metadata:s:v:0", "rotate=0", "-movflags", "+faststart", str(target),
+        ])
+        final = self._probe_event_video_metadata(target)
+        if ((final["width"], final["height"]) != requested or not final.get("has_audio")
+                or final.get("video_codec") != "h264" or final.get("audio_codec") != "aac"
+                or abs(float(final.get("fps") or 0) - 24) > 0.01
+                or abs(final["duration_seconds"] - duration) > 0.075
+                or abs(final["audio_duration_seconds"] - duration) > 0.075):
+            raise ValueError("H3 finalized video failed supplied-soundtrack delivery validation.")
+        metadata.update({"final_dimensions": list(requested), "final_duration_seconds": final["duration_seconds"],
+                         "final_audio_duration_seconds": final["audio_duration_seconds"],
+                         "artifact_index": 0, "artifact_role": "video", "mime_type": "video/mp4",
+                         "artifact_sha256": self._sha256_file(target),
+                         "audio_source": "original_driving_audio", "native_audio_discarded": True,
+                         "soundtrack_encoding": "aac_192k", "output_validation": "passed"})
+        return target
 
     def _prepare_ltx_video_artifact_for_upload(
         self,

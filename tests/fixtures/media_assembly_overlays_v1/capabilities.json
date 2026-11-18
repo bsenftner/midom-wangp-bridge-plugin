@@ -1,0 +1,145 @@
+{
+  "fixture_set_id": "media_assembly_agent_overlays_v1_fixtures_v1",
+  "purpose": "Future discovery examples, not current worker advertisements or measured capacity guarantees",
+  "schema_version": 1,
+  "processors": [
+    {
+      "family": "media_processing",
+      "media_type": "image",
+      "processing_task": "deterministic_image_processing",
+      "processor_id": "image_overlay_processor",
+      "supported": true,
+      "detected": true,
+      "dependencies": {"pillow": true},
+      "supported_operations": ["overlay_png_on_image"],
+      "operation_types": ["overlay_png_on_image"],
+      "input_mime_types": {"source_image": ["image/png", "image/jpeg", "image/webp"], "overlay_png": ["image/png"]},
+      "contracts": {
+        "overlay_png_on_image": {
+          "contract_version": "png_image_overlay_v1",
+          "input_roles": ["base_image", "overlay_image"],
+          "output_roles": ["image"],
+          "required_output_roles": ["image"],
+          "optional_output_roles": [],
+          "output_mime_types_by_role": {"image": ["image/png"]},
+          "geometry_policy_id": "midom_overlay_geometry_v1",
+          "recipe": {
+            "visual.anchor": ["center", "top_left", "top_right", "bottom_left", "bottom_right"],
+            "visual.scale_reference": ["oriented_overlay_source"],
+            "visual.alpha_mode": ["png_alpha"],
+            "orientation_mode": ["exif_transpose"],
+            "output_dimensions": ["oriented_base_exact"],
+            "output_color_modes": ["rgba"]
+          }
+        }
+      },
+      "operation_features": {"overlay_png_on_image": ["png_image_overlay_v1", "midom_overlay_geometry_v1", "source_relative_scale", "signed_pixel_offsets", "canvas_clipping", "typed_artifact_roles"]},
+      "limits": {
+        "overlay_png_on_image": {
+          "max_outputs": 1,
+          "max_image_input_bytes": 16777216,
+          "max_oriented_image_pixels": 16777216,
+          "max_scaled_overlay_pixels": 16777216,
+          "max_output_pixels": 16777216,
+          "max_artifact_bytes": 52428800,
+          "scale_percent": {"min": 1, "max": 500},
+          "opacity": {"min": 0, "max": 1},
+          "offset_x": {"min": -16384, "max": 16384},
+          "offset_y": {"min": -16384, "max": 16384}
+        }
+      }
+    },
+    {
+      "family": "media_processing",
+      "media_type": "video",
+      "processing_task": "storyboard_ffmpeg_processing",
+      "processor_id": "storyboard_ffmpeg_processor",
+      "supported": true,
+      "detected": true,
+      "ffmpeg_available": true,
+      "ffprobe_available": true,
+      "h264_encoder": "libx264",
+      "aac_encoder_available": true,
+      "supported_operations": ["overlay_png_on_video", "overlay_png_on_video_positioned"],
+      "operation_types": ["overlay_png_on_video", "overlay_png_on_video_positioned"],
+      "input_mime_types": {"source_video": ["video/mp4", "video/webm", "video/quicktime"], "overlay_png": ["image/png"]},
+      "max_input_bytes": 1073741824,
+      "max_duration_seconds": 1800,
+      "contracts": {
+        "overlay_png_on_video": {
+          "contract_version": "single_output_video_transform_v1",
+          "output_roles": ["video"],
+          "required_output_roles": ["video"],
+          "optional_output_roles": [],
+          "output_mime_types_by_role": {"video": ["video/mp4"]},
+          "recipe": {
+            "visual.fit_mode": ["scale_to_base"],
+            "visual.alpha_mode": ["png_alpha"],
+            "visual.end_behavior": ["repeat"],
+            "audio.mode": ["base"],
+            "output.container": ["mp4"],
+            "output.video_codec": ["h264"],
+            "output.audio_codec": ["aac"],
+            "output.pixel_format": ["yuv420p"]
+          }
+        },
+        "overlay_png_on_video_positioned": {
+          "contract_version": "positioned_png_video_overlay_v1",
+          "input_roles": ["base_video", "overlay_image"],
+          "output_roles": ["video"],
+          "required_output_roles": ["video"],
+          "optional_output_roles": [],
+          "output_mime_types_by_role": {"video": ["video/mp4"]},
+          "geometry_policy_id": "midom_overlay_geometry_v1",
+          "recipe": {
+            "visual.anchor": ["center", "top_left", "top_right", "bottom_left", "bottom_right"],
+            "visual.scale_reference": ["oriented_overlay_source"],
+            "visual.alpha_mode": ["png_alpha"],
+            "visual.end_behavior": ["repeat"],
+            "orientation_mode": ["physical_display_orientation"],
+            "output_dimensions": ["base_display_exact"],
+            "duration_mode": ["source_full"],
+            "audio.mode": ["base_or_silence"],
+            "output.container": ["mp4"],
+            "output.video_codec": ["h264"],
+            "output.audio_codec": ["aac"],
+            "output.pixel_format": ["yuv420p"],
+            "output.faststart": [true],
+            "base_display_dimension_alignment": [2]
+          }
+        }
+      },
+      "operation_features": {
+        "overlay_png_on_video": ["single_output_video_transform_v1", "scale_overlay_to_base", "png_alpha", "typed_artifact_roles"],
+        "overlay_png_on_video_positioned": ["positioned_png_video_overlay_v1", "midom_overlay_geometry_v1", "source_relative_scale", "signed_pixel_offsets", "canvas_clipping", "source_display_dimensions", "base_audio_or_silence", "typed_artifact_roles"]
+      },
+      "limits": {
+        "overlay_png_on_video_positioned": {
+          "max_outputs": 1,
+          "max_video_input_bytes": 83886080,
+          "max_video_duration_seconds": 120,
+          "max_image_input_bytes": 16777216,
+          "max_oriented_image_pixels": 16777216,
+          "max_scaled_overlay_pixels": 16777216,
+          "max_output_pixels": 16777216,
+          "max_artifact_bytes": 83886080,
+          "scale_percent": {"min": 1, "max": 500},
+          "opacity": {"min": 0, "max": 1},
+          "offset_x": {"min": -16384, "max": 16384},
+          "offset_y": {"min": -16384, "max": 16384}
+        }
+      }
+    }
+  ],
+  "worker_context": {"worker_id": 85, "paired": true, "online": true, "status": "idle", "accepting": true, "authorized": true, "lease_current": true},
+  "discovery_policy": {
+    "capability_selection": "exact_processor_task_operation_contract_roles_mime_and_effective_limits",
+    "image_without_ffmpeg": "compatible_if_pillow_and_image_codecs_available",
+    "full_frame_only_worker_matches_positioned": false,
+    "busy_accepting_worker": "queueable_not_immediately_claimable",
+    "image_hosted_fallback": "midom_only_when_no_compatible_worker_available_and_no_uncertain_worker_side_effects",
+    "video_hosted_fallback": "forbidden_including_dispatch_failure_and_lease_expiry",
+    "higher_advertised_limits": "never_raise_agreed_contract_ceilings",
+    "lower_advertised_limits": "enforced_per_field_before_dispatch_and_after_download"
+  }
+}

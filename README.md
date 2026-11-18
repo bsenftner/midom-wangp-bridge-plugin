@@ -14,6 +14,40 @@ Although it may be technically possible to inspect its behavior or construct req
 
 Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
 
+## Release 0.8.12
+
+- Adds the narrow MiniMax H3 FL2VA HyperFlow Flash 14B soundtrack-guided route:
+  one start image, required supplied 5-15-second audio, optional ending image,
+  six steps, and one exact-size 720p landscape/portrait H.264/AAC MP4. The
+  contract is `h3_fl2va_soundtrack_v1`, speed profile `hyperflow_6_step`, duration
+  mode `fit_to_driving_audio_max_15`. The supplied soundtrack is used in final
+  delivery; no control video, general references or generated-audio fallback
+  is exposed. Matching Midom integration is required; lip sync and identity
+  still require GPU testing and human take review.
+- Adds positioned PNG overlays on images and videos while retaining the old
+  full-frame video overlay contract. Install `overlay_processing.py` alongside
+  `plugin.py`. Execution is bounded and stateless: no SQLite journal, worker
+  receipt store, automatic retry or invented reconciliation endpoint. Midom
+  remains responsible for durable workflow reliability and recovery decisions.
+- Updates the worker panel with the loaded version, an explicit status summary,
+  collapsible pairing setup and clearer action labels. Pairing scope and
+  authorization behavior are unchanged.
+- Fixes SeedVC discovery for WanGP's current audio-processor import path and
+  explicit `v1.0 Speech` configuration. Singing and v2 Speech are not substituted.
+- Adds user guides for selecting the 16 supported image models and nine audio
+  entries, including their Midom-specific strengths, limits and workflow roles.
+- Compatibility testing targets WanGP 20.00 (`f4cfc125`). Automated tests include
+  native-source validation and actual FFmpeg processing with mocked inference;
+  they do not establish joint GPU behavior or production readiness for H3.
+- Public-checkout verification: **1,642 passed, six skipped** in 436.07 seconds
+  with `WAN2GP_ROOT` pointing to WanGP 20.00. Four Windows-only and two opt-in
+  browser cases were skipped on this Linux run.
+
+Preserve `worker_config.json`, replace the release's runtime files together,
+restart WanGP, and click **Refresh Midom Capabilities**. The panel should report
+version **0.8.12**. Coordinate new feature support with the current Midom server;
+this plugin is not a standalone media service.
+
 ## Release 0.8.11
 
 - Ordinary generated-image uploads now derive MIME and the upload filename suffix from decoded PNG/JPEG/WebP bytes. Misleading supported filenames are corrected without re-encoding when no delivery normalization is needed; hashes and original files remain unchanged. Generic claims keep their existing accepted-format behavior, while explicit PNG/RGBA and typed-output requirements remain enforced. Midom's corresponding storage-side filename correction must also be deployed; historical files are not rewritten.
@@ -26,7 +60,7 @@ Midom, this Bridge plugin, its job and capability contracts, and WanGP itself ev
 - Latest local verification against WanGP 18.80 (`c4d3efce`): 1,248 tests passed, four Windows-only tests skipped on Linux, including 40 new image-upload encoding cases. The FlashVSR correction also passed all 34 compatibility tests against archived WanGP 18.21 native sources. Native-source tests stub model inference; these are not GPU qualification results.
 
 After installing 0.8.11, preserve the workstation's `worker_config.json`, restart
-WanGP, click **Update Capabilities**, and reload Midom's Project page. Coordinate
+WanGP, click **Refresh Midom Capabilities**, and reload Midom's Project page. Coordinate
 deployment of Midom's storage-side image naming fix: this plugin cannot prevent
 an older server from replacing a correct upload name with a misleading target
 suffix. No new Midom claim fields or changed profile IDs are required for the
@@ -42,7 +76,7 @@ suffix. No new Midom claim fields or changed profile IDs are required for the
 - Keeps completion diagnostics shallow and bounded, validates delivered Fish WAV/MP3 bytes independently, preserves lossless WAV bytes, and reports exact hashes and measurements. Windows audio probing uses explicit UTF-8 decoding.
 - Updates historical Qwen Alternate View attention diagnostics for WanGP's current overrides format without changing that retired workflow's recipe.
 
-Restart WanGP after updating, click **Update Capabilities**, and reload Midom's
+Restart WanGP after updating, click **Refresh Midom Capabilities**, and reload Midom's
 Project page. Keep Midom and WanGP current; this plugin remains a paired Midom
 worker, not a supported standalone API. Fish integration was initially developed
 against WanGP v18.17; 0.8.10 source-level tests used WanGP v18.19 (`fdc63bdf`).
@@ -151,12 +185,24 @@ The security boundary is Midom's server-side worker authorization and artifact v
 3. Start or restart WanGP.
 4. Open the WanGP UI and select the `Midom Remote Worker` plugin tab.
 5. In Midom, create a project worker pairing code for the project you want this WanGP machine to serve.
-6. In the plugin tab, enter:
+6. Open `Project Pairing Setup` in the plugin tab and enter:
    - Midom API Base URL.
    - Pairing Code.
    - Machine Name.
-   - Local HTTP development checkbox only if you are intentionally using localhost/private LAN HTTP.
-7. Click the pair/start action in the plugin UI.
+   - Under `Development Connection Settings`, enable a local HTTP checkbox only if you are intentionally using localhost/private LAN HTTP.
+7. Click `Pair Project & Start Worker`.
+
+### Worker Panel
+
+The panel header shows the loaded plugin version from `plugin_info.json`. Restart WanGP after copying updated plugin files: an already-running plugin continues to report its loaded version.
+
+`Worker Status` shows a manually refreshed snapshot of the worker state, active project/job, processing stage and progress, and the last successful heartbeat for each paired project. Heartbeat errors are reported separately for each connection; a generation failure is not itself a connection failure. Timestamps are UTC. Click `Refresh Status & Log` to obtain a current snapshot; the panel does not automatically refresh.
+
+`Project Pairing Setup` starts expanded when unpaired and collapsed when pairings already exist. Routine worker controls remain outside setup:
+
+- `Start Worker` starts accepting work. `Stop Worker & Cancel Current Job` requests cancellation as well as stopping the worker; it does not finish the current job first. The button shows `Stopping...` and is disabled while shutdown is pending.
+- `Refresh Midom Capabilities` reports currently supported capabilities to Midom. In long-idle standby, this action becomes `Wake Worker` and resumes normal polling instead.
+- Existing pairing removal and Event Video Processing keep-awake controls retain their previous behavior.
 
 The plugin writes local pairing state to:
 
@@ -197,6 +243,11 @@ If Midom revokes a worker token, the plugin removes that stale local pairing whe
 ## Supported AI Models And Local Processing
 
 The exact model list is reported to Midom at pairing and capability update time. Midom should show only models reported by the worker and allowed by Midom's server-side model policy.
+
+For model-selection advice, WanGP download names, strengths and limitations,
+see [Choosing WanGP Image Models For Midom](docs/midom-wangp-image-model-guide.md).
+For speech, voice conversion, music and sound effects, see
+[Choosing WanGP Voice, Music And Sound Models For Midom](docs/midom-wangp-audio-model-guide.md).
 
 ### Image Generation
 
@@ -334,7 +385,7 @@ Curated image resolutions include:
 - No prompt, no prompt splitting, no dialogue script, no duration control.
 - Requires exactly one `source_audio` input and one `reference_audio` input.
 - First pass maps to WanGP `seedvc_one_speaker`.
-- Reported only when the local WanGP SeedVC extension is enabled in a speech-compatible mode.
+- Reported only when the local WanGP SeedVC audio processor is configured for `v1.0 Speech`. Singing and v2 Speech are not supported by this Bridge route.
 - Source audio first-pass cap: 120 seconds.
 - Target reference audio max: 25 seconds.
 
@@ -441,6 +492,25 @@ LTX control-video mode:
 - Curated resolutions:
   - `1280x720`
   - `720x1280`
+
+`minimax_h3_fl2va_hyperflow`
+
+- MiniMax H3 FL2VA HyperFlow Flash 14B, supplied-soundtrack route only.
+- Requires one start image and one 5-15-second audio segment; accepts an
+  optional ending image. Generation follows the measured recording rather
+  than inventing speech or stretching it to a target duration.
+- Explicit `h3_fl2va_soundtrack_v1` contract, `hyperflow_6_step` speed profile,
+  `fit_to_driving_audio_max_15` duration mode, and Standard sync only.
+- Six-step Euler, one phase, no accelerator LoRA, no worker LLM enhancement.
+- Renders 32-aligned overscan, then center-crops to exact `1280x720` or
+  `720x1280` at 24 fps. Conditioning-only audio padding covers H3's frame grid;
+  the ending anchor targets the retained timeline, not the padding tail.
+- Final H.264/AAC MP4 uses the original supplied recording as its soundtrack;
+  AAC delivery encoding is not byte-identical to the input recording.
+- No control video, aligned human motion, general image references, voice
+  references or prompt-generated audio is exposed by this first integration.
+- Lip sync and identity are reviewed qualities, not guaranteed outcomes.
+  Matching Midom integration and joint GPU testing remain necessary.
 
 Video output is MP4.
 
@@ -571,7 +641,49 @@ Single-video PNG overlay support includes:
 - Using Midom-supplied source duration metadata for raw WebM files that lack readable container duration metadata.
 - Keeping this as deterministic FFmpeg processing only; it does not call WanGP AI generation models.
 
-Segmented capture normalization support includes:
+### Positioned PNG Overlays
+
+Both original overlay operations are implemented without a worker-side
+database or durable outcome journal. Midom owns workflow reliability, retry
+policy, receipts and reconciliation; the Bridge executes authorized jobs.
+
+The additive `overlay_png_on_image` / `png_image_overlay_v1` operation uses
+`deterministic_image_processing` / `image_overlay_processor` and returns one
+typed RGBA PNG (`image`). It uses Pillow and does not require FFmpeg.
+
+The separate `overlay_png_on_video_positioned` /
+`positioned_png_video_overlay_v1` operation uses the Storyboard FFmpeg processor
+and returns one typed H.264/AAC MP4 (`video`). It preserves physically oriented
+source display dimensions and video timing; odd dimensions are rejected, never
+silently resized. Existing full-frame `overlay_png_on_video` behavior is unchanged.
+
+Both operations use five anchors, overlay-source-relative scale (1-500%), signed
+pixel offsets, clipping, EXIF orientation, and half-to-even rounding. Opacity
+below `0.999` adjusts alpha; `0.999` and above leave source alpha unchanged.
+Image inputs are limited to 16 MiB / 16,777,216 pixels each; scaled overlays and
+output canvases have the same pixel ceiling. Image output is limited to 50 MiB;
+video input/output to 80 MiB, with a 120-second source-video timeline ceiling.
+Smaller effective limits apply when negotiated. Animated images and arbitrary
+commands or generation settings are rejected.
+
+Include **`overlay_processing.py` alongside `plugin.py`** when installing this
+implementation. Discovery checks processing dependencies and resource guards,
+not writable job-state storage. The processing safeguards include per-process
+1.5-GiB address-space guards on Linux, a 1.5-GiB process-tree Job Object guard on
+Windows, a 512-MiB scratch budget, cancellation checks, and image/video execution
+timeouts of 120/1,800 seconds. These ceilings are safeguards, not throughput guarantees.
+
+Delivery bookkeeping is transient within the active call. The Bridge does not
+automatically retry an ambiguous upload/completion or report that ambiguity as
+a definite failure. It logs the uncertainty without creating another render or
+calling a new recovery API. It does not maintain outcome history across restarts
+or independently prevent Midom from redispatching a job. Midom owns those
+durable decisions; processing capabilities do not promise end-to-end exactly-once
+execution. No proposed new uncertainty-report protocol is implemented.
+
+No SQLite database, local receipt store or durable job journal is required.
+
+### Segmented Capture Normalization
 
 - Normalizing raw browser capture segments, usually WebM, into storyboard-compatible H.264/AAC MP4.
 - Exact `1280x720` or `720x1280` output using scale-to-cover crop when requested by Midom.
@@ -653,25 +765,25 @@ Some capabilities appear only when local runtime support is available:
 1. Start WanGP on the GPU workstation.
 2. Open the `Midom Remote Worker` plugin tab.
 3. Pair the worker to a Midom project with a fresh Midom pairing code.
-4. Click Update Capabilities after changing local WanGP model configuration or installing new supported assets.
+4. Click Refresh Midom Capabilities after changing local WanGP model configuration or installing new supported assets.
 5. Start the worker loop if it is not already running.
 6. Queue media generation jobs from Midom.
 7. Monitor progress in Midom or in the plugin log panel.
 8. Disconnect a project pairing when that project should no longer use this worker.
 
-If the worker has been idle for a long time, the plugin gradually backs off polling. After long-idle standby, use the local Wake for Active Use button before expecting immediate job pickup.
+If the worker has been idle for a long time, the plugin gradually backs off polling. After long-idle standby, use the local Wake Worker button before expecting immediate job pickup.
 
 For live Video Collection Events, use Event Video Processing Keep Awake before the upload window starts. The 4h, 8h, and 12h keep-awake buttons are local-only controls that keep compatible Event Video Processing pairings out of long-idle standby so Midom can queue bursty event uploads to the local processor instead of immediately falling back to hosted processing. Disable it after the event window if normal idle standby behavior is preferred.
 
-For Storyboard FFmpeg work, Midom decides whether a job is eligible for a paired worker. If a compatible worker is available, Midom can route card rendering, overlay, trimming, final assembly, optimization, and soundtrack replacement jobs to this plugin; otherwise Midom can run its hosted fallback path.
+For existing human-facing Storyboard FFmpeg work, Midom decides whether a job is eligible for a paired worker. If a compatible worker is available, Midom can route card rendering, overlay, trimming, final assembly, optimization, and soundtrack replacement jobs to this plugin; otherwise Midom can run its existing hosted fallback path. The additive external-agent positioned-video contract is different: it requires a compatible paired worker and never permits hosted video fallback. Midom owns bounded hosted image processing and worker-selection policy; the Bridge itself does not dispatch hosted jobs.
 
 ## Troubleshooting
 
 SeedVC does not appear:
 
-- In WanGP, enable SeedVC Voice Replacement in Configuration > Extensions.
-- Use a speech-compatible SeedVC mode.
-- Click Update Capabilities in the plugin.
+- In WanGP, open Configuration > Extensions > Audio Postprocessors > SeedVC.
+- Select `v1.0 Speech` and save the configuration. WanGP's default singing mode does not enable this speech-only Bridge route; the Bridge does not change that selection automatically.
+- Click Refresh Midom Capabilities in the plugin.
 
 MP3 is not available:
 
@@ -694,7 +806,7 @@ Pairing succeeds but an old worker reports 401/403:
 Jobs queue but do not start quickly:
 
 - Check whether the worker is running.
-- Check whether the worker is in long-idle standby and needs Wake for Active Use.
+- Check whether the worker is in long-idle standby and needs Wake Worker.
 - Check whether another paired project already owns the active local WanGP generation.
 - Check whether the pairing was created with the job family enabled. Midom may offer separate pairing choices for AI Media Generation, Event Video Processing, and Storyboard FFmpeg processing.
 
@@ -751,6 +863,8 @@ git diff --check
 ```
 
 The v18 resolution-validator tests use the actual WanGP source. A plugin installed under `Wan2GP/plugins/` finds it automatically. For a standalone repository checkout, set `WAN2GP_ROOT` to the WanGP installation directory before running tests. These validator integration tests are skipped when no compatible WanGP source is available; ordinary plugin tests still run.
+
+The optional worker-panel browser checks use real Gradio 5.29.0 and Playwright/Chromium in an isolated test environment. Run them separately with `MIDOM_RUN_WORKER_PANEL_BROWSER=1 python -m pytest -q tests/test_worker_panel_browser.py`. They test the production panel's desktop/mobile layout and callbacks with simulated pairing and worker execution; they do not contact Midom or run inference. The ordinary suite skips these two browser cases. Set `MIDOM_PANEL_SCREENSHOTS` to retain their screenshots in a chosen directory.
 
 Do not commit local `worker_config.json`, generated media, pairing codes, bearer tokens, or OS sidecar files.
 

@@ -1,0 +1,46 @@
+{
+  "fixture_set_id": "media_assembly_agent_overlays_v1_fixtures_v1",
+  "scope": "Behavioral reconciliation fixtures; no new recovery endpoint, lookup URL, grant format, or worker-assisted recovery payload is defined here",
+  "identity": {"org_id": 10, "project_id": 180, "requested_by_user_id": 20, "mediaassemblyjobid": 21002, "worker_job_id": 22002, "artifact_index": 0, "role": "video", "sha256": "5555555555555555555555555555555555555555555555555555555555555555"},
+  "policy": {
+    "matching_upload_replay": "same_parent_job_index_role_hash_and_current_authorization",
+    "conflicting_replay": "reject_without_creating_another_output",
+    "automatic_render_retry": false,
+    "automatic_new_parent": false,
+    "expired_lease_reuse": false,
+    "video_hosted_fallback": false,
+    "exactly_once_end_to_end_established": false,
+    "sources_and_project_intermediates": "unchanged_not_deleted",
+    "worker_temporary_files": "not_a_durable_recovery_store",
+    "new_session": "Midom_resolves_original_identity_and_rechecks_current_Project_and_all_file_access_without_reviving_old_grant",
+    "unknown_lookup": "uncertain_explicit_recovery_required_not_failure_or_success"
+  },
+  "cases": [
+    {"id": "upload_response_lost", "event": "upload_timeout", "lookup": "unavailable", "expected": "uncertain", "reconcile": true, "rerender": false, "new_parent": false},
+    {"id": "upload_persisted_reply_lost", "event": "upload_timeout", "lookup": "artifact_saved", "expected": "artifact_saved_parent_not_proven_complete", "reconcile": true, "rerender": false, "new_parent": false},
+    {"id": "completion_persisted_reply_lost", "event": "completion_timeout", "lookup": "parent_complete_receipt_pending", "expected": "reconcile_receipt_without_rerender", "reconcile": true, "rerender": false, "new_parent": false},
+    {"id": "output_saved_parent_failed", "event": "crash_after_output_creation", "lookup": "artifact_saved_parent_failed", "expected": "artifact_saved_explicit_parent_recovery", "reconcile": true, "rerender": false, "new_parent": false},
+    {"id": "all_boundaries_saved", "event": "completion_timeout", "lookup": "complete_with_receipt", "expected": "return_existing_authorized_receipt", "reconcile": true, "rerender": false, "new_parent": false},
+    {"id": "late_upload_expired_lease", "event": "upload_attempt", "lease_current": false, "expected": "reject_expired_lease", "rerender": false, "new_parent": false},
+    {"id": "late_complete_expired_lease", "event": "completion_attempt", "lease_current": false, "expected": "reject_expired_lease", "rerender": false, "new_parent": false},
+    {"id": "grant_revoked_process_unconfirmed", "event": "grant_revoked", "process_exit_verified": false, "expected": "stop_requested_execution_state_unverified", "rerender": false, "new_parent": false},
+    {"id": "cancel_exit_verified", "event": "cancel_requested", "process_exit_verified": true, "expected": "canceled_no_successful_partial_delivery", "rerender": false, "new_parent": false}
+  ],
+  "upload_replays": [
+    {"id": "matching", "changes": {}, "authorized": true, "lease_current": true, "expected": "return_existing_artifact_identity"},
+    {"id": "different_hash", "changes": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "authorized": true, "lease_current": true, "expected": "artifact_conflict"},
+    {"id": "different_role", "changes": {"role": "image"}, "authorized": true, "lease_current": true, "expected": "artifact_conflict"},
+    {"id": "different_index", "changes": {"artifact_index": 1}, "authorized": true, "lease_current": true, "expected": "artifact_conflict"},
+    {"id": "different_parent", "changes": {"mediaassemblyjobid": 21099}, "authorized": true, "lease_current": true, "expected": "artifact_conflict"},
+    {"id": "different_job", "changes": {"worker_job_id": 22099}, "authorized": true, "lease_current": true, "expected": "artifact_conflict"},
+    {"id": "matching_but_stale_lease", "changes": {}, "authorized": true, "lease_current": false, "expected": "reject_expired_lease"},
+    {"id": "matching_but_revoked", "changes": {}, "authorized": false, "lease_current": true, "expected": "reject_unauthorized"}
+  ],
+  "session_recovery": [
+    {"id": "fresh_authorized_session", "fresh_authorization": true, "project_access": true, "file_access": true, "original_identity_matches": true, "expected": "authorized_existing_result_lookup_no_old_grant_revival"},
+    {"id": "no_fresh_authorization", "fresh_authorization": false, "project_access": true, "file_access": true, "original_identity_matches": true, "expected": "recovery_access_denied"},
+    {"id": "project_access_removed", "fresh_authorization": true, "project_access": false, "file_access": true, "original_identity_matches": true, "expected": "recovery_access_denied"},
+    {"id": "file_access_removed", "fresh_authorization": true, "project_access": true, "file_access": false, "original_identity_matches": true, "expected": "recovery_access_denied"},
+    {"id": "wrong_original_identity", "fresh_authorization": true, "project_access": true, "file_access": true, "original_identity_matches": false, "expected": "recovery_access_denied"}
+  ]
+}

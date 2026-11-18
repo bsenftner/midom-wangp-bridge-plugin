@@ -1,0 +1,123 @@
+{
+  "fixture_set_id": "media_assembly_agent_overlays_v1_fixtures_v1",
+  "hash_convention": "Illustrative content hashes for wire examples, not hashes of supplied real media",
+  "image": {
+    "candidate": {
+      "job_id": 22001, "worker_id": 85, "org_id": 10, "project_id": 180, "requested_by_user_id": 20,
+      "family": "media_processing", "media_type": "image",
+      "model_id": "image_overlay_processor", "processor_id": "image_overlay_processor",
+      "processing_task": "deterministic_image_processing", "operation_type": "overlay_png_on_image",
+      "summary": {
+        "contract_version": "png_image_overlay_v1", "source_image_count": 1, "overlay_png_count": 1,
+        "video_input_count": 0, "audio_input_count": 0, "output_count": 1,
+        "output_format": "png", "output_mime_type": "image/png", "output_color_mode": "rgba",
+        "output_width": 1280, "output_height": 720,
+        "inputs": [
+          {"input_id": 101, "kind": "source_image", "role": "base_image", "sequence": 0, "mime_type": "image/png", "encoded_bytes": 4096, "oriented_width": 1280, "oriented_height": 720},
+          {"input_id": 102, "kind": "overlay_png", "role": "overlay_image", "sequence": 1, "mime_type": "image/png", "encoded_bytes": 1024, "oriented_width": 256, "oriented_height": 128}
+        ],
+        "processing": {
+          "operation_type": "overlay_png_on_image", "contract_version": "png_image_overlay_v1", "mediaassemblyjobid": 21001,
+          "geometry_policy_id": "midom_overlay_geometry_v1", "orientation_mode": "exif_transpose",
+          "visual": {"anchor": "bottom_right", "scale_reference": "oriented_overlay_source", "scale_percent": 25, "offset_x": -24, "offset_y": -24, "opacity": 0.998, "alpha_mode": "png_alpha"}
+        }
+      }
+    },
+    "claim": {
+      "job_id": 22001, "family": "media_processing", "media_type": "image",
+      "target": {"org_id": 10, "project_id": 180, "requested_by_user_id": 20},
+      "model_id": "image_overlay_processor", "processor_id": "image_overlay_processor",
+      "processing_task": "deterministic_image_processing", "operation_type": "overlay_png_on_image",
+      "processing": {
+        "operation_type": "overlay_png_on_image", "contract_version": "png_image_overlay_v1", "mediaassemblyjobid": 21001,
+        "geometry_policy_id": "midom_overlay_geometry_v1", "orientation_mode": "exif_transpose",
+        "visual": {"anchor": "bottom_right", "scale_reference": "oriented_overlay_source", "scale_percent": 25, "offset_x": -24, "offset_y": -24, "opacity": 0.998, "alpha_mode": "png_alpha"}
+      },
+      "inputs": [
+        {"input_id": 101, "kind": "source_image", "role": "base_image", "sequence": 0, "mime_type": "image/png", "filename": "base.png", "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+        {"input_id": 102, "kind": "overlay_png", "role": "overlay_image", "sequence": 1, "mime_type": "image/png", "filename": "logo.png", "sha256": "2222222222222222222222222222222222222222222222222222222222222222"}
+      ],
+      "output": {"count": 1, "format": "png", "mime_type": "image/png", "color_mode": "rgba", "width": 1280, "height": 720, "artifacts": [{"artifact_index": 0, "role": "image", "mime_type": "image/png", "required": true}]}
+    },
+    "decoded_inputs": [
+      {"input_id": 101, "sequence": 0, "encoded_bytes": 4096, "decoded_format": "PNG", "decoded_mode": "RGB", "decoded_width": 1280, "decoded_height": 720, "oriented_width": 1280, "oriented_height": 720, "frames": 1, "exif_orientation": 1},
+      {"input_id": 102, "sequence": 1, "encoded_bytes": 1024, "decoded_format": "PNG", "decoded_mode": "RGBA", "decoded_width": 256, "decoded_height": 128, "oriented_width": 256, "oriented_height": 128, "frames": 1, "exif_orientation": 1}
+    ],
+    "completion": {
+      "artifacts": [{"artifact_id": 23001, "file_id": 24001, "artifact_index": 0, "role": "image"}],
+      "backend": "pillow", "model_id": "image_overlay_processor", "processor_id": "image_overlay_processor",
+      "processing_metadata": {
+        "operation_type": "overlay_png_on_image", "contract_version": "png_image_overlay_v1", "geometry_policy_id": "midom_overlay_geometry_v1",
+        "mediaassemblyjobid": 21001, "worker_job_id": 22001, "orientation_mode": "exif_transpose",
+        "inputs": [
+          {"input_id": 101, "role": "base_image", "sequence": 0, "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "oriented_width": 1280, "oriented_height": 720},
+          {"input_id": 102, "role": "overlay_image", "sequence": 1, "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "oriented_width": 256, "oriented_height": 128}
+        ],
+        "placement": {"anchor": "bottom_right", "scale_percent": 25, "offset_x": -24, "offset_y": -24, "requested_opacity": 0.998, "effective_opacity": 0.998, "overlay_width": 64, "overlay_height": 32, "left": 1192, "top": 664, "visible_box": [1192, 664, 1256, 696]},
+        "outputs": [{"artifact_index": 0, "role": "image", "mime_type": "image/png", "decoded_format": "PNG", "color_mode": "rgba", "width": 1280, "height": 720, "encoded_bytes": 5000, "sha256": "3333333333333333333333333333333333333333333333333333333333333333"}]
+      }
+    }
+  },
+  "video": {
+    "candidate": {
+      "job_id": 22002, "worker_id": 85, "org_id": 10, "project_id": 180, "requested_by_user_id": 20,
+      "family": "media_processing", "media_type": "video",
+      "model_id": "storyboard_ffmpeg_processor", "processor_id": "storyboard_ffmpeg_processor",
+      "processing_task": "storyboard_ffmpeg_processing", "operation_type": "overlay_png_on_video_positioned",
+      "summary": {
+        "contract_version": "positioned_png_video_overlay_v1", "source_video_count": 1, "overlay_png_count": 1,
+        "video_input_count": 1, "audio_input_count": 0, "output_count": 1,
+        "output_format": "mp4", "output_mime_type": "video/mp4", "output_color_mode": "rgb",
+        "output_width": 1280, "output_height": 720,
+        "inputs": [
+          {"input_id": 103, "kind": "source_video", "role": "base_video", "sequence": 0, "mime_type": "video/mp4", "encoded_bytes": 65536, "display_width": 1280, "display_height": 720, "duration_seconds": 12.5},
+          {"input_id": 102, "kind": "overlay_png", "role": "overlay_image", "sequence": 1, "mime_type": "image/png", "encoded_bytes": 1024, "oriented_width": 256, "oriented_height": 128}
+        ],
+        "processing": {
+          "operation_type": "overlay_png_on_video_positioned", "contract_version": "positioned_png_video_overlay_v1", "mediaassemblyjobid": 21002,
+          "geometry_policy_id": "midom_overlay_geometry_v1", "orientation_mode": "physical_display_orientation", "duration_mode": "source_full",
+          "visual": {"anchor": "top_right", "scale_reference": "oriented_overlay_source", "scale_percent": 25, "offset_x": -24, "offset_y": 24, "opacity": 0.999, "alpha_mode": "png_alpha", "end_behavior": "repeat"},
+          "audio": {"mode": "base_or_silence"},
+          "output": {"container": "mp4", "video_codec": "h264", "audio_codec": "aac", "pixel_format": "yuv420p", "faststart": true}
+        }
+      }
+    },
+    "claim": {
+      "job_id": 22002, "family": "media_processing", "media_type": "video",
+      "target": {"org_id": 10, "project_id": 180, "requested_by_user_id": 20},
+      "model_id": "storyboard_ffmpeg_processor", "processor_id": "storyboard_ffmpeg_processor",
+      "processing_task": "storyboard_ffmpeg_processing", "operation_type": "overlay_png_on_video_positioned",
+      "processing": {
+        "operation_type": "overlay_png_on_video_positioned", "contract_version": "positioned_png_video_overlay_v1", "mediaassemblyjobid": 21002,
+        "geometry_policy_id": "midom_overlay_geometry_v1", "orientation_mode": "physical_display_orientation", "duration_mode": "source_full",
+        "visual": {"anchor": "top_right", "scale_reference": "oriented_overlay_source", "scale_percent": 25, "offset_x": -24, "offset_y": 24, "opacity": 0.999, "alpha_mode": "png_alpha", "end_behavior": "repeat"},
+        "audio": {"mode": "base_or_silence"},
+        "output": {"container": "mp4", "video_codec": "h264", "audio_codec": "aac", "pixel_format": "yuv420p", "faststart": true}
+      },
+      "inputs": [
+        {"input_id": 103, "kind": "source_video", "role": "base_video", "sequence": 0, "mime_type": "video/mp4", "filename": "base.mp4", "sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+        {"input_id": 102, "kind": "overlay_png", "role": "overlay_image", "sequence": 1, "mime_type": "image/png", "filename": "logo.png", "sha256": "2222222222222222222222222222222222222222222222222222222222222222"}
+      ],
+      "output": {"count": 1, "format": "mp4", "mime_type": "video/mp4", "color_mode": "rgb", "width": 1280, "height": 720, "artifacts": [{"artifact_index": 0, "role": "video", "mime_type": "video/mp4", "required": true}]}
+    },
+    "decoded_inputs": [
+      {"input_id": 103, "sequence": 0, "encoded_bytes": 65536, "container": "mp4", "stored_width": 720, "stored_height": 1280, "display_width": 1280, "display_height": 720, "rotation_degrees": 90, "duration_seconds": 12.5, "fps": 24, "frame_count": 300, "has_audio": true},
+      {"input_id": 102, "sequence": 1, "encoded_bytes": 1024, "decoded_format": "PNG", "decoded_mode": "RGBA", "decoded_width": 256, "decoded_height": 128, "oriented_width": 256, "oriented_height": 128, "frames": 1, "exif_orientation": 1}
+    ],
+    "completion": {
+      "artifacts": [{"artifact_id": 23002, "file_id": 24002, "artifact_index": 0, "role": "video"}],
+      "backend": "ffmpeg", "model_id": "storyboard_ffmpeg_processor", "processor_id": "storyboard_ffmpeg_processor",
+      "processing_metadata": {
+        "operation_type": "overlay_png_on_video_positioned", "contract_version": "positioned_png_video_overlay_v1", "geometry_policy_id": "midom_overlay_geometry_v1",
+        "mediaassemblyjobid": 21002, "worker_job_id": 22002, "orientation_mode": "physical_display_orientation",
+        "inputs": [
+          {"input_id": 103, "role": "base_video", "sequence": 0, "sha256": "4444444444444444444444444444444444444444444444444444444444444444", "display_width": 1280, "display_height": 720},
+          {"input_id": 102, "role": "overlay_image", "sequence": 1, "sha256": "2222222222222222222222222222222222222222222222222222222222222222", "oriented_width": 256, "oriented_height": 128}
+        ],
+        "placement": {"anchor": "top_right", "scale_percent": 25, "offset_x": -24, "offset_y": 24, "requested_opacity": 0.999, "effective_opacity": 1.0, "overlay_width": 64, "overlay_height": 32, "left": 1192, "top": 24, "visible_box": [1192, 24, 1256, 56]},
+        "audio_action": "base_transcoded_to_aac", "duration_mode": "source_full",
+        "outputs": [{"artifact_index": 0, "role": "video", "mime_type": "video/mp4", "container": "mp4", "video_codec": "h264", "audio_codec": "aac", "pixel_format": "yuv420p", "width": 1280, "height": 720, "rotation_degrees": 0, "duration_seconds": 12.5, "fps": 24, "frame_count": 300, "has_audio": true, "encoded_bytes": 70000, "sha256": "5555555555555555555555555555555555555555555555555555555555555555"}]
+      }
+    }
+  }
+}

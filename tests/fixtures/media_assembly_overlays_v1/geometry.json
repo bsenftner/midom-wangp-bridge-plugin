@@ -1,0 +1,75 @@
+{
+  "fixture_set_id": "media_assembly_agent_overlays_v1_fixtures_v1",
+  "geometry_policy_id": "midom_overlay_geometry_v1",
+  "semantics": {
+    "numeric_arithmetic": "finite_IEEE754_binary64_matching_Python_float",
+    "rounding": "half_to_even",
+    "processing_order": ["decode_single_frame", "exif_transpose", "validate_scaled_pixel_budget", "resize_rgba_lanczos", "apply_opacity_threshold", "anchor_and_offset", "clip_to_canvas", "source_over"],
+    "scaled_dimension": "max(1, round(oriented_source_dimension * (scale_percent / 100.0)))",
+    "centered_position": "round((base_dimension - scaled_overlay_dimension) / 2.0) + signed_offset",
+    "offset_axes": "positive_x_right_positive_y_down_in_display_pixels",
+    "scale_reference": "oriented_overlay_source",
+    "alpha": "straight_8bit_RGBA_source_over_in_encoded_channel_space_no_linear_light_conversion",
+    "opacity": "if opacity < 0.999 multiply each overlay alpha by opacity and round half to even; otherwise leave alpha unchanged",
+    "alpha_validation": "genuine_PNG_but_no_required_transparent_or_opaque_pixel_count",
+    "clipping": "intersect_with_base_canvas_without_resizing_base; empty_intersection_is_valid",
+    "image_orientation": "EXIF_transpose_base_and_overlay_before_geometry",
+    "video_orientation": "physically_normalize_orthogonal_rotation_before_placement; source_display_dimensions_are_authoritative",
+    "animation": "single_frame_images_only",
+    "video_audio": "transcode_base_audio_to_AAC_or_generate_silence_if_no_audio; no_bit_identical_audio_promise",
+    "video_timing": "full_source_video_timeline_no_requested_trim_no_forced_24fps",
+    "video_encoding": "H264_AAC_MP4_yuv420p_faststart; even_display_dimensions_required_no_silent_padding_or_resize",
+    "video_overlay_preparation": "same_RGBA_Lanczos_resize_and_integer_alpha_rounding_before_FFmpeg_not_an_alternative_FFmpeg_opacity_calculation",
+    "resource_checks": "check_input_size_and_dimensions_then_scaled_pixel_count_before_allocating_scaled_image"
+  },
+  "placement_cases": [
+    {"id": "center_half_even", "base": [10, 8], "overlay": [3, 3], "scale_percent": 100, "anchor": "center", "offset": [0, 0], "expected_scaled": [3, 3], "expected_position": [4, 2], "expected_visible_box": [4, 2, 7, 5]},
+    {"id": "top_left", "base": [10, 8], "overlay": [3, 2], "scale_percent": 100, "anchor": "top_left", "offset": [0, 0], "expected_scaled": [3, 2], "expected_position": [0, 0], "expected_visible_box": [0, 0, 3, 2]},
+    {"id": "top_right", "base": [10, 8], "overlay": [3, 2], "scale_percent": 100, "anchor": "top_right", "offset": [0, 0], "expected_scaled": [3, 2], "expected_position": [7, 0], "expected_visible_box": [7, 0, 10, 2]},
+    {"id": "bottom_left", "base": [10, 8], "overlay": [3, 2], "scale_percent": 100, "anchor": "bottom_left", "offset": [0, 0], "expected_scaled": [3, 2], "expected_position": [0, 6], "expected_visible_box": [0, 6, 3, 8]},
+    {"id": "bottom_right", "base": [10, 8], "overlay": [3, 2], "scale_percent": 100, "anchor": "bottom_right", "offset": [0, 0], "expected_scaled": [3, 2], "expected_position": [7, 6], "expected_visible_box": [7, 6, 10, 8]},
+    {"id": "scaled_half_even", "base": [10, 8], "overlay": [5, 3], "scale_percent": 50, "anchor": "center", "offset": [0, 0], "expected_scaled": [2, 2], "expected_position": [4, 3], "expected_visible_box": [4, 3, 6, 5]},
+    {"id": "fractional_scale", "base": [10, 8], "overlay": [2, 3], "scale_percent": 125, "anchor": "top_left", "offset": [0, 0], "expected_scaled": [2, 4], "expected_position": [0, 0], "expected_visible_box": [0, 0, 2, 4]},
+    {"id": "minimum_one_pixel", "base": [10, 8], "overlay": [1, 1], "scale_percent": 1, "anchor": "center", "offset": [0, 0], "expected_scaled": [1, 1], "expected_position": [4, 4], "expected_visible_box": [4, 4, 5, 5]},
+    {"id": "oversized", "base": [4, 4], "overlay": [8, 8], "scale_percent": 100, "anchor": "center", "offset": [0, 0], "expected_scaled": [8, 8], "expected_position": [-2, -2], "expected_visible_box": [0, 0, 4, 4]},
+    {"id": "negative_center_tie", "base": [4, 4], "overlay": [7, 7], "scale_percent": 100, "anchor": "center", "offset": [0, 0], "expected_scaled": [7, 7], "expected_position": [-2, -2], "expected_visible_box": [0, 0, 4, 4]},
+    {"id": "negative_offset_clip", "base": [10, 8], "overlay": [4, 4], "scale_percent": 100, "anchor": "top_left", "offset": [-2, -1], "expected_scaled": [4, 4], "expected_position": [-2, -1], "expected_visible_box": [0, 0, 2, 3]},
+    {"id": "positive_offset_clip", "base": [10, 8], "overlay": [4, 4], "scale_percent": 100, "anchor": "bottom_right", "offset": [2, 1], "expected_scaled": [4, 4], "expected_position": [8, 5], "expected_visible_box": [8, 5, 10, 8]},
+    {"id": "off_canvas_offset_boundaries", "base": [10, 8], "overlay": [2, 2], "scale_percent": 100, "anchor": "top_left", "offset": [16384, -16384], "expected_scaled": [2, 2], "expected_position": [16384, -16384], "expected_visible_box": null},
+    {"id": "recorded_image_claim", "base": [1280, 720], "overlay": [256, 128], "scale_percent": 25, "anchor": "bottom_right", "offset": [-24, -24], "expected_scaled": [64, 32], "expected_position": [1192, 664], "expected_visible_box": [1192, 664, 1256, 696]},
+    {"id": "scale_upper_boundary", "base": [10, 8], "overlay": [1, 1], "scale_percent": 500, "anchor": "top_left", "offset": [0, 0], "expected_scaled": [5, 5], "expected_position": [0, 0], "expected_visible_box": [0, 0, 5, 5]}
+  ],
+  "opacity_cases": [
+    {"opacity": 0, "input_alpha": [0, 1, 3, 5, 128, 255], "expected_alpha": [0, 0, 0, 0, 0, 0], "effective_opacity": 0},
+    {"opacity": 0.5, "input_alpha": [0, 1, 3, 5, 128, 255], "expected_alpha": [0, 0, 2, 2, 64, 128], "effective_opacity": 0.5},
+    {"opacity": 0.998, "input_alpha": [0, 1, 3, 5, 128, 255], "expected_alpha": [0, 1, 3, 5, 128, 254], "effective_opacity": 0.998},
+    {"opacity": 0.999, "input_alpha": [0, 1, 3, 5, 128, 255], "expected_alpha": [0, 1, 3, 5, 128, 255], "effective_opacity": 1},
+    {"opacity": 1, "input_alpha": [0, 1, 3, 5, 128, 255], "expected_alpha": [0, 1, 3, 5, 128, 255], "effective_opacity": 1}
+  ],
+  "orientation_cases": [
+    {"exif_orientation": 1, "stored": [2, 3], "expected_oriented": [2, 3]},
+    {"exif_orientation": 2, "stored": [2, 3], "expected_oriented": [2, 3]},
+    {"exif_orientation": 3, "stored": [2, 3], "expected_oriented": [2, 3]},
+    {"exif_orientation": 4, "stored": [2, 3], "expected_oriented": [2, 3]},
+    {"exif_orientation": 5, "stored": [2, 3], "expected_oriented": [3, 2]},
+    {"exif_orientation": 6, "stored": [2, 3], "expected_oriented": [3, 2]},
+    {"exif_orientation": 7, "stored": [2, 3], "expected_oriented": [3, 2]},
+    {"exif_orientation": 8, "stored": [2, 3], "expected_oriented": [3, 2]}
+  ],
+  "media_samples": {
+    "png_rgba": "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAAFklEQVR4nGM8EaDRwMDAwMDEAAVwBgArzAHGMUVrmQAAAABJRU5ErkJggg==",
+    "jpeg": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAADAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDOooor5s+4P//Z",
+    "webp": "UklGRlwAAABXRUJQVlA4WAoAAAAQAAAAAQAAAgAAQUxQSAcAAAAAgICAgICAAFZQOCAuAAAA0AEAnQEqAgADAAFAJiWgAnS6AfgAA7AA/ug4v/mCV+QbtQ/+wd/OA/OA/ooAAA==",
+    "truncated_png": "iVBORw0KGgo="
+  },
+  "encoding_cases": [
+    {"id": "rgba_png", "sample": "png_rgba", "filename": "logo.png", "declared_mime": "image/png", "role": "overlay_image", "expected": "accepted"},
+    {"id": "png_misleading_extension", "sample": "png_rgba", "filename": "logo.jpg", "declared_mime": "image/png", "role": "overlay_image", "expected": "accepted"},
+    {"id": "jpeg_mislabeled_png", "sample": "jpeg", "filename": "logo.png", "declared_mime": "image/png", "role": "overlay_image", "expected": "overlay_not_png"},
+    {"id": "webp_mislabeled_png", "sample": "webp", "filename": "logo.png", "declared_mime": "image/png", "role": "overlay_image", "expected": "overlay_not_png"},
+    {"id": "truncated_png", "sample": "truncated_png", "filename": "logo.png", "declared_mime": "image/png", "role": "overlay_image", "expected": "malformed_image"},
+    {"id": "jpeg_base_misleading_extension", "sample": "jpeg", "filename": "base.png", "declared_mime": "image/jpeg", "role": "base_image", "expected": "accepted"},
+    {"id": "webp_base", "sample": "webp", "filename": "base.webp", "declared_mime": "image/webp", "role": "base_image", "expected": "accepted"},
+    {"id": "png_wrong_declared_mime", "sample": "png_rgba", "filename": "logo.png", "declared_mime": "image/jpeg", "role": "overlay_image", "expected": "mime_encoding_mismatch"}
+  ]
+}
