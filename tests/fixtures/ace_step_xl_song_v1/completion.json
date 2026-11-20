@@ -1,0 +1,68 @@
+{
+  "backend": "wangp",
+  "model_id": "ace_step_v1_5_xl_music",
+  "artifacts": [
+    {
+      "artifact_id": 14001,
+      "file_id": 15001,
+      "artifact_index": 0
+    }
+  ],
+  "generation_metadata": {
+    "music_song": {
+      "contract_version": "music_song_v1",
+      "native_preset": "ace_step_v1_5_xl",
+      "recipe_version": "ace_step_xl_turbo_8step_song_v1",
+      "artifact_safety_profile_id": "ace_step_xl_song_mp3_362s_80mib_v1",
+      "lyrics_mode": "supplied",
+      "lyrics_coverage": "not_verified",
+      "planner": "none",
+      "steps": 8,
+      "duration_mode": "requested_seconds",
+      "requested_duration_seconds": 30,
+      "requested_seed": 424202,
+      "resolved_seed": 424202,
+      "original_lyrics_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "original_music_description_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "effective_lyrics_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "effective_music_description_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "assembled_description_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "assembled_lyrics_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "assembled_description_tokens": 80,
+      "assembled_lyrics_tokens": 40,
+      "tokenizer_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "requested_controls": {
+        "bpm": 96,
+        "key": "C major",
+        "time_signature": 4,
+        "language": "en"
+      },
+      "effective_controls": {
+        "bpm": 96,
+        "key": "C major",
+        "time_signature": 4,
+        "language": "en"
+      },
+      "session_succeeded": true,
+      "cancel_requested": false,
+      "observed_native_calls": 1,
+      "native_call_returned_output": true,
+      "client_id": "ace-song-example-client",
+      "artifact_index": 0,
+      "mime_type": "audio/mpeg",
+      "sample_rate_hz": 48000,
+      "channels": 2,
+      "decoded_frames": 1440000,
+      "decoded_duration_seconds": 30.0,
+      "container_duration_seconds": 30.024,
+      "artifact_bytes": 1205559,
+      "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "encoding_source": "native_mp3",
+      "runtime": {
+        "wangp_version": "20.00",
+        "transformer_quantization": "int8",
+        "elapsed_seconds": 5.0
+      }
+    }
+  }
+}

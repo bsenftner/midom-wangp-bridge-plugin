@@ -708,6 +708,23 @@ ACE_STEP15_DEFAULT_DURATION_SECONDS = 30
 ACE_STEP15_MAX_DURATION_SECONDS = 120
 ACE_STEP15_MAX_MUSIC_CAPTION_CHARS = 2000
 ACE_STEP15_MAX_LYRICS_CHARS = 32
+ACE_XL_MODEL_ID = "ace_step_v1_5_xl_music"
+ACE_XL_NATIVE_PRESET = "ace_step_v1_5_xl"
+ACE_XL_CONTRACT = "music_song_v1"
+ACE_XL_RECIPE = "ace_step_xl_turbo_8step_song_v1"
+ACE_XL_SAFETY_PROFILE = "ace_step_xl_song_mp3_362s_80mib_v1"
+ACE_XL_MAX_BYTES = 83_886_080
+ACE_XL_MAX_FRAMES = 17_376_000
+ACE_XL_SAFETY = {
+    "max_artifact_bytes": ACE_XL_MAX_BYTES, "sample_rate_hz": 48000, "channels": 2,
+    "max_decoded_frames": ACE_XL_MAX_FRAMES, "max_decoded_duration_seconds": 362,
+}
+ACE_XL_SELECTION = {
+    "audio_task": "song_generation", "audio_category": "music_and_sounds", "audio_subtype": "music",
+    "contract_version": ACE_XL_CONTRACT, "native_preset": ACE_XL_NATIVE_PRESET,
+    "recipe_version": ACE_XL_RECIPE, "artifact_safety_profile_id": ACE_XL_SAFETY_PROFILE,
+    "duration_mode": "requested_seconds", "prompt_enhancement_by_worker": False,
+}
 ACE_STEP15_BPM_MIN = 30
 ACE_STEP15_BPM_MAX = 300
 ACE_STEP15_TIME_SIGNATURE_VALUES = (2, 3, 4, 6)
@@ -848,6 +865,7 @@ MODEL_CAPABILITY_OVERRIDES = {
 }
 ALLOWED_MODEL_TYPES = set(MODEL_CAPABILITY_OVERRIDES.keys())
 ALLOWED_AUDIO_MODEL_TYPES = {
+    ACE_XL_MODEL_ID,
     "index_tts2",
     CHATTERBOX_MODEL_ID,
     DRAMABOX_MODEL_ID,
@@ -2308,6 +2326,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 },
             },
         })
+        ace_xl = self._ace_xl_song_capability()
+        if ace_xl is not None:
+            models.append(ace_xl)
         models.append({
             "model_id": "longcat_avatar_v1_5",
             "family": "longcat",
@@ -7911,10 +7932,169 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "_midom_max_artifact_bytes": max_bytes, "_midom_fish_audio": metadata,
         }
 
+    def _ace_xl_song_capability(self):
+        if ("audio/mpeg" not in self._audio_output_mime_types()
+                or not shutil.which(self._ffprobe_binary()) or not shutil.which(self._ffmpeg_binary())):
+            return None
+        contract = {
+            "native_preset": ACE_XL_NATIVE_PRESET, "recipe_version": ACE_XL_RECIPE,
+            "artifact_safety_profile_id": ACE_XL_SAFETY_PROFILE, "planner": "none", "steps": 8,
+            "lyrics_modes": ["supplied", "instrumental"], "duration_mode": "requested_seconds",
+            "min_duration_seconds": 5, "max_duration_seconds": 360, "default_duration_seconds": 30,
+            "prompt_enhancement_by_worker": False, "prompt_processing_modes": ["FG"],
+            "max_outputs": 1, "output_mime_types": ["audio/mpeg"],
+            "max_lyrics_utf8_bytes": 16384, "max_music_description_utf8_bytes": 4096,
+            "max_assembled_description_tokens": 256, "max_assembled_lyrics_tokens": 2048,
+            "controls": {
+                "bpm": {"type": "int", "nullable": True, "min": 30, "max": 300, "default": 120},
+                "key": {"type": "text", "nullable": True, "max_utf8_bytes": 64, "default": "C major"},
+                "time_signature": {"type": "int", "nullable": True, "values": [2, 3, 4, 6], "default": 2},
+                "language": {"type": "select", "nullable": True, "default": "unknown", "values": list(ACE_STEP15_LANGUAGES)},
+            },
+            "artifact_safety": dict(ACE_XL_SAFETY),
+        }
+        return {
+            "model_id": ACE_XL_MODEL_ID, "family": "music_and_sounds", "media_type": "audio",
+            "display_name": "Music ACE-Step v1.5 XL Turbo 4B", "supported": True,
+            "audio_task": "song_generation", "audio_category": "music_and_sounds", "audio_subtype": "music",
+            "capabilities": {
+                "music_generation": True, "lyrics": True, "instrumental": True, "instrumental_only": False,
+                "text_to_speech": False, "voice_clone": False, "source_audio_edit": False,
+                "multi_output": False, "prompt_processing_modes": ["FG"],
+            },
+            "limits": {
+                "max_outputs": 1, "min_duration_seconds": 5, "max_duration_seconds": 360,
+                "default_duration_seconds": 30, "max_artifact_bytes": ACE_XL_MAX_BYTES,
+                "input_mime_types": [], "output_mime_types": ["audio/mpeg"],
+                "music_song_contracts": {ACE_XL_CONTRACT: contract},
+            },
+        }
+
+    @staticmethod
+    def _ace_xl_song_int(value, name, minimum, maximum):
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError(f"ACE XL invalid {name}: expected integer {minimum}..{maximum}.")
+        return value
+
+    def _ace_xl_song_selection(self, selection):
+        if not isinstance(selection, dict):
+            raise ValueError("ACE XL selection must be an object.")
+        for key, expected in ACE_XL_SELECTION.items():
+            if type(selection.get(key)) is not type(expected) or selection[key] != expected:
+                raise ValueError(f"ACE XL unsupported or missing {key}.")
+        if selection.get("lyrics_mode") not in ("supplied", "instrumental"):
+            raise ValueError("ACE XL unsupported lyrics_mode.")
+        self._ace_xl_song_int(selection.get("duration_seconds"), "duration_seconds", 5, 360)
+
+    def _ace_xl_song_candidate_incompatibility_reason(self, summary):
+        try:
+            self._ace_xl_song_selection(summary)
+            for key, value in {"prompt_processing_mode": "FG", "output_count": 1, "output_format": "mp3",
+                               "input_audio_count": 0, "input_image_count": 0, "input_video_count": 0}.items():
+                if type(summary.get(key)) is not type(value) or summary[key] != value:
+                    raise ValueError(f"ACE XL unsupported or missing {key}.")
+            for key in ("reference_audio_count", "source_audio_count", "reference_image_count", "control_image_count"):
+                if key in summary and (type(summary[key]) is not int or summary[key] != 0):
+                    raise ValueError(f"ACE XL unsupported {key}.")
+            if self._ace_xl_song_capability() is None:
+                raise ValueError("ACE XL MP3 inspection/encoding unavailable.")
+        except (ValueError, TypeError) as exc:
+            return str(exc)
+        return None
+
+    @staticmethod
+    def _ace_xl_song_text(value, name, limit, *, empty=False):
+        if not isinstance(value, str) or len(value.encode("utf-8")) > limit or (not empty and not value.strip()):
+            raise ValueError(f"ACE XL invalid {name} or UTF-8 byte limit exceeded.")
+        if (any(line.lstrip().startswith("#") for line in value.splitlines())
+                or "!enhanced!" in value or "[/" in value or "<|" in value or "\x00" in value):
+            raise ValueError(f"ACE XL {name} contains reserved native prompt syntax.")
+        return value
+
+    def _validate_ace_xl_song_job(self, job, job_id):
+        generation = job.get("generation")
+        self._ace_xl_song_selection(generation)
+        allowed = set(ACE_XL_SELECTION) | {"lyrics_mode", "duration_seconds", "seed", "options"}
+        if set(generation) - allowed:
+            raise ValueError("ACE XL unsupported generation settings.")
+        if any(key in job for key in ("prompt", "alt_prompt", "negative_prompt", "processing", "options", "custom_settings", "model_type", "model")):
+            raise ValueError("ACE XL uses separate lyrics and music_description, not generic prompts/settings.")
+        if job.get("inputs") != []:
+            raise ValueError("ACE XL requires an explicit empty inputs list.")
+        output = job.get("output")
+        expected_output = {"count": 1, "format": "mp3", "mime_type": "audio/mpeg"}
+        if (not isinstance(output, dict) or set(output) != set(expected_output)
+                or any(type(output[key]) is not type(value) or output[key] != value for key, value in expected_output.items())):
+            raise ValueError("ACE XL requires exactly one MP3 output; alternate output declarations are unsupported.")
+        limits = job.get("limits")
+        if (not isinstance(limits, dict) or set(limits) != set(ACE_XL_SAFETY)
+                or any(type(limits[key]) is not int or limits[key] != value for key, value in ACE_XL_SAFETY.items())):
+            raise ValueError("ACE XL artifact safety selection does not match the negotiated contract.")
+        if self._ace_xl_song_capability() is None:
+            raise ValueError("ACE XL MP3 inspection/encoding unavailable.")
+        lyrics = self._ace_xl_song_text(job.get("lyrics"), "lyrics", 16384, empty=True)
+        description = self._ace_xl_song_text(job.get("music_description"), "music_description", 4096)
+        instrumental = generation["lyrics_mode"] == "instrumental"
+        if (instrumental and lyrics.strip()) or (not instrumental and (not lyrics.strip() or lyrics.strip().lower() in ("[inst]", "[instrumental]"))):
+            raise ValueError("ACE XL lyrics conflict with the explicit lyrics_mode.")
+        options = generation.get("options")
+        if (not isinstance(options, dict) or options.get("multi_prompts_gen_type") != "FG"
+                or set(options) - {"multi_prompts_gen_type", "bpm", "key", "time_signature", "language"}):
+            raise ValueError("ACE XL unsupported options or prompt processing mode.")
+        requested = {key: options[key] for key in ("bpm", "key", "time_signature", "language") if key in options}
+        bpm = 120 if options.get("bpm") is None else self._ace_xl_song_int(options["bpm"], "bpm", 30, 300)
+        meter = 2 if options.get("time_signature") is None else self._ace_xl_song_int(options["time_signature"], "time_signature", 2, 6)
+        if meter not in ACE_STEP15_TIME_SIGNATURE_VALUES:
+            raise ValueError("ACE XL unsupported time_signature.")
+        key = "C major" if options.get("key") is None else options["key"]
+        normalized_key = key.replace("\u266f", "#").replace("\u266d", "b").strip() if isinstance(key, str) else ""
+        match = re.fullmatch(r"([A-Ga-g])\s*([#b]?)\s*((?i:major|minor|maj|min|m))", normalized_key) if isinstance(key, str) and len(key.encode("utf-8")) <= 64 else None
+        if not match:
+            raise ValueError("ACE XL invalid key; expected a major or minor key.")
+        mode = {"maj": "major", "min": "minor", "m": "minor"}.get(match[3].lower(), match[3].lower())
+        key = f"{match[1].upper()}{match[2]} {mode}"
+        language = "unknown" if options.get("language") is None else options["language"]
+        if not isinstance(language, str) or language not in ACE_STEP15_LANGUAGES or (instrumental and language != "unknown"):
+            raise ValueError("ACE XL unsupported language or instrumental language conflict.")
+        requested_seed = generation.get("seed")
+        if requested_seed is not None:
+            self._ace_xl_song_int(requested_seed, "seed", -1, 2_147_483_647)
+        seed = int.from_bytes(os.urandom(4), "big") % 2_147_483_648 if requested_seed in (None, -1) else requested_seed
+        effective = {"bpm": bpm, "key": key, "time_signature": meter, "language": language}
+        metadata = {
+            **{key: generation[key] for key in ("contract_version", "native_preset", "recipe_version", "artifact_safety_profile_id", "lyrics_mode", "duration_mode")},
+            "lyrics_coverage": "not_verified", "planner": "none", "steps": 8,
+            "requested_duration_seconds": generation["duration_seconds"], "requested_seed": requested_seed, "resolved_seed": seed,
+            "original_lyrics_sha256": hashlib.sha256(lyrics.encode("utf-8")).hexdigest(),
+            "original_music_description_sha256": hashlib.sha256(description.encode("utf-8")).hexdigest(),
+            "requested_controls": requested, "effective_controls": effective,
+            "session_succeeded": False, "cancel_requested": False, "observed_native_calls": 0,
+            "native_call_returned_output": False,
+        }
+        return {
+            "model_type": ACE_XL_NATIVE_PRESET, "prompt": "[Instrumental]" if instrumental else lyrics,
+            "alt_prompt": description, "client_id": f"midom-ace-song-{job_id}-{uuid.uuid4().hex}",
+            "model_mode": 0, "duration_seconds": generation["duration_seconds"], "seed": seed,
+            "num_inference_steps": 8, "guidance_scale": 1.0, "guidance_phases": 1, "alt_guidance_scale": 1.0,
+            "flow_shift": 1.0, "sample_solver": "euler", "temperature": 0.85, "top_p": 0.9, "top_k": 0, "audio_scale": 0.5,
+            "video_length": 0, "repeat_generation": 1, "multi_prompts_gen_type": "FG", "prompt_enhancer": "", "negative_prompt": "",
+            "audio_prompt_type": "", "audio_guide": None, "audio_guide2": None, "audio_guide3": None, "audio_source": None,
+            "postprocess_audio": "", "replace_voice_method": "", "activated_loras": [], "loras_multipliers": "",
+            "custom_settings": {"bpm": bpm, "keyscale": key, "timesignature": meter, "language": language},
+            "_api": {"return_audio": True, "return_side_files": False},
+            "_midom_job_id": job_id, "_midom_model_id": ACE_XL_MODEL_ID, "_midom_media_type": "audio",
+            "_midom_audio_task": "song_generation", "_midom_audio_category": "music_and_sounds", "_midom_audio_subtype": "music",
+            "_midom_output_count": 1, "_midom_output_format": "mp3", "_midom_output_mime_type": "audio/mpeg",
+            "_midom_max_artifact_bytes": ACE_XL_MAX_BYTES, "_midom_prompt_processing_mode": "FG",
+            "_midom_requested_seed": requested_seed, "_midom_music_song": metadata,
+        }
+
     def _validate_audio_job(self, job: dict[str, Any], job_id: int) -> dict[str, Any]:
         model_type = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
         if model_type not in ALLOWED_AUDIO_MODEL_TYPES:
             raise ValueError(f"Unsupported audio model_type: {model_type}")
+        if model_type == ACE_XL_MODEL_ID:
+            return self._validate_ace_xl_song_job(job, job_id)
         if model_type in FISH_AUDIO_MODEL_IDS:
             return self._validate_fish_audio_job(job, job_id)
         if self._is_stable_audio3_model(model_type):
@@ -9469,6 +9649,10 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         }
         if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
             metadata["fish_audio"] = settings["_midom_fish_audio"]
+        if settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+            metadata["music_song"] = settings["_midom_music_song"]
+            metadata["resolved_seed"] = settings["seed"]
+            metadata["seed_source"] = "bridge_resolved"
         if settings.get("model_type") == H3_VIDEO_MODEL_ID:
             metadata["h3_video"] = settings["_midom_h3"]
         if artifact_seeds:
@@ -11476,6 +11660,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             return f"unsupported audio model_id: {candidate.get('model_id')}"
         if media_type == "audio" and model_id in FISH_AUDIO_MODEL_IDS:
             return self._fish_audio_candidate_incompatibility_reason(summary, model_id)
+        if media_type == "audio" and model_id == ACE_XL_MODEL_ID:
+            return self._ace_xl_song_candidate_incompatibility_reason(summary)
         if media_type == "video" and model_id not in ALLOWED_VIDEO_MODEL_TYPES:
             return f"unsupported video model_id: {candidate.get('model_id')}"
         if media_type == "video" and model_id == H3_VIDEO_MODEL_ID:
@@ -12507,7 +12693,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     settings,
                 )
                 try:
-                    with self._sensenova_high_resolution_budget(api_session, settings), self._qwen21_production_resolution_budget(api_session, settings), self._fish_audio_execution(api_session, settings):
+                    with self._sensenova_high_resolution_budget(api_session, settings), self._qwen21_production_resolution_budget(api_session, settings), self._fish_audio_execution(api_session, settings), self._ace_xl_song_execution(api_session, settings):
                         job_handle = self._submit_wangp_job(api_session, settings, output_count, callbacks)
                         self._active_job = job_handle
                         try:
@@ -12557,9 +12743,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                     self._post_job_update(connection, job_id, "fail", {"reason": "generation_failed", "message": message})
                     return
                 if media_type == "audio":
-                    generated_files = self._result_audio_files(result, base_path=self._wangp_output_base(api_session))
+                    collection_options = {"base_path": self._wangp_output_base(api_session)}
+                    if settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+                        collection_options["include_unrecognized"] = True
+                    generated_files = self._result_audio_files(result, **collection_options)
                     if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
                         self._validate_fish_audio_completion(settings, generated_files, result)
+                    elif settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+                        self._validate_ace_xl_song_completion(settings, generated_files, result)
                     elif len(generated_files) > 1 and output_count == 1:
                         segment_count = len(generated_files)
                         combined_audio_path = self._combine_audio_segments(generated_files, temp_dir)
@@ -12644,6 +12835,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                             )
                         )
                 generation_metadata = self._build_generation_metadata(settings, result, generated_files[:output_count])
+                if settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+                    self._validate_ace_xl_song_metadata(generation_metadata)
                 if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
                     self._validate_fish_audio_metadata_envelope(generation_metadata)
                     self._fish_audio_progress(connection, job_id, "completing", "Finalizing Fish Audio speech in Midom.")
@@ -12661,6 +12854,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                         f"seed_source={generation_metadata.get('seed_source')!r} "
                         f"artifact_seeds={len(generation_metadata.get('artifact_seeds') or [])}."
                     )
+                if settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+                    self._ace_xl_song_check_active()
                 self._post_job_update(
                     connection,
                     job_id,
@@ -12675,6 +12870,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._log(f"Job failed locally; attempting fail report; job_id={job_id} error={exc}", force=True)
             try:
                 reason = "validation_or_runtime_error"
+                if job.get("model_id") == ACE_XL_MODEL_ID and "cancel_requested" in str(exc):
+                    reason = "cancel_requested"
                 if _bounded_overlay_operation(job) and str(exc) == "cancel_requested":
                     reason = "cancel_requested"
                 if job.get("model_id") in FISH_AUDIO_MODEL_IDS:
@@ -18256,7 +18453,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
                 f"model_mode={settings.get('model_mode')!r} "
                 f"custom_settings={settings.get('custom_settings') if settings.get('model_type') in (CHATTERBOX_MODEL_ID, DRAMABOX_MODEL_ID, ACE_STEP15_WANGP_MODEL_TYPE) else None!r} "
                 f"output_format={settings.get('_midom_output_format')} "
-                f"{('script_sha256=' + settings['_midom_fish_audio']['script_sha256']) if settings.get('model_type') in FISH_AUDIO_MODEL_IDS else self._audio_prompt_summary(settings.get('prompt'))}."
+                f"{('lyrics_sha256=' + settings['_midom_music_song']['original_lyrics_sha256']) if settings.get('model_type') == ACE_XL_NATIVE_PRESET else ('script_sha256=' + settings['_midom_fish_audio']['script_sha256']) if settings.get('model_type') in FISH_AUDIO_MODEL_IDS else self._audio_prompt_summary(settings.get('prompt'))}."
             )
         elif str(settings.get("_midom_media_type") or "") == "video":
             self._log(
@@ -18614,14 +18811,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         except (OSError, ValueError):
             return False
 
-    def _result_audio_files(self, result, *, base_path=None) -> list[str]:
+    def _result_audio_files(self, result, *, base_path=None, include_unrecognized=False) -> list[str]:
         files = []
         base = Path(base_path) if base_path is not None else self._wangp_output_base()
 
         def collect(file_path, source):
             path = self._canonical_wangp_output_path(file_path, base)
             self._log(f"WanGP audio output path; source={source} raw_path={str(file_path)!r} canonical_path={str(path)!r} base={str(base)!r}.")
-            if path.suffix.lower() not in ALLOWED_AUDIO_OUTPUT_SUFFIXES:
+            if path.suffix.lower() not in ALLOWED_AUDIO_OUTPUT_SUFFIXES and not include_unrecognized:
                 self._log(f"Ignoring non-audio WanGP output file; path={path}.")
                 return
             for existing in files:
@@ -20105,6 +20302,162 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             yield
 
     @contextmanager
+    def _ace_xl_song_execution(self, api_session, settings):
+        if settings.get("model_type") != ACE_XL_NATIVE_PRESET:
+            yield
+            return
+        from shared.utils.prompt_parser import split_prompt_units
+
+        module = api_session._ensure_runtime().module
+        original_generate, original_call = module.generate_media, module.call_with_default_device
+        signature, local = inspect.signature(original_generate), threading.local()
+        metadata = settings["_midom_music_song"]
+        metadata["client_id"] = settings["client_id"]
+        settings["_midom_wangp_output_base"] = str(self._wangp_output_base(api_session))
+
+        @wraps(original_call)
+        def observe_call(model_def, label, fn, *args, **kwargs):
+            if not getattr(local, "active", False) or label != ACE_XL_NATIVE_PRESET:
+                return original_call(model_def, label, fn, *args, **kwargs)
+            pipeline = getattr(fn, "__self__", None)
+            transformer = getattr(pipeline, "ace_step_transformer", None)
+            transformer_type = type(transformer)
+            if (pipeline is None or getattr(pipeline, "enable_lm", None) is not False
+                    or model_def.get("ace_step15_transformer_variant") != "xl_turbo"
+                    or not transformer_type.__module__.endswith("ace_step15_xl_hf")
+                    or not callable(getattr(pipeline, "_encode_prompt", None))
+                    or not callable(getattr(pipeline, "pre_text_tokenizer", None))):
+                raise ValueError("ACE XL unsupported native pipeline or planner selection.")
+            metadata["observed_native_calls"] += 1
+            if metadata["observed_native_calls"] != 1:
+                raise ValueError("ACE XL requires exactly one native call.")
+            expected = split_prompt_units(settings["prompt"], "FG")
+            description = split_prompt_units(settings["alt_prompt"], "FG")
+            if len(expected) != 1 or len(description) != 1 or kwargs.get("input_prompt") != expected[0] or kwargs.get("alt_prompt") != description[0]:
+                raise ValueError("ACE XL native text changed before execution.")
+            if (kwargs.get("model_mode") != 0 or kwargs.get("custom_settings") != settings["custom_settings"]
+                    or kwargs.get("sampling_steps") != 8 or kwargs.get("audio_guide")
+                    or kwargs.get("audio_prompt_type")):
+                raise ValueError("ACE XL native recipe changed before execution.")
+            recipe = {
+                "seed": settings["seed"], "duration_seconds": settings["duration_seconds"],
+                "shift": 1.0, "sample_solver": "euler", "guide_scale": 1.0, "alt_guide_scale": 1.0,
+                "temperature": 0.85, "top_p": 0.9, "top_k": 0, "audio_scale": 0.5,
+            }
+            if any(kwargs.get(key) != value for key, value in recipe.items()):
+                raise ValueError("ACE XL native recipe/seed/duration changed before execution.")
+            metadata["effective_lyrics_sha256"] = hashlib.sha256(expected[0].encode("utf-8")).hexdigest()
+            metadata["effective_music_description_sha256"] = hashlib.sha256(description[0].encode("utf-8")).hexdigest()
+            tokenizer = pipeline.pre_text_tokenizer
+            backend = getattr(tokenizer, "backend_tokenizer", None)
+            if not callable(getattr(backend, "to_str", None)):
+                raise ValueError("ACE XL native tokenizer fingerprint unavailable.")
+            metadata["tokenizer_sha256"] = hashlib.sha256(backend.to_str().encode("utf-8")).hexdigest()
+            metadata["tokenizer_fingerprint_source"] = "backend_tokenizer_serialization"
+            original_encode = pipeline._encode_prompt
+            had_override, prior_override = "_encode_prompt" in vars(pipeline), vars(pipeline).get("_encode_prompt")
+            observed = set()
+
+            @wraps(original_encode)
+            def checked_encode(prompt, max_length=256, use_embed_tokens=False):
+                name, limit = ("lyrics", 2048) if use_embed_tokens is True else ("description", 256)
+                if type(max_length) is not int or max_length != limit or name in observed:
+                    raise ValueError("ACE XL native text encoder interface changed.")
+                ids = tokenizer(prompt, padding=False, truncation=False)["input_ids"]
+                if not isinstance(ids, list) or any(type(token) is not int for token in ids):
+                    raise ValueError("ACE XL native tokenizer returned unsupported token IDs.")
+                if not 0 < len(ids) <= limit:
+                    raise ValueError(f"ACE XL assembled {name} exceeds {limit} tokens; no truncation allowed.")
+                metadata[f"assembled_{name}_tokens"] = len(ids)
+                metadata[f"assembled_{name}_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                observed.add(name)
+                return original_encode(prompt, max_length=max_length, use_embed_tokens=use_embed_tokens)
+
+            pipeline._encode_prompt = checked_encode
+            started = time.monotonic()
+            try:
+                output = original_call(model_def, label, fn, *args, **kwargs)
+                if (observed != {"description", "lyrics"} or getattr(pipeline, "_early_stop", None) is not False
+                        or getattr(pipeline, "_interrupt", None) is not False):
+                    raise ValueError("ACE XL incomplete or interrupted native execution.")
+                native_audio = output.get("x") if isinstance(output, dict) else None
+                if (native_audio is None or not hasattr(native_audio, "shape") or math.prod(native_audio.shape) <= 0
+                        or output.get("audio_sampling_rate") != 48000):
+                    raise ValueError("ACE XL native call did not return stereo 48 kHz audio.")
+                effective = output.get("overridden_inputs", {}).get("custom_settings")
+                if effective != settings["custom_settings"]:
+                    raise ValueError("ACE XL native conditioning changed; no planner/fallback permitted.")
+                metadata["native_call_returned_output"] = True
+                metadata["runtime"] = {
+                    "wangp_version": str(getattr(module, "WanGP_version", "unknown"))[:128],
+                    "transformer_quantization": str(getattr(module, "transformer_quantization", "unknown"))[:128],
+                    "memory_profile": str(getattr(module, "loaded_profile", "unknown"))[:128],
+                    "transformer_class": f"{transformer_type.__module__}.{transformer_type.__name__}"[:512],
+                    "elapsed_seconds": time.monotonic() - started,
+                }
+                return output
+            finally:
+                if had_override:
+                    pipeline._encode_prompt = prior_override
+                else:
+                    del pipeline._encode_prompt
+
+        @wraps(original_generate)
+        def observe_generate(*args, **kwargs):
+            bound = signature.bind_partial(*args, **kwargs)
+            if bound.arguments.get("client_id") != settings["client_id"]:
+                return original_generate(*args, **kwargs)
+            local.active = True
+            try:
+                return original_generate(*args, **kwargs)
+            finally:
+                local.active = False
+
+        module.generate_media, module.call_with_default_device = observe_generate, observe_call
+        try:
+            yield
+        finally:
+            module.generate_media, module.call_with_default_device = original_generate, original_call
+
+    def _validate_ace_xl_song_completion(self, settings, files, result):
+        self._ace_xl_song_check_active()
+        metadata = settings["_midom_music_song"]
+        if (getattr(result, "success", None) is not True or getattr(result, "cancelled", None) is not False
+                or getattr(result, "errors", None) or metadata.get("observed_native_calls") != 1
+                or metadata.get("native_call_returned_output") is not True or metadata.get("client_id") != settings["client_id"]):
+            raise ValueError("ACE XL execution evidence invalid; partial or failed execution cannot complete.")
+        if len(files) != 1:
+            raise ValueError("ACE XL requires exactly one distinct generated audio file; no concatenation.")
+        base = settings["_midom_wangp_output_base"]
+        path = self._canonical_wangp_output_path(files[0], base)
+        artifacts = getattr(result, "artifacts", ())
+        returned = [self._canonical_wangp_output_path(name, base) for name in getattr(result, "generated_files", [])]
+        if (len(artifacts) != 1 or artifacts[0].media_type != "audio" or artifacts[0].client_id != settings["client_id"]
+                or not artifacts[0].path or not path.is_file()
+                or not self._same_wangp_output_file(path, self._canonical_wangp_output_path(artifacts[0].path, base))
+                or not any(self._same_wangp_output_file(path, item) for item in returned)):
+            raise ValueError("ACE XL artifact association invalid; require fresh matching API output.")
+        settings["_midom_ace_xl_artifact"] = artifacts[0]
+        metadata.update(session_succeeded=True, cancel_requested=False)
+
+    @staticmethod
+    def _validate_ace_xl_song_metadata(metadata):
+        def check(value, depth=1):
+            if depth > 8 or (isinstance(value, str) and len(value) > 8192):
+                raise ValueError("ACE XL whole generation_metadata exceeds depth/string limits.")
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if not isinstance(key, str) or len(key) > 8192:
+                        raise ValueError("ACE XL invalid metadata key.")
+                    check(item, depth + 1)
+            elif isinstance(value, list):
+                for item in value:
+                    check(item, depth + 1)
+        check(metadata)
+        if len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")) > 32768:
+            raise ValueError("ACE XL whole generation_metadata exceeds 32 KiB.")
+
+    @contextmanager
     def _fish_audio_execution(self, api_session, settings: dict[str, Any]):
         if settings.get("model_type") not in FISH_AUDIO_MODEL_IDS:
             yield
@@ -20379,7 +20732,7 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         max_dialogue_speakers = self._coerce_int(limits.get("max_dialogue_speakers"), 2, 1, DRAMABOX_MAX_DIALOGUE_SPEAKERS)
         voice_mode = str(((job.get("generation") or {}).get("voice_mode")) or "single_reference").strip().lower()
         model_id = str(job.get("model_id") or job.get("model_type") or job.get("model") or "").strip()
-        if self._is_stable_audio3_model(model_id) or self._is_ace_step15_music_model(model_id):
+        if self._is_stable_audio3_model(model_id) or self._is_ace_step15_music_model(model_id) or model_id == ACE_XL_MODEL_ID:
             if inputs:
                 raise ValueError(f"{model_id} first-pass jobs do not support inputs.")
             self._log(f"Generative audio job has no downloadable inputs; job_id={job_id} model_id={model_id}.")
@@ -23515,6 +23868,222 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             "artifact_index": int(payload.get("artifact_index", artifact_index)),
         }
 
+    def _ace_xl_song_check_active(self):
+        if getattr(self, "_cancel_requested_by_midom", False) or (getattr(self, "_stop_event", None) and self._stop_event.is_set()):
+            raise ValueError("ACE XL cancel_requested; cancelled partial delivery is unsupported.")
+        connection = getattr(self, "_active_job_context", None)
+        if connection is not None:
+            self._raise_job_progress_error(connection, self._active_job_id)
+
+    def _ace_xl_song_progress(self, phase, status, progress):
+        self._ace_xl_song_check_active()
+        connection = getattr(self, "_active_job_context", None)
+        if connection is not None:
+            self._set_active_job_status(phase=phase, status=status, progress=progress)
+            self._post_job_update(connection, self._active_job_id, "progress", dict(self._active_job_status))
+        self._ace_xl_song_check_active()
+
+    def _ace_xl_song_process(self, command, *, consume=None, chunks=None, timeout_seconds=90):
+        self._ace_xl_song_check_active()
+        process = subprocess.Popen(command, stdin=subprocess.PIPE if chunks is not None else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        errors, stdout, stderr = [], bytearray(), bytearray()
+
+        def read_output():
+            try:
+                while True:
+                    chunk = process.stdout.read(65536)
+                    if not chunk:
+                        return
+                    if consume is not None:
+                        consume(chunk)
+                    elif len(stdout) + len(chunk) <= 65536:
+                        stdout.extend(chunk)
+                    else:
+                        raise ValueError("ACE XL bounded probe output exceeded 64 KiB.")
+            except Exception as exc:
+                errors.append(exc)
+
+        def read_stderr():
+            try:
+                while True:
+                    chunk = process.stderr.read(65536)
+                    if not chunk:
+                        return
+                    stderr.extend(chunk)
+                    if len(stderr) > 65536:
+                        del stderr[:-65536]
+            except Exception as exc:
+                errors.append(exc)
+
+        def write_input():
+            try:
+                for chunk in chunks:
+                    process.stdin.write(chunk)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                process.stdin.close()
+
+        threads = [threading.Thread(target=reader, daemon=True) for reader in (read_output, read_stderr)]
+        if chunks is not None:
+            threads.append(threading.Thread(target=write_input, daemon=True))
+        for thread in threads:
+            thread.start()
+        deadline, keepalive = time.monotonic() + timeout_seconds, time.monotonic()
+        try:
+            while process.poll() is None or any(thread.is_alive() for thread in threads):
+                self._ace_xl_song_check_active()
+                if errors:
+                    raise ValueError(f"ACE XL bounded audio process failed: {errors[0]}") from errors[0]
+                now = time.monotonic()
+                if now >= deadline:
+                    raise ValueError("ACE XL bounded audio process timed out.")
+                connection = getattr(self, "_active_job_context", None)
+                if connection is not None and now - keepalive >= 15:
+                    self._post_job_update(connection, self._active_job_id, "progress", dict(self._active_job_status))
+                    self._heartbeat_once(connection)
+                    keepalive = now
+                time.sleep(0.02)
+            self._ace_xl_song_check_active()
+            if errors:
+                raise ValueError(f"ACE XL bounded audio process failed: {errors[0]}") from errors[0]
+            if process.returncode != 0:
+                raise ValueError("ACE XL complete audio process failed; no partial delivery.")
+            return bytes(stdout)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            for thread in threads:
+                thread.join()
+            process.stdout.close()
+            process.stderr.close()
+
+    def _ace_xl_song_probe(self, path):
+        output = self._ace_xl_song_process([
+            self._ffprobe_binary(), "-v", "error", "-show_entries",
+            "format=format_name,duration:stream=codec_type,codec_name,sample_rate,channels", "-of", "json", str(path),
+        ])
+        try:
+            probe = json.loads(output)
+            streams = probe["streams"]
+            if (len(streams) != 1 or streams[0]["codec_type"] != "audio"
+                    or streams[0].get("sample_rate") != "48000" or streams[0].get("channels") != 2):
+                raise ValueError("wrong stream geometry")
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("ACE XL requires one genuine 48 kHz stereo audio stream.") from exc
+        return probe
+
+    def _inspect_ace_xl_song_mp3(self, path, *, maximum_frames=ACE_XL_MAX_FRAMES):
+        size = path.stat().st_size if path.is_file() else 0
+        if not 0 < size <= ACE_XL_MAX_BYTES:
+            raise ValueError("ACE XL artifact byte safety limit exceeded or empty output.")
+        probe = self._ace_xl_song_probe(path)
+        if probe["format"].get("format_name") != "mp3" or probe["streams"][0].get("codec_name") != "mp3":
+            raise ValueError("ACE XL requires genuine MP3 bytes, not a renamed file.")
+        frames, peak, pending = 0, 0.0, b""
+
+        def consume(chunk):
+            nonlocal frames, peak, pending
+            pending += chunk
+            count = len(pending) // 8
+            if frames + count > maximum_frames:
+                raise ValueError("ACE XL decoded frame safety limit exceeded.")
+            if count:
+                samples = array.array("f")
+                samples.frombytes(pending[:count * 8])
+                if sys.byteorder != "little":
+                    samples.byteswap()
+                if any(not math.isfinite(value) for value in samples):
+                    raise ValueError("ACE XL nonfinite decoded audio.")
+                peak = max(peak, max(abs(value) for value in samples))
+                frames += count
+                pending = pending[count * 8:]
+
+        self._ace_xl_song_process([
+            self._ffmpeg_binary(), "-v", "error", "-nostdin", "-xerror", "-i", str(path),
+            "-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1",
+        ], consume=consume)
+        if pending or frames == 0 or peak == 0:
+            raise ValueError("ACE XL empty, all-zero, or incomplete decoded audio.")
+        try:
+            duration = float(probe["format"].get("duration"))
+            if not math.isfinite(duration) or duration <= 0:
+                duration = None
+        except (TypeError, ValueError):
+            duration = None
+        digest = hashlib.sha256()
+        with path.open("rb") as reader:
+            for chunk in iter(lambda: reader.read(65536), b""):
+                digest.update(chunk)
+        return {
+            "artifact_index": 0, "mime_type": "audio/mpeg", "sample_rate_hz": 48000, "channels": 2,
+            "decoded_frames": frames, "decoded_duration_seconds": frames / 48000,
+            "container_duration_seconds": duration, "peak_amplitude": peak,
+            "artifact_bytes": size, "artifact_sha256": digest.hexdigest(),
+        }
+
+    def _ace_xl_song_raw_chunks(self, artifact):
+        import numpy as np
+
+        audio = getattr(artifact, "audio_tensor", None)
+        if (artifact.audio_sampling_rate != 48000 or not isinstance(audio, np.ndarray)
+                or audio.ndim != 2 or audio.dtype.kind != "f"):
+            raise ValueError("ACE XL raw API audio must be a stereo 48 kHz floating array.")
+        if audio.shape[0] == 2:
+            audio = audio.T
+        elif audio.shape[1] != 2:
+            raise ValueError("ACE XL raw API audio has unsupported stereo geometry.")
+        if not 0 < audio.shape[0] <= ACE_XL_MAX_FRAMES:
+            raise ValueError("ACE XL raw audio frame safety limit exceeded or empty.")
+        nonzero = False
+        for start in range(0, audio.shape[0], 8192):
+            chunk = audio[start:start + 8192].astype("<f4", copy=False)
+            if not np.isfinite(chunk).all():
+                raise ValueError("ACE XL nonfinite raw audio.")
+            nonzero |= bool(np.any(chunk))
+            yield chunk.tobytes(order="C")
+        if not nonzero:
+            raise ValueError("ACE XL all-zero raw audio.")
+
+    def _prepare_ace_xl_song_mp3(self, file_path, settings, directory):
+        self._ace_xl_song_progress("validating_output", "Inspecting ACE XL song output.", 92)
+        source, path = Path(file_path), Path(directory) / f"ace-song-{settings['_midom_job_id']}.mp3"
+        if not source.is_file() or source.stat().st_size <= 0:
+            raise ValueError("ACE XL native file missing or empty.")
+        probe = self._ace_xl_song_probe(source)
+        native_mp3 = probe["format"].get("format_name") == "mp3" and probe["streams"][0].get("codec_name") == "mp3"
+        if source.suffix.lower() == ".mp3" and not native_mp3:
+            raise ValueError("ACE XL purported native MP3 is not MP3; refusing repair fallback.")
+        if native_mp3:
+            with source.open("rb") as reader, path.open("xb") as writer:
+                remaining = ACE_XL_MAX_BYTES
+                while True:
+                    self._ace_xl_song_check_active()
+                    chunk = reader.read(min(65536, remaining + 1))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    if remaining < 0:
+                        raise ValueError("ACE XL native MP3 grew beyond byte safety limit.")
+                    writer.write(chunk)
+            encoding = "native_mp3"
+        else:
+            container, codec = probe["format"].get("format_name"), probe["streams"][0].get("codec_name", "")
+            if not ((container == "wav" and codec.startswith("pcm_")) or (container == "flac" and codec == "flac")):
+                raise ValueError("ACE XL unsupported native saved format; no fallback.")
+            self._ace_xl_song_progress("preparing_artifact", "Encoding ACE XL MP3 from request-scoped audio.", 93)
+            self._ace_xl_song_process([
+                self._ffmpeg_binary(), "-v", "error", "-nostdin", "-n", "-f", "f32le", "-ar", "48000", "-ac", "2",
+                "-i", "pipe:0", "-c:a", "libmp3lame", "-b:a", "320k", str(path),
+            ], chunks=self._ace_xl_song_raw_chunks(settings["_midom_ace_xl_artifact"]))
+            encoding = "native_raw_audio"
+        measurements = self._inspect_ace_xl_song_mp3(path)
+        settings["_midom_music_song"].update(measurements, encoding_source=encoding)
+        self._ace_xl_song_progress("uploading", "Uploading verified ACE XL MP3.", 95)
+        return str(path), "audio/mpeg"
+
     def _upload_audio_artifact(
         self,
         connection: ConnectionContext,
@@ -23528,7 +24097,9 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if int(artifact_index) != 0:
             raise ValueError("Audio v1 supports only artifact_index 0.")
         requested_format = str(settings.get("_midom_output_format") or "mp3").strip().lower()
-        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+        if settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+            upload_path, mime_type = self._prepare_ace_xl_song_mp3(file_path, settings, temp_dir)
+        elif settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
             self._fish_audio_progress(connection, job_id, "validating_output", "Validating completed Fish Audio speech.")
             self._validate_fish_audio_file(Path(file_path), settings, native=True)
             upload_path, mime_type = file_path, "audio/wav"
@@ -23552,12 +24123,16 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             self._fish_audio_progress(connection, job_id, "uploading", "Uploading verified Fish Audio speech.")
         path = Path(upload_path)
         file_size = path.stat().st_size
-        max_bytes = self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_AUDIO_BYTES, 1, MAX_AUDIO_BYTES)
+        max_bytes = ACE_XL_MAX_BYTES if settings.get("model_type") == ACE_XL_NATIVE_PRESET else self._coerce_int(settings.get("_midom_max_artifact_bytes"), MAX_AUDIO_BYTES, 1, MAX_AUDIO_BYTES)
         if file_size <= 0 or file_size > max_bytes:
             raise ValueError(f"Generated audio artifact size is outside allowed bounds: {file_size} bytes")
-        with path.open("rb") as reader:
-            data = reader.read()
-        sha256 = hashlib.sha256(data).hexdigest()
+        if settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+            self._ace_xl_song_check_active()
+            sha256 = settings["_midom_music_song"]["artifact_sha256"]
+        else:
+            with path.open("rb") as reader:
+                data = reader.read()
+            sha256 = hashlib.sha256(data).hexdigest()
         if settings.get("model_type") in FISH_AUDIO_MODEL_IDS and sha256 != final_audio["sha256"]:
             raise ValueError("Fish Audio artifact_association_invalid: uploaded bytes differ from the verified artifact.")
         self._log(
@@ -23589,11 +24164,14 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("Audio artifact upload response was not a JSON object.")
-        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS:
+        if settings.get("model_type") in FISH_AUDIO_MODEL_IDS or settings.get("model_type") == ACE_XL_NATIVE_PRESET:
             if payload.get("artifact_index", artifact_index) != artifact_index or type(payload.get("artifact_index", artifact_index)) is not int:
-                raise ValueError("Fish Audio artifact_association_invalid: unexpected accepted artifact index.")
+                raise ValueError("Audio artifact_association_invalid: unexpected accepted artifact index.")
             for key in ("artifact_id", "file_id"):
-                self._fish_audio_int(payload.get(key), key, 1, 2_147_483_647)
+                if settings.get("model_type") == ACE_XL_NATIVE_PRESET:
+                    self._ace_xl_song_int(payload.get(key), key, 1, 2_147_483_647)
+                else:
+                    self._fish_audio_int(payload.get(key), key, 1, 2_147_483_647)
         self._log(
             f"Audio artifact upload accepted; job_id={job_id} artifact_index={payload.get('artifact_index', artifact_index)} "
             f"artifact_id={payload.get('artifact_id')} file_id={payload.get('file_id')}."

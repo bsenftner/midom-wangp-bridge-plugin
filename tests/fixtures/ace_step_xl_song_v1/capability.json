@@ -1,0 +1,154 @@
+{
+  "model_id": "ace_step_v1_5_xl_music",
+  "family": "music_and_sounds",
+  "media_type": "audio",
+  "display_name": "Music ACE-Step v1.5 XL Turbo 4B",
+  "supported": true,
+  "audio_task": "song_generation",
+  "audio_category": "music_and_sounds",
+  "audio_subtype": "music",
+  "capabilities": {
+    "music_generation": true,
+    "lyrics": true,
+    "instrumental": true,
+    "instrumental_only": false,
+    "text_to_speech": false,
+    "voice_clone": false,
+    "source_audio_edit": false,
+    "multi_output": false,
+    "prompt_processing_modes": [
+      "FG"
+    ]
+  },
+  "limits": {
+    "max_outputs": 1,
+    "min_duration_seconds": 5,
+    "max_duration_seconds": 360,
+    "default_duration_seconds": 30,
+    "max_artifact_bytes": 83886080,
+    "input_mime_types": [],
+    "output_mime_types": [
+      "audio/mpeg"
+    ],
+    "music_song_contracts": {
+      "music_song_v1": {
+        "native_preset": "ace_step_v1_5_xl",
+        "recipe_version": "ace_step_xl_turbo_8step_song_v1",
+        "artifact_safety_profile_id": "ace_step_xl_song_mp3_362s_80mib_v1",
+        "planner": "none",
+        "steps": 8,
+        "lyrics_modes": [
+          "supplied",
+          "instrumental"
+        ],
+        "duration_mode": "requested_seconds",
+        "min_duration_seconds": 5,
+        "max_duration_seconds": 360,
+        "default_duration_seconds": 30,
+        "prompt_enhancement_by_worker": false,
+        "prompt_processing_modes": [
+          "FG"
+        ],
+        "max_outputs": 1,
+        "output_mime_types": [
+          "audio/mpeg"
+        ],
+        "max_lyrics_utf8_bytes": 16384,
+        "max_music_description_utf8_bytes": 4096,
+        "max_assembled_description_tokens": 256,
+        "max_assembled_lyrics_tokens": 2048,
+        "controls": {
+          "bpm": {
+            "type": "int",
+            "nullable": true,
+            "min": 30,
+            "max": 300,
+            "default": 120
+          },
+          "key": {
+            "type": "text",
+            "nullable": true,
+            "max_utf8_bytes": 64,
+            "default": "C major"
+          },
+          "time_signature": {
+            "type": "int",
+            "nullable": true,
+            "values": [
+              2,
+              3,
+              4,
+              6
+            ],
+            "default": 2
+          },
+          "language": {
+            "type": "select",
+            "nullable": true,
+            "default": "unknown",
+            "values": [
+              "ar",
+              "az",
+              "bg",
+              "bn",
+              "ca",
+              "cs",
+              "da",
+              "de",
+              "el",
+              "en",
+              "es",
+              "fa",
+              "fi",
+              "fr",
+              "he",
+              "hi",
+              "hr",
+              "ht",
+              "hu",
+              "id",
+              "is",
+              "it",
+              "ja",
+              "ko",
+              "la",
+              "lt",
+              "ms",
+              "ne",
+              "nl",
+              "no",
+              "pa",
+              "pl",
+              "pt",
+              "ro",
+              "ru",
+              "sa",
+              "sk",
+              "sr",
+              "sv",
+              "sw",
+              "ta",
+              "te",
+              "th",
+              "tl",
+              "tr",
+              "uk",
+              "ur",
+              "vi",
+              "yue",
+              "zh",
+              "unknown"
+            ]
+          }
+        },
+        "artifact_safety": {
+          "max_artifact_bytes": 83886080,
+          "sample_rate_hz": 48000,
+          "channels": 2,
+          "max_decoded_frames": 17376000,
+          "max_decoded_duration_seconds": 362
+        }
+      }
+    }
+  }
+}

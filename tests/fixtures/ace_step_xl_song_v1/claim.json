@@ -1,0 +1,47 @@
+{
+  "job_id": 2501,
+  "family": "media_generation",
+  "media_type": "audio",
+  "model_id": "ace_step_v1_5_xl_music",
+  "lyrics": "[Verse]\nMorning lights in Denver glow\nBlake is ready, here we go",
+  "music_description": "Warm acoustic pop with a clear English vocal.",
+  "generation": {
+    "audio_task": "song_generation",
+    "audio_category": "music_and_sounds",
+    "audio_subtype": "music",
+    "contract_version": "music_song_v1",
+    "native_preset": "ace_step_v1_5_xl",
+    "recipe_version": "ace_step_xl_turbo_8step_song_v1",
+    "artifact_safety_profile_id": "ace_step_xl_song_mp3_362s_80mib_v1",
+    "lyrics_mode": "supplied",
+    "duration_mode": "requested_seconds",
+    "duration_seconds": 30,
+    "seed": 424202,
+    "prompt_enhancement_by_worker": false,
+    "options": {
+      "multi_prompts_gen_type": "FG",
+      "bpm": 96,
+      "key": "C major",
+      "time_signature": 4,
+      "language": "en"
+    }
+  },
+  "inputs": [],
+  "limits": {
+    "max_artifact_bytes": 83886080,
+    "sample_rate_hz": 48000,
+    "channels": 2,
+    "max_decoded_frames": 17376000,
+    "max_decoded_duration_seconds": 362
+  },
+  "output": {
+    "count": 1,
+    "format": "mp3",
+    "mime_type": "audio/mpeg"
+  },
+  "target": {
+    "org_id": 2,
+    "project_id": 51,
+    "requested_by_user_id": 1
+  }
+}

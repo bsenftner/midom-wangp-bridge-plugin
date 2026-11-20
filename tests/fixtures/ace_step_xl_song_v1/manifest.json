@@ -1,0 +1,12 @@
+{
+  "fixture_set_id": "ace_step_xl_song_v1_implementation_fixtures_v1",
+  "status": "bridge_implemented_midom_mirroring_pending_not_gpu_verified",
+  "completion_hashes": "synthetic_placeholders",
+  "files": {
+    "capability.json": "87cd541f163ae6f93f24ea5475253e0f726fbedcaabb406071b56ebd005e23c3",
+    "candidate.json": "830db4e36755c41b42df152081422e5fde3fe89fba8e2f372f6e69b79141be22",
+    "claim.json": "c56cb0480874e39542fbd65d81f9d5557fa8cbf32a94e83a6849007d0a03dcde",
+    "completion.json": "babd3c4dbde902274372fb7fd112f938b24985d85ad250f31a7c815e5b25f769",
+    "rejections.json": "25ea96a402cd3a7b3339e36294dd7fa4cd1ef1ac1ab8c0ac18d9057327d275f3"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "job_id": 2501,
+  "worker_id": 85,
+  "org_id": 2,
+  "project_id": 51,
+  "requested_by_user_id": 1,
+  "family": "media_generation",
+  "media_type": "audio",
+  "model_id": "ace_step_v1_5_xl_music",
+  "summary": {
+    "audio_task": "song_generation",
+    "audio_category": "music_and_sounds",
+    "audio_subtype": "music",
+    "contract_version": "music_song_v1",
+    "native_preset": "ace_step_v1_5_xl",
+    "recipe_version": "ace_step_xl_turbo_8step_song_v1",
+    "artifact_safety_profile_id": "ace_step_xl_song_mp3_362s_80mib_v1",
+    "lyrics_mode": "supplied",
+    "duration_mode": "requested_seconds",
+    "duration_seconds": 30,
+    "prompt_enhancement_by_worker": false,
+    "prompt_processing_mode": "FG",
+    "output_count": 1,
+    "output_format": "mp3",
+    "input_audio_count": 0,
+    "input_image_count": 0,
+    "input_video_count": 0
+  }
+}

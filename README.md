@@ -14,6 +14,33 @@ Although it may be technically possible to inspect its behavior or construct req
 
 Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
 
+## Release 0.8.13
+
+- Adds `ace_step_v1_5_xl_music` under the explicit `music_song_v1` contract:
+  plain ACE-Step 1.5 XL Turbo, eight steps, no planner, supplied lyrics or
+  explicitly selected instrumental mode, and a separate music description.
+- Delivers one genuine 48-kHz stereo MP3. Requests allow 5-360 seconds;
+  independent delivery safeguards are 362 decoded seconds and 80 MiB.
+  Duration differences are not failures or warnings, and lyric coverage is
+  not verified. Every take needs human review.
+- Counts fully assembled prompts with the loaded native tokenizer before
+  encoding; oversized text fails instead of being silently truncated.
+  Preserves native MP3 bytes or directly encodes the matching request-scoped
+  audio array, without changing global WanGP output settings.
+- Keeps existing ACE instrumental, Stable Audio and Fish behavior unchanged.
+  No reference audio, covers, voice cloning, automatic retries or substitutions
+  are added. Matching Midom integration is required. Local CPU/regression
+  checks are not end-to-end GPU qualification.
+- Public-checkout verification against WanGP 20.00: **1,772 tests passed,
+  six skipped** in 180.41 seconds in the network-restricted test environment,
+  plus four pinned native-tokenizer CPU boundary vectors. The new inspector
+  also accepted the two retained XL test MP3 recordings without modifying
+  their bytes. These are not new paired-worker GPU generation tests.
+
+Copy `plugin.py` and `plugin_info.json` together, keep the existing
+`overlay_processing.py`, preserve `worker_config.json`, restart WanGP and
+click **Refresh Midom Capabilities**. The panel should show **0.8.13**.
+
 ## Release 0.8.12
 
 - Adds the narrow MiniMax H3 FL2VA HyperFlow Flash 14B soundtrack-guided route:
@@ -411,7 +438,19 @@ Curated image resolutions include:
 - Optional controls include BPM, key scale, time signature, and language when reported by the worker.
 - When an INT8 ACE-Step checkpoint is running through Comfy Kitchen, the Bridge temporarily uses WanGP's PyTorch INT8 backend for that job to accommodate ACE-Step layers whose dimensions are unsupported by the accelerated GEMM kernel. The previous INT8 backend is restored when generation finishes; BF16 and non-Comfy-Kitchen configurations are unchanged.
 
-Audio output is truthful per worker:
+`ace_step_v1_5_xl_music`
+
+- Separate song model: explicit supplied lyrics or instrumental mode plus a
+  music description; optional BPM, key, meter, language and seed.
+- Exact `ace_step_v1_5_xl` preset, eight steps, no planner. MP3 only, 48 kHz
+  stereo; one output, no references or covers.
+- Requested duration is 5-360 seconds, default 30. Independent output safety
+  caps are 362 decoded seconds and 80 MiB, not an exact-duration requirement.
+- Actual duration and hashes are recorded. Lyrics are not certified complete;
+  valid takes remain available for human review without duration warnings.
+- Requires corresponding Midom song UI/claim support and refreshed capabilities.
+
+Other audio output is truthful per worker:
 
 - MP3 is reported only when ffmpeg/libmp3lame transcoding is available.
 - WAV is reported when MP3 output cannot be guaranteed.
@@ -862,7 +901,25 @@ python -m pytest -q tests
 git diff --check
 ```
 
-The v18 resolution-validator tests use the actual WanGP source. A plugin installed under `Wan2GP/plugins/` finds it automatically. For a standalone repository checkout, set `WAN2GP_ROOT` to the WanGP installation directory before running tests. These validator integration tests are skipped when no compatible WanGP source is available; ordinary plugin tests still run.
+Native-source integration tests, including the ACE XL route and v18 resolution validators, use the actual WanGP source. A plugin installed under `Wan2GP/plugins/` finds it automatically. For a standalone repository checkout, set `WAN2GP_ROOT` to the WanGP installation directory before running tests. Native integration checks are skipped when the required source is unavailable; other plugin tests still run.
+
+For the complete public-checkout run:
+
+```bash
+WAN2GP_ROOT=/path/to/Wan2GP python -m pytest -q tests
+```
+
+The separate offline ACE tokenizer check uses the synthetic pinned vectors in
+`tests/fixtures/music_song_v1_tokenizer_evidence_draft.json`. With Transformers
+and the pinned tokenizer files available, run:
+
+```bash
+WAN2GP_ROOT=/path/to/Wan2GP python tests/verify_ace_xl_tokenizer_vectors.py /path/to/ace/tokenizer
+```
+
+It validates only the four ACE XL vectors; the historical MiniMax evidence in
+that fixture does not advertise or implement MiniMax Music 3. Neither command
+downloads weights, runs GPU inference, or establishes song quality.
 
 The optional worker-panel browser checks use real Gradio 5.29.0 and Playwright/Chromium in an isolated test environment. Run them separately with `MIDOM_RUN_WORKER_PANEL_BROWSER=1 python -m pytest -q tests/test_worker_panel_browser.py`. They test the production panel's desktop/mobile layout and callbacks with simulated pairing and worker execution; they do not contact Midom or run inference. The ordinary suite skips these two browser cases. Set `MIDOM_PANEL_SCREENSHOTS` to retain their screenshots in a chosen directory.
 

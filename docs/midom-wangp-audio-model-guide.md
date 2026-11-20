@@ -3,10 +3,13 @@
 A practical guide to speech, dialogue, voice conversion, music and audio sound
 effects for Midom users.
 
-**Last checked: November 18, 2026**, against the local Bridge and WanGP 20.00.
-The inventory contains nine supported audio entries, including both Fish
+**Last checked: November 19, 2026**, against local Bridge 0.8.13 and WanGP 20.00.
+The inventory contains ten supported audio entries, including both Fish
 checkpoints and the separate Stable Audio Music/SFX choices. SeedVC is a
 processing facility rather than an ordinary text-to-audio model selector.
+The new ACE XL song route requires matching Midom integration and capability
+refresh; a local Bridge implementation does not establish that a deployed
+Midom site already offers that selector.
 
 Midom offers the subset reported by your paired worker and permitted by its
 current server policy. More models or features in WanGP do not automatically
@@ -20,7 +23,7 @@ There are four different jobs:
 
 - **Text-to-speech:** perform the words in an approved script.
 - **Voice conversion:** change the vocal identity of an existing recording.
-- **Music generation:** create a musical bed, cue or instrumental composition.
+- **Music generation:** create a song, musical bed, cue or instrumental composition.
 - **Sound-effects generation:** create an event, ambience, transition or texture.
 
 A reference voice does not turn every model into a voice converter. A music
@@ -36,6 +39,7 @@ not a tool for repairing a noisy recording.
 | A conversational or dramatic scene from screenplay-like descriptions | DramaBox Audio | Dialogue-first prompting with two voice anchors and additional scripted speakers. |
 | Keep an existing performance but change its voice | SeedVC Voice Replacement | Converts recorded speech instead of generating new words from a script. |
 | An instrumental music cue with tempo/key guidance | ACE-Step 1.5 Music | Exposes musical controls; the current Midom route is instrumental-only. |
+| Sing your supplied lyrics, including personalized names or places | ACE-Step 1.5 XL Turbo | Separate lyrics and musical direction, with human review of every take; no reference-voice cloning. |
 | A music bed, groove or loop candidate described in words | Stable Audio 3 Small Music | Music-focused prompt generation. |
 | An impact, whoosh, mechanical sound, room tone or ambience | Stable Audio 3 Small SFX | Sound-event-focused generation, rather than musical composition. |
 
@@ -70,6 +74,7 @@ Run a short test in WanGP, then refresh Bridge capabilities and reload Midom.
 | **DramaBox Audio** | `dramabox_audio` | Expressive scene/dialogue generation; requires two voice anchors through this Bridge route. |
 | **SeedVC audio processor: v1.0 Speech** | `seedvc_voice_replacement` | Change a recorded speaker's voice; not text-to-speech, singing conversion or multi-speaker replacement. |
 | **Music ACE-Step v1.5 Turbo 2B** | `ace_step_v1_5_music` | Instrumental music with optional musical controls; lyrics and cloned singing voices are not exposed. |
+| **Music ACE-Step v1.5 XL Turbo 4B** | `ace_step_v1_5_xl_music` | Supplied lyrics or explicit instrumental mode; eight steps, no planner, MP3 only, no cloned singing voices. |
 | **Music Stable Audio 3 Small Music** | `stable_audio3_small_music` | Prompt-generated music; no supplied-audio editing or exact lyric performance through this route. |
 | **Music Stable Audio 3 Small SFX** | `stable_audio3_small_sfx` | Prompt-generated effects and ambience; no source-audio repair/editing through this route. |
 
@@ -288,11 +293,51 @@ model's current license as well as permissions for the reference material.
 
 ## Music Models
 
+### ACE-Step 1.5 XL Turbo: Songs With Supplied Lyrics
+
+Choose this separate XL model when the words matter: a short song, a jingle,
+or personalized sung lines containing names and places. Enter **Lyrics** as
+the words to sing, with optional section labels on their own lines, and
+**Music Description** as genre, instrumentation, mood and vocal direction.
+The Bridge does not rewrite the lyrics or certify that all words were sung.
+
+Example lyrics:
+
+```text
+[Verse]
+Morning lights in Denver glow
+Blake is ready, here we go
+```
+
+Example music description:
+
+```text
+Warm acoustic pop with a clear English vocal, gentle guitar, piano and a
+restrained rhythm section. Friendly, intimate delivery.
+```
+
+The route uses the plain eight-step XL Turbo preset, not a planner-enabled
+variant. Optional controls are BPM, key, meter, language and seed. To request
+an instrumental, select **Instrumental** explicitly and leave lyrics empty;
+do not insert an instrumental marker into Song with Lyrics mode.
+
+Requests span 5-360 seconds, defaulting to 30. This is musical guidance, not
+an exact-length promise: valid shorter or longer takes within independent
+safety limits remain reviewable. Delivery is one 48-kHz stereo MP3, bounded
+at 362 decoded seconds and 80 MiB. There is no WAV delivery, reference audio,
+cover mode or cloned singing voice in this first contract.
+
+In Blake's short local tests, XL performed the supplied words and pronounced
+"Blake" and "Denver" clearly. That is evidence for those inputs, not a general
+accuracy, speed or hardware guarantee. Audition pronunciation, missing or
+extra lyrics, musical structure and endings before using a take. Oversized
+text fails clearly rather than silently losing tokens.
+
 ### ACE-Step 1.5: Instrumental Cues With Musical Controls
 
 Choose ACE-Step for an instrumental cue where genre, instrumentation, groove
 and musical direction matter. The upstream project supports broader song
-creation, but **Midom's current Bridge route deliberately accepts instrumentals
+creation, but **this older, smaller Bridge route deliberately accepts instrumentals
 only**. [ACE-Step project documentation](https://github.com/ace-step/ACE-Step-1.5)
 
 You describe the music in the caption. Where offered, you can also specify
@@ -308,10 +353,11 @@ Gentle guitar, soft piano and restrained percussion. Steady moderate groove,
 an optimistic mood, and plenty of space beneath a narrator. No vocals.
 ```
 
-**Do not use this route for personalized sung lyrics yet.** The Bridge fixes
+**Do not use this older route for personalized sung lyrics.** The Bridge fixes
 its lyrics input to an instrumental marker. Upstream lyric entry, cover
-generation, supplied-audio editing, voice cloning and other ACE-Step presets
-are not exposed by this integration. A language control does not enable
+generation, supplied-audio editing and voice cloning
+are not exposed by this route. Use the separate XL song selection for lyrics.
+A language control does not enable
 singing in an instrumental-only route.
 
 Listen for unwanted vocal-like sounds, unstable musical structure, abrupt
