@@ -14,6 +14,31 @@ Although it may be technically possible to inspect its behavior or construct req
 
 Midom, this Bridge plugin, its job and capability contracts, and WanGP itself evolve quickly. The Bridge is developed against current Midom workflows and the current WanGP release; implementation details, schemas, curated recipes, local settings mappings, and supported operations may change without preserving compatibility for external callers. Do not build production software that depends on direct Bridge invocation. Use Midom as the supported product interface and keep Midom, WanGP, and the plugin current as a coordinated installation.
 
+## Release 0.8.14
+
+- Fixes ACE XL's native-text integrity check for WanGP's template preprocessing
+  of lyrics. Ordinary blank section separators and line indentation no longer
+  cause `ACE XL native text changed before execution` solely because WanGP
+  removes those separators or trims line edges before FG parsing.
+- Uses the selected model's actual template/empty-line flags and native parser;
+  unexpected word changes or description substitutions still fail. Original
+  and effective text hashes remain distinct, and token/safety checks are unchanged.
+- Rejects native template macro lines explicitly, rather than letting them
+  silently consume lyrics. Genuine mismatches report field names, hashes and
+  byte counts without logging lyric or description text.
+- The `music_song_v1` contract, recipe, safety profile and capability payload
+  are unchanged. No Midom request or capability-normalizer change is required.
+- Public-checkout verification: **1,782 passed, six skipped**, plus four
+  pinned native-tokenizer CPU vectors. Ten added regressions cover native
+  template formatting, meaningful text changes and safe mismatch diagnostics.
+  The operator subsequently confirmed that the corrected plugin resolved the
+  reported Staging failure; this is not a broader GPU quality benchmark.
+
+Copy `plugin.py` and `plugin_info.json` together, preserve the pairing
+configuration and existing `overlay_processing.py`, restart WanGP and refresh
+capabilities. The panel should show **0.8.14**. Retry the same lyrics as a new
+authorized Midom job; failed historical jobs are not rewritten or rerun.
+
 ## Release 0.8.13
 
 - Adds `ace_step_v1_5_xl_music` under the explicit `music_song_v1` contract:

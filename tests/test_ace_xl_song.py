@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -42,15 +43,32 @@ def song_bridge(bridge, monkeypatch):
     module, plugin = bridge
     plugin._ffprobe_binary = lambda: shutil.which("ffprobe")
     plugin._ffmpeg_binary = lambda: shutil.which("ffmpeg")
-    # Load WanGP's actual FG parser without importing its UI/runtime dependencies.
+    # Execute native parsing and validation statements without loading the GPU/UI.
     parser_path = ROOT / "shared/utils/prompt_parser.py"
     if not parser_path.is_file() or not (ROOT / "wgp.py").is_file():
         pytest.skip("ACE XL native integration checks require WAN2GP_ROOT or installation under Wan2GP/plugins")
     tree = ast.parse(parser_path.read_text())
-    node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "split_prompt_units")
-    namespace = {"ENHANCED_PROMPT_PREFIX": "!enhanced!\n"}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(parser_path), "exec"), namespace)
-    monkeypatch.setitem(sys.modules, "shared.utils.prompt_parser", types.SimpleNamespace(split_prompt_units=namespace["split_prompt_units"]))
+    namespace = {"ENHANCED_PROMPT_PREFIX": "!enhanced!\n", "PROMPT_UNIT_PREFIX": "#!PROMPT!:", "re": re}
+    definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in {
+        "split_prompt_units", "process_template", "process_current_template", "is_speaker_options_line"}]
+    definitions += [node for node in tree.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "SPEAKER_OPTIONS_LINE_RE" for target in node.targets)]
+    exec(compile(ast.Module(body=definitions, type_ignores=[]), str(parser_path), "exec"), namespace)
+    parser = types.SimpleNamespace(**{key: value for key, value in namespace.items() if not key.startswith("__")})
+    validation = next(node for node in ast.parse((ROOT / "wgp.py").read_text()).body
+                      if isinstance(node, ast.FunctionDef) and node.name == "validate_settings")
+    start = next(index for index, node in enumerate(validation.body) if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == "multi_prompts_gen_type" for target in node.targets))
+    end = next(index for index, node in enumerate(validation.body[start:], start) if isinstance(node, ast.Assign)
+               and any(isinstance(target, ast.Name) and target.id == "prompts" for target in node.targets))
+    wrapper = ast.parse("def validate_prompt(inputs, model_def):\n    pass").body[0]
+    wrapper.body = validation.body[start:end + 1] + [ast.Return(value=ast.Name(id="prompt", ctx=ast.Load()))]
+    def err(message):
+        raise ValueError(message)
+    native_namespace = {"prompt_parser": parser, "err": err}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[wrapper], type_ignores=[])), "native_prompt_validation", "exec"), native_namespace)
+    parser._test_validate_prompt = native_namespace["validate_prompt"]
+    monkeypatch.setitem(sys.modules, "shared.utils.prompt_parser", parser)
     return module, plugin
 
 
@@ -112,18 +130,21 @@ class Session:
         self.result = None
         self.config = {"audio_stand_alone_output_codec": codec}
         self.after_generate = lambda: None
+        self.conditioning_transform = lambda prompt, description: (prompt, description)
 
         def call(model_def, label, fn, *args, **kwargs):
             return fn(*args, **kwargs)
 
         def generate_media(task, *, client_id, model_type, prompt, alt_prompt, **kwargs):
-            from shared.utils.prompt_parser import split_prompt_units
+            from shared.utils.prompt_parser import split_prompt_units, _test_validate_prompt
+            prompt = _test_validate_prompt({"prompt": prompt, "multi_prompts_gen_type": "FG"}, self.definition)
             kwargs["sampling_steps"] = kwargs.pop("num_inference_steps")
             kwargs["shift"] = kwargs.pop("flow_shift")
             kwargs["guide_scale"] = kwargs.pop("guidance_scale")
             kwargs["alt_guide_scale"] = kwargs.pop("alt_guidance_scale")
+            prompt, alt_prompt = self.conditioning_transform(split_prompt_units(prompt, "FG")[0], split_prompt_units(alt_prompt, "FG")[0])
             self.module.call_with_default_device(self.definition, model_type, self.pipeline.generate,
-                                                 input_prompt=split_prompt_units(prompt, "FG")[0], alt_prompt=split_prompt_units(alt_prompt, "FG")[0], **kwargs)
+                                                 input_prompt=prompt, alt_prompt=alt_prompt, **kwargs)
             self.after_generate()
             return True
 
@@ -595,3 +616,64 @@ def test_song_stage_does_not_swallow_authorization_failure(progress):
     reporter.flush_due()
     with pytest.raises(Exception):
         f.plugin._ace_xl_song_progress("uploading", "Must not upload", 95)
+
+
+@pytest.mark.parametrize("flags,expected", [
+    ({}, "[Verse]\nMorning lights in Denver glow\n[Chorus]\nBlake is ready, here we go"),
+    ({"preserve_empty_prompt_lines": True}, "[Verse]\nMorning lights in Denver glow\n\n[Chorus]\nBlake is ready, here we go"),
+    ({"skip_prompt_template": True}, "[Verse]\n  Morning lights in Denver glow\n\n [Chorus]\n  Blake is ready, here we go"),
+])
+def test_native_template_formatting_of_sectioned_lyrics(song_bridge, monkeypatch, tmp_path, flags, expected):
+    module, plugin = song_bridge
+    job = song_job()
+    job["lyrics"] = "  [Verse]  \r\n  Morning lights in Denver glow  \r\n\r\n [Chorus] \r\n  Blake is ready, here we go  \r\n"
+    session, uploads, update = run_song(plugin, module, monkeypatch, tmp_path, job=job,
+                                       modify=lambda session: session.definition.update(flags))
+    assert update[0] == "complete", update
+    assert uploads and session.pipeline.encoded[1][0] == "assembled lyrics: " + expected
+    song = update[1]["generation_metadata"]["music_song"]
+    assert song["original_lyrics_sha256"] == hashlib.sha256(job["lyrics"].encode()).hexdigest()
+    assert song["effective_lyrics_sha256"] == hashlib.sha256(expected.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("field", ["lyrics", "music_description", "lyrics_internal_space", "description_type"])
+def test_native_content_changes_still_fail_with_private_diagnostics(song_bridge, monkeypatch, tmp_path, field):
+    module, plugin = song_bridge
+    logs = []
+    plugin._log = lambda message, **kwargs: logs.append(message)
+    def modify(session):
+        if field == "lyrics":
+            session.conditioning_transform = lambda prompt, description: (prompt + " SECRET_ADDED_WORDS", description)
+        elif field == "music_description":
+            session.conditioning_transform = lambda prompt, description: (prompt, "SECRET_CHANGED_DESCRIPTION")
+        elif field == "lyrics_internal_space":
+            session.conditioning_transform = lambda prompt, description: (prompt.replace("Morning lights", "Morning  lights"), description)
+        else:
+            session.conditioning_transform = lambda prompt, description: (prompt, None)
+    session, uploads, update = run_song(plugin, module, monkeypatch, tmp_path, modify=modify)
+    assert update[0] == "fail" and "native text changed" in update[1]["message"], update
+    expected_field = "lyrics" if field.startswith("lyrics") else "music_description"
+    assert expected_field in update[1]["message"]
+    assert not uploads and not session.pipeline.encoded
+    diagnostics = next(line for line in logs if line.startswith("ACE XL native text mismatch;"))
+    assert '"field": "' + expected_field + '"' in diagnostics
+    assert "sha256" in diagnostics and "utf8_bytes" in diagnostics
+    assert "SECRET_ADDED_WORDS" not in diagnostics and "SECRET_CHANGED_DESCRIPTION" not in diagnostics
+
+
+@pytest.mark.parametrize("lyrics", ['!{name}="Blake"\n{name} is ready', "[Verse]\n!silently removed words"])
+def test_native_template_commands_rejected_before_submission(song_bridge, lyrics):
+    _, plugin = song_bridge
+    job = song_job()
+    job["lyrics"] = lyrics
+    with pytest.raises(ValueError, match="template macros"):
+        plugin._validate_job(job, None)
+
+
+def test_native_preprocessor_cannot_authorize_content_rewriting(song_bridge, monkeypatch):
+    _, plugin = song_bridge
+    parser = sys.modules["shared.utils.prompt_parser"]
+    monkeypatch.setattr(parser, "process_template", lambda text, **kwargs: ("Unexpected replacement words", ""))
+    settings = plugin._validate_audio_job(song_job(), 2501)
+    with pytest.raises(ValueError, match="would change lyric content"):
+        plugin._ace_xl_song_native_text(settings, {})

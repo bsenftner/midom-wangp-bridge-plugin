@@ -8009,6 +8009,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
         if (any(line.lstrip().startswith("#") for line in value.splitlines())
                 or "!enhanced!" in value or "[/" in value or "<|" in value or "\x00" in value):
             raise ValueError(f"ACE XL {name} contains reserved native prompt syntax.")
+        if name == "lyrics" and any(line.lstrip().startswith("!") for line in value.splitlines()):
+            raise ValueError("ACE XL lyrics contain unsupported native template macros.")
         return value
 
     def _validate_ace_xl_song_job(self, job, job_id):
@@ -20301,13 +20303,39 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             namespace["build_drama3_prompt"] = observe_prompt
             yield
 
+    @staticmethod
+    def _ace_xl_song_native_text(settings, model_def):
+        from shared.utils.prompt_parser import process_template, split_prompt_units
+
+        lyrics = settings["prompt"]
+        if not model_def.get("skip_prompt_template", False):
+            processed, error = process_template(
+                lyrics, keep_comments=False,
+                keep_empty_lines=model_def.get("preserve_empty_prompt_lines", False),
+            )
+            if error:
+                raise ValueError("ACE XL lyrics are incompatible with native template processing.")
+
+            def content_lines(text):
+                normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+                return [line.strip() for line in normalized.split("\n") if line.strip()]
+
+            # Native validation trims line edges and may remove blank separators,
+            # but must never expand templates or discard actual lyric content.
+            if content_lines(processed) != content_lines(lyrics):
+                raise ValueError("ACE XL native template processing would change lyric content.")
+            lyrics = processed
+        expected = split_prompt_units(lyrics, "FG")
+        description = split_prompt_units(settings["alt_prompt"], "FG")
+        if len(expected) != 1 or len(description) != 1:
+            raise ValueError("ACE XL native text must remain one lyrics/description pair.")
+        return {"lyrics": expected[0], "music_description": description[0]}
+
     @contextmanager
     def _ace_xl_song_execution(self, api_session, settings):
         if settings.get("model_type") != ACE_XL_NATIVE_PRESET:
             yield
             return
-        from shared.utils.prompt_parser import split_prompt_units
-
         module = api_session._ensure_runtime().module
         original_generate, original_call = module.generate_media, module.call_with_default_device
         signature, local = inspect.signature(original_generate), threading.local()
@@ -20331,10 +20359,21 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             metadata["observed_native_calls"] += 1
             if metadata["observed_native_calls"] != 1:
                 raise ValueError("ACE XL requires exactly one native call.")
-            expected = split_prompt_units(settings["prompt"], "FG")
-            description = split_prompt_units(settings["alt_prompt"], "FG")
-            if len(expected) != 1 or len(description) != 1 or kwargs.get("input_prompt") != expected[0] or kwargs.get("alt_prompt") != description[0]:
-                raise ValueError("ACE XL native text changed before execution.")
+            expected = self._ace_xl_song_native_text(settings, model_def)
+            observed = {"lyrics": kwargs.get("input_prompt"), "music_description": kwargs.get("alt_prompt")}
+            mismatches = []
+            for field, text in expected.items():
+                actual = observed[field]
+                if actual != text:
+                    mismatches.append({
+                        "field": field, "expected_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        "expected_utf8_bytes": len(text.encode("utf-8")), "actual_type": type(actual).__name__,
+                        "actual_sha256": hashlib.sha256(actual.encode("utf-8")).hexdigest() if isinstance(actual, str) else None,
+                        "actual_utf8_bytes": len(actual.encode("utf-8")) if isinstance(actual, str) else None,
+                    })
+            if mismatches:
+                self._log(f"ACE XL native text mismatch; job_id={settings['_midom_job_id']} diagnostics=" + json.dumps(mismatches, sort_keys=True), force=True)
+                raise ValueError("ACE XL native text changed before execution: " + ", ".join(item["field"] for item in mismatches) + " mismatch.")
             if (kwargs.get("model_mode") != 0 or kwargs.get("custom_settings") != settings["custom_settings"]
                     or kwargs.get("sampling_steps") != 8 or kwargs.get("audio_guide")
                     or kwargs.get("audio_prompt_type")):
@@ -20346,8 +20385,8 @@ class AwsWorkerBridgePlugin(WAN2GPPlugin):
             }
             if any(kwargs.get(key) != value for key, value in recipe.items()):
                 raise ValueError("ACE XL native recipe/seed/duration changed before execution.")
-            metadata["effective_lyrics_sha256"] = hashlib.sha256(expected[0].encode("utf-8")).hexdigest()
-            metadata["effective_music_description_sha256"] = hashlib.sha256(description[0].encode("utf-8")).hexdigest()
+            metadata["effective_lyrics_sha256"] = hashlib.sha256(expected["lyrics"].encode("utf-8")).hexdigest()
+            metadata["effective_music_description_sha256"] = hashlib.sha256(expected["music_description"].encode("utf-8")).hexdigest()
             tokenizer = pipeline.pre_text_tokenizer
             backend = getattr(tokenizer, "backend_tokenizer", None)
             if not callable(getattr(backend, "to_str", None)):
